@@ -8,23 +8,74 @@
 # https://opensource.org/licenses/MIT.
 from __future__ import annotations
 
+from typing import Protocol
+
 import numpy as np
 import quaternion as qt
 
-from tbp.monty.cmp import AttentionRegion
 from tbp.monty.frameworks.models.abstract_monty_classes import SensorObservation
 from tbp.monty.memento import Memento
 
-__all__ = ["SalienceSMTelemetry"]
+__all__ = [
+    "NoopSalienceSMTelemetry",
+    "SalienceSMTelemetry",
+    "SalienceSMTelemetryProtocol",
+]
 
 
-class SalienceSMTelemetry:
+class SalienceSMTelemetryProtocol(Protocol):
+    def reset(self) -> None: ...
+
+    def raw_observation(
+        self,
+        raw_observation: SensorObservation,
+        rotation: qt.quaternion,
+        position: np.ndarray,
+    ) -> None: ...
+
+    def salience_map(self, salience_map: np.ndarray) -> None: ...
+
+    def segmentation_map(self, segmentation_map: np.ndarray | None) -> None: ...
+
+    def state_dict(self) -> Memento: ...
+
+
+class NoopSalienceSMTelemetry(SalienceSMTelemetryProtocol):
+    def reset(self) -> None:
+        pass
+
+    def raw_observation(
+        self,
+        raw_observation: SensorObservation,
+        rotation: qt.quaternion,
+        position: np.ndarray,
+    ) -> None:
+        pass
+
+    def salience_map(self, salience_map: np.ndarray) -> None:
+        pass
+
+    def segmentation_map(self, segmentation_map: np.ndarray | None) -> None:
+        pass
+
+    def state_dict(self) -> Memento:
+        # The empty schema, so consumers indexing these keys stay simple.
+        return dict(
+            raw_observations=[],
+            sm_properties=[],
+            salience_maps=[],
+            segmentation_maps=[],
+        )
+
+
+class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
     """Keeps track of all of SalienceSM's telemetry.
 
     Records per step: raw observation snapshots with their poses, the 2D
-    salience map, and the 2D segmentation mask with the region proposed from
-    it. Whether anything is recorded at all is the sensor module's decision
-    (its `save_raw_obs` switch).
+    salience map, and the 2D segmentation mask. The region proposed from the
+    mask is not recorded here; the attention system logs every module's
+    proposal. Whether anything is recorded at all is the sensor module's
+    decision (its `save_raw_obs` switch).
     Everything stored here is JSON-encodable by BufferEncoder, so the state
     dict rides into the detailed logging stream with no special handling.
     """
@@ -34,7 +85,6 @@ class SalienceSMTelemetry:
         self.poses: list[dict[str, np.ndarray]] = []
         self.salience_maps: list[np.ndarray] = []
         self.segmentation_maps: list[np.ndarray | None] = []
-        self.regions: list[AttentionRegion] = []
 
     def reset(self) -> None:
         """Reset the telemetry."""
@@ -42,7 +92,6 @@ class SalienceSMTelemetry:
         self.poses = []
         self.salience_maps = []
         self.segmentation_maps = []
-        self.regions = []
 
     def raw_observation(
         self,
@@ -65,7 +114,7 @@ class SalienceSMTelemetry:
             )
         )
 
-    def salience(self, salience_map: np.ndarray) -> None:
+    def salience_map(self, salience_map: np.ndarray) -> None:
         """Record one step's salience map.
 
         Args:
@@ -73,21 +122,14 @@ class SalienceSMTelemetry:
         """
         self.salience_maps.append(salience_map)
 
-    def segmentation(
-        self,
-        segmentation_map: np.ndarray | None,
-        region: AttentionRegion,
-    ) -> None:
-        """Record one step's segmentation mask and region proposal.
+    def segmentation_map(self, segmentation_map: np.ndarray | None) -> None:
+        """Record one step's segmentation mask.
 
         Args:
             segmentation_map: The 2D segmentation mask, or None if no
                 segmentation strategy ran this step.
-            region: The region proposed from the segmentation.
         """
         self.segmentation_maps.append(segmentation_map)
-        # Regions are immutable, so the reference is the record.
-        self.regions.append(region)
 
     def state_dict(self) -> Memento:
         """Return all recorded telemetry.
@@ -99,12 +141,11 @@ class SalienceSMTelemetry:
         Returns:
             Raw observations in `raw_observations` with poses in
             `sm_properties`, salience maps in `salience_maps`, and segmentation
-            masks in `segmentation_maps` with proposed regions in `regions`.
+            masks in `segmentation_maps`.
         """
         return dict(
             raw_observations=self.raw_observations,
             sm_properties=self.poses,
             salience_maps=self.salience_maps,
             segmentation_maps=self.segmentation_maps,
-            regions=self.regions,
         )

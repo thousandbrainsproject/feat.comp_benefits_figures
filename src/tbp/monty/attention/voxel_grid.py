@@ -144,6 +144,10 @@ class VoxelGrid:
         """The names of the features (columns) in the grid."""
         return tuple(self._data.columns)
 
+    def copy(self) -> VoxelGrid:
+        """Return a (deep) copy of the voxel grid."""
+        return VoxelGrid(self._voxel_size, self._data.copy())
+
     def to_pandas(self) -> pd.DataFrame:
         """Return the backing frame, not a copy.
 

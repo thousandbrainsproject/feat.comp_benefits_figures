@@ -30,7 +30,11 @@ from tbp.monty.frameworks.models.salience.strategies import (
     SalienceStrategy,
     Uniform,
 )
-from tbp.monty.frameworks.models.salience.telemetry import SalienceSMTelemetry
+from tbp.monty.frameworks.models.salience.telemetry import (
+    NoopSalienceSMTelemetry,
+    SalienceSMTelemetry,
+    SalienceSMTelemetryProtocol,
+)
 from tbp.monty.frameworks.sensors import SensorID
 from tbp.monty.memento import Memento
 
@@ -44,7 +48,7 @@ class SalienceSM(SensorModule):
         save_raw_obs: bool = False,
         salience_strategy: SalienceStrategy | None = None,
         return_inhibitor: ReturnInhibitor | None = None,
-        snapshot_telemetry: SalienceSMTelemetry | None = None,
+        snapshot_telemetry: SalienceSMTelemetryProtocol | None = None,
         segmentation_strategy: SegmentationStrategy | None = None,
     ) -> None:
         self._sensor_module_id = sensor_module_id
@@ -62,9 +66,19 @@ class SalienceSM(SensorModule):
 
         self._goals: list[Goal] = []
         self._region = AttentionRegion.empty(self._sensor_module_id)
+
         # TODO: Goes away once experiment code is extracted
         self.is_exploring = False
-        self._save_raw_obs = save_raw_obs
+
+        # An explicit telemetry wins; otherwise save_raw_obs picks between
+        # recording everything and recording nothing.
+        if snapshot_telemetry is None:
+            if save_raw_obs:
+                self._snapshot_telemetry = SalienceSMTelemetry()
+            else:
+                self._snapshot_telemetry = NoopSalienceSMTelemetry()
+        else:
+            self._snapshot_telemetry = snapshot_telemetry
 
     @property
     def sensor_module_id(self) -> str:
@@ -146,12 +160,12 @@ class SalienceSM(SensorModule):
             ctx, observation, on_object
         )
 
-        if self._save_raw_obs and not self.is_exploring:
+        if not self.is_exploring:
             self._snapshot_telemetry.raw_observation(
                 observation, self.state.rotation, self.state.position
             )
-            self._snapshot_telemetry.salience(salience_map)
-            self._snapshot_telemetry.segmentation(segmentation_map, self._region)
+            self._snapshot_telemetry.salience_map(salience_map)
+            self._snapshot_telemetry.segmentation_map(segmentation_map)
 
     def _segment_region(
         self,

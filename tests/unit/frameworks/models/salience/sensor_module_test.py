@@ -264,7 +264,7 @@ class SalienceSMRegionTest(unittest.TestCase):
 
 
 class SalienceSMTelemetryRecordingTest(unittest.TestCase):
-    """Segmentation masks and regions are stashed when telemetry is supplied."""
+    """Segmentation masks are stashed when telemetry is supplied."""
 
     def setUp(self) -> None:
         # The same 2x2 mocked pipeline as SalienceSMRegionTest, with telemetry.
@@ -313,13 +313,12 @@ class SalienceSMTelemetryRecordingTest(unittest.TestCase):
         ):
             self.sensor_module.step(self.ctx, self.observation)
 
-    def test_step_records_the_segmentation_mask_and_region(self) -> None:
+    def test_step_records_the_segmentation_mask(self) -> None:
         self.step()
         state = self.telemetry.state_dict()
         np.testing.assert_array_equal(
             state["segmentation_maps"][0], self.segmentation_map
         )
-        self.assertEqual(state["regions"][0], self.sensor_module.propose_region())
 
     def test_step_does_not_record_while_exploring(self) -> None:
         self.sensor_module.is_exploring = True
@@ -331,7 +330,6 @@ class SalienceSMTelemetryRecordingTest(unittest.TestCase):
         self.step()
         state = self.telemetry.state_dict()
         self.assertIsNone(state["segmentation_maps"][0])
-        self.assertEqual(len(state["regions"][0]), 0)
 
     def test_state_dict_holds_snapshot_and_segmentation_telemetry(self) -> None:
         self.step()
@@ -342,17 +340,25 @@ class SalienceSMTelemetryRecordingTest(unittest.TestCase):
                 "raw_observations",
                 "sm_properties",
                 "segmentation_maps",
-                "regions",
                 "salience_maps",
             },
         )
 
     def test_recording_is_off_unless_save_raw_obs_is_set(self) -> None:
-        self.sensor_module._save_raw_obs = False
+        self.sensor_module = SalienceSM(
+            sensor_module_id="test",
+            save_raw_obs=False,
+            salience_strategy=MagicMock(return_value=sentinel.salience_map),
+            return_inhibitor=MagicMock(return_value=sentinel.ior_weights),
+            segmentation_strategy=MagicMock(return_value=self.segmentation_map),
+        )
+        self.sensor_module._weight_salience = MagicMock(  # type: ignore[method-assign]
+            return_value=self.weighted_salience
+        )
         self.step()
         state = self.sensor_module.state_dict()
         self.assertEqual(state["segmentation_maps"], [])
-        self.assertEqual(state["regions"], [])
+        self.assertEqual(state["raw_observations"], [])
 
     def test_reset_discards_the_recordings(self) -> None:
         self.step()

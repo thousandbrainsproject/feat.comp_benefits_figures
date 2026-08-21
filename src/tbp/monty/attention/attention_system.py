@@ -129,7 +129,9 @@ class AttentionSystem(AttentionSystemProtocol):
         Returns:
             Filtered list of goals.
         """
+        self._telemetry.regions(regions)
         proposed: VoxelGrid = self.voxelize_attention_regions(regions)
+        self._telemetry.proposed(proposed)
         # Decay what is already held before folding in what was just proposed,
         # so that a re-proposed voxel's fresh row lands on top of the tick
         # rather than after it.
@@ -139,7 +141,7 @@ class AttentionSystem(AttentionSystemProtocol):
         self._telemetry.voxel_grid(self._voxel_grid)
 
         filtered_goals = self.filter_goals(goals)
-        self._telemetry.goal_filtering(goals, filtered_goals)
+        self._telemetry.goals(goals)
         return filtered_goals
 
     def reset(self) -> None:
@@ -205,6 +207,10 @@ class AttentionSystem(AttentionSystemProtocol):
     def filter_goals(self, goals: Sequence[Goal]) -> list[Goal]:
         """Filter the goals against the updated grid.
 
+        Every input goal is stamped with ``info["passed_attention_filter"]``
+        so one logged goal list carries the filter's decision; a goal without
+        that key never passed through an attention system.
+
         Args:
             goals: The goals collected from all modules this step.
 
@@ -212,7 +218,12 @@ class AttentionSystem(AttentionSystemProtocol):
             The goals the configured goal filter kept.
 
         """
-        return self._goal_filter(self._voxel_grid, goals)
+        for g in goals:
+            g.info["passed_attention_filter"] = False
+        filtered = self._goal_filter(self._voxel_grid, goals)
+        for g in filtered:
+            g.info["passed_attention_filter"] = True
+        return filtered
 
 
 # --------------------------------------------------------------------------------------
