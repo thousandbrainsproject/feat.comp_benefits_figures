@@ -17,7 +17,7 @@ import pytest
 import quaternion as qt
 from parameterized import parameterized_class
 
-from tbp.monty.cmp import MAX_ATTENTION_WEIGHT, AttentionWeight, Goal
+from tbp.monty.cmp import MAX_ATTENTION_WEIGHT, AttentionRegion, Goal
 from tbp.monty.context import RuntimeContext
 from tbp.monty.frameworks.models.abstract_monty_classes import SensorObservation
 from tbp.monty.frameworks.models.motor_system_state import AgentState, SensorState
@@ -223,17 +223,26 @@ class SalienceSMRegionTest(unittest.TestCase):
     def test_region_is_the_on_object_part_of_the_segmented_surface(self) -> None:
         self.step()
         region = self.sensor_module.propose_region()
-        locations = [g.location.tolist() for g in region]
         # (1, 0) is segmented but off-object; (0, 1) is on-object but outside
         # the segmentation.
-        self.assertEqual(locations, [[0.0, 0.0, 1.0], [1.0, 1.0, 1.0]])
+        self.assertIsInstance(region, AttentionRegion)
+        np.testing.assert_array_equal(
+            region.locations, [[0.0, 0.0, 1.0], [1.0, 1.0, 1.0]]
+        )
 
-    def test_region_entries_are_attention_weights(self) -> None:
+    def test_region_is_proposed_at_the_maximum_weight(self) -> None:
         self.step()
         region = self.sensor_module.propose_region()
-        for aw in region:
-            self.assertIsInstance(aw, AttentionWeight)
-        self.assertEqual([aw.weight for aw in region], [MAX_ATTENTION_WEIGHT] * 2)
+        np.testing.assert_array_equal(region.weights, [MAX_ATTENTION_WEIGHT] * 2)
+
+    def test_region_names_this_sensor_module_as_sender(self) -> None:
+        self.step()
+        self.assertEqual(self.sensor_module.propose_region().sender_id, "test")
+
+    def test_an_empty_region_still_names_this_sensor_module_as_sender(self) -> None:
+        self.sensor_module._segmentation_strategy = None
+        self.step()
+        self.assertEqual(self.sensor_module.propose_region().sender_id, "test")
 
     def test_segmentation_strategy_receives_the_observation(self) -> None:
         self.step()
@@ -246,12 +255,12 @@ class SalienceSMRegionTest(unittest.TestCase):
     def test_without_a_segmentation_strategy_the_region_is_empty(self) -> None:
         self.sensor_module._segmentation_strategy = None
         self.step()
-        self.assertEqual(self.sensor_module.propose_region(), [])
+        self.assertEqual(len(self.sensor_module.propose_region()), 0)
 
     def test_reset_clears_the_region(self) -> None:
         self.step()
         self.sensor_module.reset()
-        self.assertEqual(self.sensor_module.propose_region(), [])
+        self.assertEqual(len(self.sensor_module.propose_region()), 0)
 
 
 class SalienceSMTelemetryRecordingTest(unittest.TestCase):
@@ -322,7 +331,7 @@ class SalienceSMTelemetryRecordingTest(unittest.TestCase):
         self.step()
         state = self.telemetry.state_dict()
         self.assertIsNone(state["segmentation_maps"][0])
-        self.assertEqual(state["regions"][0], [])
+        self.assertEqual(len(state["regions"][0]), 0)
 
     def test_state_dict_holds_snapshot_and_segmentation_telemetry(self) -> None:
         self.step()

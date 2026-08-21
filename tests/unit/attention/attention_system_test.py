@@ -21,7 +21,7 @@ from tbp.monty.attention.attention_system import (
     negative_priority_max_pool,
 )
 from tbp.monty.attention.decay import LinearDecay
-from tbp.monty.cmp import MAX_ATTENTION_WEIGHT, AttentionWeight, Goal
+from tbp.monty.cmp import MAX_ATTENTION_WEIGHT, AttentionRegion, Goal
 
 # The voxel coordinates are the source of truth; the test points below are
 # constructed inside them, so the point/voxel correspondence holds by
@@ -68,27 +68,24 @@ def goal_at(location) -> Goal:
     )
 
 
-def weight_at(location, weight: float = MAX_ATTENTION_WEIGHT) -> AttentionWeight:
-    """Build an attention weight at the given location.
+def region(*locations, weight: float = MAX_ATTENTION_WEIGHT) -> AttentionRegion:
+    """Build a region giving every location the same weight.
 
     Returns:
-        An attention weight at the location carrying the given weight.
+        The region.
 
     """
-    return AttentionWeight(
-        location=np.asarray(location, dtype=float),
-        weight=weight,
-    )
+    return AttentionRegion.uniform(np.asarray(locations, dtype=float), weight)
 
 
-def region(*locations, weight: float = MAX_ATTENTION_WEIGHT) -> list[AttentionWeight]:
-    """Build a region from the given locations.
+def weighted_region(locations, weights) -> AttentionRegion:
+    """Build a region with one weight per location.
 
     Returns:
-        One region: a list with one attention weight per location.
+        The region.
 
     """
-    return [weight_at(location, weight=weight) for location in locations]
+    return AttentionRegion(np.asarray(locations, dtype=float), np.asarray(weights))
 
 
 def weights_by_voxel(system: AttentionSystem) -> dict[tuple[int, int, int], float]:
@@ -116,7 +113,7 @@ class AttentionSystemGridTest(unittest.TestCase):
         self.assertEqual(len(self.system.voxel_grid), 0)
 
     def test_empty_regions_yield_an_empty_grid(self) -> None:
-        self.system.step([], [[], []])
+        self.system.step([], [AttentionRegion.empty(), AttentionRegion.empty()])
         self.assertEqual(len(self.system.voxel_grid), 0)
 
     def test_a_step_adds_to_the_grid_rather_than_replacing_it(self) -> None:
@@ -153,18 +150,12 @@ class AttentionSystemWeightTest(unittest.TestCase):
         self.assertEqual(weights_by_voxel(self.system)[NEAR_VOXEL], 3)
 
     def test_a_shared_voxel_takes_the_max_of_its_proposed_weights(self) -> None:
-        proposals = [
-            weight_at(NEAR_POINTS[0], weight=2),
-            weight_at(NEAR_POINTS[1], weight=4),
-        ]
+        proposals = weighted_region(NEAR_POINTS, weights=[2, 4])
         self.system.step([], [proposals])
         self.assertEqual(weights_by_voxel(self.system)[NEAR_VOXEL], 4)
 
     def test_a_negative_weight_dominates_a_shared_voxel(self) -> None:
-        proposals = [
-            weight_at(NEAR_POINTS[0], weight=4),
-            weight_at(NEAR_POINTS[1], weight=-2),
-        ]
+        proposals = weighted_region(NEAR_POINTS, weights=[4, -2])
         self.system.step([], [proposals])
         self.assertEqual(weights_by_voxel(self.system)[NEAR_VOXEL], -2)
 
@@ -331,10 +322,7 @@ class AttentionSystemPipelineTest(unittest.TestCase):
 
     def test_a_custom_pooler_is_used(self) -> None:
         system = AttentionSystem(pool_weights=sum)
-        proposals = [
-            weight_at(NEAR_POINTS[0], weight=2),
-            weight_at(NEAR_POINTS[1], weight=3),
-        ]
+        proposals = weighted_region(NEAR_POINTS, weights=[2, 3])
         system.step([], [proposals])
         self.assertEqual(weights_by_voxel(system)[NEAR_VOXEL], 5)
 

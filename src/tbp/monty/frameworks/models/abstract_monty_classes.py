@@ -15,7 +15,7 @@ from typing import Any, Collection, Dict, Protocol, Sequence, TypedDict
 import numpy as np
 import numpy.typing as npt
 
-from tbp.monty.cmp import AttentionWeight, Goal, Message
+from tbp.monty.cmp import AttentionRegion, Goal, Message
 from tbp.monty.context import RuntimeContext
 from tbp.monty.experiment.learning_module import ExperimentLearningModule
 from tbp.monty.experiment.monty import ExperimentMonty
@@ -448,8 +448,8 @@ class LearningModule(
     def load_state_dict(self, memento: Memento) -> None:
         pass
 
-    def propose_region(self) -> list[AttentionWeight]:
-        return []
+    def propose_region(self) -> AttentionRegion:
+        return AttentionRegion.empty()
 
 
 class LMMemory(Snapshotable, metaclass=abc.ABCMeta):
@@ -580,5 +580,5 @@ class SensorModule(RuntimeSensorModule, ExperimentSensorModule, metaclass=abc.AB
     def reset(self) -> None:
         pass
 
-    def propose_region(self) -> list[AttentionWeight]:
-        return []
+    def propose_region(self) -> AttentionRegion:
+        return AttentionRegion.empty()

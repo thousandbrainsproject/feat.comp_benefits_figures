@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Sequence
+from typing import Any, Iterable, Literal, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -398,14 +398,96 @@ def location_mean(messages: Sequence[Message]) -> npt.NDArray[np.float64] | None
     return np.mean(locations, axis=0)
 
 
-@dataclass
-class AttentionWeight:
-    """Attention weight assigning weight to a location.
+@dataclass(frozen=True)
+class AttentionRegion:
+    """A set of locations, each carrying an attention weight.
+
+    The unit a sensor or learning module proposes to the attention system
+    each step. Weights are bounded by ``MIN_ATTENTION_WEIGHT`` (full
+    inhibition) and ``MAX_ATTENTION_WEIGHT`` (full excitation).
 
     Attributes:
-        location: The location of the attention.
-        weight: The weight of the attention.
+        locations: (N, 3) body-frame locations.
+        weights: (N,) attention weight of each location.
+        sender_id: The id of the module that proposed the region (e.g.
+            ``"SM_3"`` or ``"learning_module_2"``); empty when the region has
+            no single sender, such as after merging several.
     """
 
-    location: npt.NDArray[np.float64]
-    weight: float
+    locations: npt.NDArray[np.float64]
+    weights: npt.NDArray[np.float64]
+    sender_id: str = ""
+
+    def __post_init__(self) -> None:
+        """Coerce the arrays and check they describe the same N locations.
+
+        Raises:
+            ValueError: If ``locations`` is not (N, 3) or ``weights`` is not
+                (N,) for the same N.
+        """
+        locations = np.asarray(self.locations, dtype=np.float64).reshape(-1, 3)
+        weights = np.asarray(self.weights, dtype=np.float64).reshape(-1)
+        if len(locations) != len(weights):
+            raise ValueError(
+                "locations and weights must describe the same number of points, "
+                f"got {len(locations)} locations and {len(weights)} weights."
+            )
+        # frozen: assign through the base class.
+        object.__setattr__(self, "locations", locations)
+        object.__setattr__(self, "weights", weights)
+
+    @classmethod
+    def empty(cls, sender_id: str = "") -> AttentionRegion:
+        """Return a region holding no locations.
+
+        Args:
+            sender_id: The id of the proposing module.
+
+        Returns:
+            The empty region.
+        """
+        return cls(np.empty((0, 3)), np.empty(0), sender_id)
+
+    @classmethod
+    def uniform(
+        cls, locations: npt.ArrayLike, weight: float, sender_id: str = ""
+    ) -> AttentionRegion:
+        """Return a region giving every location the same weight.
+
+        Args:
+            locations: (N, 3) body-frame locations.
+            weight: The attention weight shared by all of them.
+            sender_id: The id of the proposing module.
+
+        Returns:
+            The region.
+        """
+        locations = np.asarray(locations, dtype=np.float64).reshape(-1, 3)
+        return cls(locations, np.full(len(locations), weight), sender_id)
+
+    @classmethod
+    def concat(
+        cls, regions: Iterable[AttentionRegion], sender_id: str = ""
+    ) -> AttentionRegion:
+        """Join regions into one, keeping their order.
+
+        Args:
+            regions: The regions to join.
+            sender_id: The id to give the joined region; the inputs' own ids
+                are not carried over, since a merge has no single sender.
+
+        Returns:
+            One region holding every location of every input region.
+        """
+        regions = list(regions)
+        if not regions:
+            return cls.empty(sender_id)
+        return cls(
+            np.concatenate([region.locations for region in regions]),
+            np.concatenate([region.weights for region in regions]),
+            sender_id,
+        )
+
+    def __len__(self) -> int:
+        """Return the number of locations in the region."""
+        return len(self.weights)

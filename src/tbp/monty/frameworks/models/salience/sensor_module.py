@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import quaternion as qt
 
-from tbp.monty.cmp import MAX_ATTENTION_WEIGHT, AttentionWeight, Goal
+from tbp.monty.cmp import MAX_ATTENTION_WEIGHT, AttentionRegion, Goal
 from tbp.monty.context import RuntimeContext
 from tbp.monty.frameworks.models.abstract_monty_classes import (
     SensorModule,
@@ -61,7 +61,7 @@ class SalienceSM(SensorModule):
         self._segmentation_strategy = segmentation_strategy
 
         self._goals: list[Goal] = []
-        self._region: list[AttentionWeight] = []
+        self._region = AttentionRegion.empty(self._sensor_module_id)
         # TODO: Goes away once experiment code is extracted
         self.is_exploring = False
         self._save_raw_obs = save_raw_obs
@@ -72,7 +72,7 @@ class SalienceSM(SensorModule):
 
     def reset(self) -> None:
         self._goals.clear()
-        self._region.clear()
+        self._region = AttentionRegion.empty(self._sensor_module_id)
         self._return_inhibitor.reset()
         self._snapshot_telemetry.reset()
         self.is_exploring = False
@@ -92,7 +92,7 @@ class SalienceSM(SensorModule):
     def propose_goals(self) -> list[Goal]:
         return self._goals
 
-    def propose_region(self) -> list[AttentionWeight]:
+    def propose_region(self) -> AttentionRegion:
         return self._region
 
     def step(
@@ -158,7 +158,7 @@ class SalienceSM(SensorModule):
         ctx: RuntimeContext,
         observation: SensorObservation,
         on_object: OnObjectObservation,
-    ) -> tuple[np.ndarray | None, list[AttentionWeight]]:
+    ) -> tuple[np.ndarray | None, AttentionRegion]:
         """Segment the surface under fixation into a region proposal.
 
         The region is the set of on-object locations inside the segmented
@@ -171,11 +171,11 @@ class SalienceSM(SensorModule):
             on_object: The on-object view of the observation.
 
         Returns:
-            The segmentation mask and the region's attention weights; None and
-            an empty list without a segmentation strategy.
+            The segmentation mask and the region it proposes; None and an
+            empty region without a segmentation strategy.
         """
         if self._segmentation_strategy is None:
-            return None, []
+            return None, AttentionRegion.empty(self._sensor_module_id)
 
         segmentation_map = self._segmentation_strategy(
             ctx=ctx, rgba=observation["rgba"], depth=observation["depth"]
@@ -184,13 +184,9 @@ class SalienceSM(SensorModule):
         surface_mask = segmentation_map.astype(bool) & on_object.on_object_mask
         surface_locations = on_object.locations_map[surface_mask]
 
-        return segmentation_map, [
-            AttentionWeight(
-                location=surface_locations[i],
-                weight=MAX_ATTENTION_WEIGHT,
-            )
-            for i in range(len(surface_locations))
-        ]
+        return segmentation_map, AttentionRegion.uniform(
+            surface_locations, MAX_ATTENTION_WEIGHT, sender_id=self._sensor_module_id
+        )
 
     def _weight_salience(
         self,

@@ -26,7 +26,7 @@ from tbp.monty.attention.voxel_grid import (
     VoxelGrid,
     voxelize_and_bin_points,
 )
-from tbp.monty.cmp import AttentionWeight, Goal
+from tbp.monty.cmp import AttentionRegion, Goal
 from tbp.monty.memento import Memento
 
 # Voxels whose weight magnitude falls below this are expired from the grid.
@@ -35,7 +35,7 @@ WEIGHT_EXPIRATION_TOLERANCE = 1e-6
 
 class AttentionSystemProtocol(Protocol):
     def step(
-        self, goals: list[Goal], regions: list[list[AttentionWeight]]
+        self, goals: list[Goal], regions: Sequence[AttentionRegion]
     ) -> list[Goal]: ...
 
     def reset(self) -> None: ...
@@ -47,7 +47,7 @@ class NoopAttentionSystem(AttentionSystemProtocol):
     def step(
         self,
         goals: list[Goal],
-        regions: list[list[AttentionWeight]],  # noqa: ARG002
+        regions: Sequence[AttentionRegion],  # noqa: ARG002
     ) -> list[Goal]:
         return list(goals)
 
@@ -118,9 +118,7 @@ class AttentionSystem(AttentionSystemProtocol):
         """The persistent voxel grid."""
         return self._voxel_grid
 
-    def step(
-        self, goals: list[Goal], regions: list[list[AttentionWeight]]
-    ) -> list[Goal]:
+    def step(self, goals: list[Goal], regions: Sequence[AttentionRegion]) -> list[Goal]:
         """Update the attention system with new regions and filter goals.
 
         Args:
@@ -131,7 +129,7 @@ class AttentionSystem(AttentionSystemProtocol):
         Returns:
             Filtered list of goals.
         """
-        proposed: VoxelGrid = self.voxelize_attention_weights(regions)
+        proposed: VoxelGrid = self.voxelize_attention_regions(regions)
         # Decay what is already held before folding in what was just proposed,
         # so that a re-proposed voxel's fresh row lands on top of the tick
         # rather than after it.
@@ -157,28 +155,24 @@ class AttentionSystem(AttentionSystemProtocol):
             **self._telemetry.state_dict(),
         )
 
-    def voxelize_attention_weights(
-        self, regions: list[list[AttentionWeight]]
+    def voxelize_attention_regions(
+        self, regions: Sequence[AttentionRegion]
     ) -> VoxelGrid:
         """Voxelize this step's regions into a fresh grid.
 
         Args:
-            regions: A list of regions, where each region is a list of
-                attention weights.
+            regions: The regions proposed this step, one per module.
 
         Returns:
             The grid built from this step's regions alone.
 
         """
-        attention_weights = [aw for region in regions for aw in region]
-        if not attention_weights:
+        region = AttentionRegion.concat(regions)
+        if len(region) == 0:
             return VoxelGrid(self._voxel_size)
 
-        point_locations = np.array([aw.location for aw in attention_weights])
-        point_weights = np.array([aw.weight for aw in attention_weights])
-
         points = voxelize_and_bin_points(
-            point_locations, self._voxel_size, features={"weight": point_weights}
+            region.locations, self._voxel_size, features={"weight": region.weights}
         )
         # Pool the weights of the points sharing a voxel into that voxel's weight.
         voxel_weights = points.groupby("voxel")["weight"].agg(self._pool_weights)

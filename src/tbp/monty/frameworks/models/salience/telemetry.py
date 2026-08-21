@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import quaternion as qt
 
-from tbp.monty.cmp import AttentionWeight
+from tbp.monty.cmp import AttentionRegion
 from tbp.monty.frameworks.models.abstract_monty_classes import SensorObservation
 from tbp.monty.memento import Memento
 
@@ -34,7 +34,7 @@ class SalienceSMTelemetry:
         self.poses: list[dict[str, np.ndarray]] = []
         self.salience_maps: list[np.ndarray] = []
         self.segmentation_maps: list[np.ndarray | None] = []
-        self.regions: list[list[AttentionWeight]] = []
+        self.regions: list[AttentionRegion] = []
 
     def reset(self) -> None:
         """Reset the telemetry."""
@@ -76,7 +76,7 @@ class SalienceSMTelemetry:
     def segmentation(
         self,
         segmentation_map: np.ndarray | None,
-        region: list[AttentionWeight],
+        region: AttentionRegion,
     ) -> None:
         """Record one step's segmentation mask and region proposal.
 
@@ -86,7 +86,8 @@ class SalienceSMTelemetry:
             region: The region proposed from the segmentation.
         """
         self.segmentation_maps.append(segmentation_map)
-        self.regions.append(list(region))
+        # Regions are immutable, so the reference is the record.
+        self.regions.append(region)
 
     def state_dict(self) -> Memento:
         """Return all recorded telemetry.
