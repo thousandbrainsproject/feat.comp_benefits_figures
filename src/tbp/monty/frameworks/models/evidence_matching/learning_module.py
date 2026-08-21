@@ -19,7 +19,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy.spatial import KDTree
 
-from tbp.monty.cmp import Message, location_mean
+from tbp.monty.cmp import AttentionRegion, Message, location_mean
 from tbp.monty.context import RuntimeContext
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
 from tbp.monty.frameworks.models.evidence_matching.graph_memory import (
@@ -32,6 +32,12 @@ from tbp.monty.frameworks.models.evidence_matching.hypotheses_updater import (
     DefaultHypothesesUpdater,
     HypothesesUpdater,
     HypothesesUpdaterTelemetry,
+)
+from tbp.monty.frameworks.models.evidence_matching.region_proposal.context import (
+    EvidenceLMRegionContext,
+)
+from tbp.monty.frameworks.models.evidence_matching.region_proposal.protocol import (
+    RegionProposer,
 )
 from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
 from tbp.monty.frameworks.models.graph_matching import GraphLM
@@ -257,11 +263,15 @@ class EvidenceGraphLM(GraphLM):
         gsg: EvidenceGoalGenerator | None = None,
         hypotheses_updater_class: type[HypothesesUpdater] = DefaultHypothesesUpdater,
         hypotheses_updater_args: dict | None = None,
+        region_proposers: Sequence[RegionProposer] = (),
         *args,
         **kwargs,
     ) -> None:
         kwargs["initialize_base_modules"] = False
         super().__init__(*args, **kwargs)
+        # Strategies that turn this LM's recognition state into attention
+        # weights for the attention system; none by default.
+        self._region_proposers = tuple(region_proposers)
         # --- LM components ---
         self.graph_memory = EvidenceGraphMemory(
             graph_delta_thresholds=graph_delta_thresholds,
@@ -355,6 +365,21 @@ class EvidenceGraphLM(GraphLM):
     def reset_stm(self) -> None:
         super().reset_stm()
         self._init_EvidenceGraphLM()
+        for proposer in self._region_proposers:
+            proposer.reset()
+
+    def propose_region(self) -> AttentionRegion:
+        """Collect the regions this LM's region proposers emit.
+
+        Returns:
+            The concatenated proposals of every configured region proposer,
+            evaluated against the LM's current recognition state.
+        """
+        context = EvidenceLMRegionContext(self)
+        return AttentionRegion.concat(
+            (proposer(context) for proposer in self._region_proposers),
+            sender_id=self.learning_module_id,
+        )
 
     def matching_step(
         self,

@@ -21,8 +21,8 @@ experiment:
   config:
     show_sensor_output: false
     max_train_steps: 1000
-    max_eval_steps: 10
-    max_total_steps: 6000
+    max_eval_steps: 50
+    max_total_steps: 100
     n_train_epochs: 3
     n_eval_epochs: 1
     model_name_or_path: ${path.expanduser:${oc.env:MONTY_MODELS}/my_trained_models/supervised_pre_training_objects_with_stickers_comp_models_3lm/pretrained/}
@@ -47,6 +47,10 @@ experiment:
       detailed_save_per_episode: true
       output_dir: ${path.expanduser:'~/tbp/results/comp_benefits_figures'}
     monty_config:
+      learning_modules:
+        learning_module_2:
+          region_proposers:
+            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.inhibit_recognized_object.InhibitRecognizedObject
       sensor_modules:
         sensor_module_3:
           save_raw_obs: true
