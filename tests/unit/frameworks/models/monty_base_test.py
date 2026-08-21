@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, sentinel
+from unittest.mock import ANY, MagicMock, sentinel
 
 from tbp.monty.frameworks.agents import AgentID
 from tbp.monty.frameworks.models.monty_base import MontyBase
@@ -68,3 +68,51 @@ class MontyBasePrivateTest(unittest.TestCase):
             }
         )
         self.assertEqual(set(self.monty_base._goals), expected)
+
+    def test_pass_goals_collects_one_region_per_module_lms_first(self) -> None:
+        self.monty_base.step_type = "matching_step"
+        for module, region in (
+            (self.lm1, sentinel.lm1_region),
+            (self.lm2, sentinel.lm2_region),
+            (self.lm3, sentinel.lm3_region),
+            (self.sm1, sentinel.sm1_region),
+            (self.sm2, sentinel.sm2_region),
+        ):
+            module.propose_region.return_value = region
+        self.monty_base._attention_system = MagicMock()
+
+        self.monty_base._pass_goals()
+
+        self.assertEqual(
+            self.monty_base._regions,
+            [
+                sentinel.lm1_region,
+                sentinel.lm2_region,
+                sentinel.lm3_region,
+                sentinel.sm1_region,
+                sentinel.sm2_region,
+            ],
+        )
+
+    def test_pass_goals_hands_the_collected_regions_to_the_attention_system(
+        self,
+    ) -> None:
+        self.monty_base.step_type = "matching_step"
+        attention_system = MagicMock()
+        attention_system.step.return_value = sentinel.filtered_goals
+        self.monty_base._attention_system = attention_system
+
+        self.monty_base._pass_goals()
+
+        attention_system.step.assert_called_once_with(
+            ANY,
+            self.monty_base._regions,
+        )
+        self.assertIs(self.monty_base._goals, sentinel.filtered_goals)
+
+    def test_reset_clears_the_regions(self) -> None:
+        self.monty_base._regions = [sentinel.region]
+
+        self.monty_base.reset()
+
+        self.assertEqual(self.monty_base._regions, [])
