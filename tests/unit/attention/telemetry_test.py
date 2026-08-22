@@ -12,6 +12,7 @@ import json
 import unittest
 
 import numpy as np
+import numpy.testing as nptest
 
 from tbp.monty.attention.attention_system import (
     DEFAULT_VOXEL_SIZE,
@@ -118,39 +119,52 @@ class NoopAttentionSystemTelemetryTest(unittest.TestCase):
 
 
 class AttentionSystemGoalTelemetryTest(unittest.TestCase):
+    """Each step's goals are recorded as columns, tagged with the filter decision."""
+
     def setUp(self) -> None:
         self.telemetry = AttentionSystemTelemetry()
         self.system = AttentionSystem(telemetry=self.telemetry)
 
-    def test_each_step_records_every_goal_tagged_with_the_filter_decision(
-        self,
-    ) -> None:
+    def test_each_step_records_every_goal_with_its_filter_decision(self) -> None:
         inside = goal_at(NEAR_POINT)
         outside = goal_at([9.0, 9, 9])
         self.system.step([inside, outside], [region(NEAR_POINT)])
 
-        state = self.system.state_dict()
-        self.assertEqual(state["goals"], [[inside, outside]])
-        self.assertTrue(inside.info["passed_attention_filter"])
-        self.assertFalse(outside.info["passed_attention_filter"])
+        (step,) = self.system.state_dict()["goals"]
+        # Locations are recorded as float32.
+        nptest.assert_allclose(
+            step["locations"], [inside.location, outside.location], rtol=1e-6
+        )
+        nptest.assert_array_equal(step["passed_attention_filter"], [True, False])
 
     def test_a_pass_through_step_tags_every_goal_as_passed(self) -> None:
+        self.system.step([goal_at(NEAR_POINT)], [])
+
+        (step,) = self.system.state_dict()["goals"]
+        nptest.assert_array_equal(step["passed_attention_filter"], [True])
+
+    def test_senders_are_listed_once_and_indexed_per_goal(self) -> None:
+        goals = [goal_at(NEAR_POINT, sender_id="a"), goal_at(NEAR_POINT, sender_id="b")]
+        self.system.step([*goals, goal_at(NEAR_POINT, sender_id="a")], [])
+
+        (step,) = self.system.state_dict()["goals"]
+        self.assertEqual(step["senders"], ["a", "b"])
+        self.assertEqual(step["sender_types"], ["SM", "SM"])
+        nptest.assert_array_equal(step["sender"], [0, 1, 0])
+
+    def test_a_goal_without_a_location_is_recorded_as_nan(self) -> None:
         goal = goal_at(NEAR_POINT)
+        goal.location = None
         self.system.step([goal], [])
 
-        self.assertEqual(self.system.state_dict()["goals"], [[goal]])
-        self.assertTrue(goal.info["passed_attention_filter"])
+        (step,) = self.system.state_dict()["goals"]
+        self.assertTrue(np.isnan(step["locations"]).all())
 
-    def test_the_tag_is_json_encoded_with_the_goal(self) -> None:
-        inside = goal_at(NEAR_POINT)
-        outside = goal_at([9.0, 9, 9])
-        self.system.step([inside, outside], [region(NEAR_POINT)])
+    def test_columns_are_json_encodable(self) -> None:
+        self.system.step([goal_at(NEAR_POINT)], [region(NEAR_POINT)])
 
         encoded = json.loads(json.dumps(self.system.state_dict(), cls=BufferEncoder))
-        self.assertEqual(
-            [g["info"]["passed_attention_filter"] for g in encoded["goals"][0]],
-            [True, False],
-        )
+        self.assertEqual(encoded["goals"][0]["passed_attention_filter"], [True])
 
     def test_reset_discards_the_goal_records(self) -> None:
         self.system.step([goal_at(NEAR_POINT)], [region(NEAR_POINT)])

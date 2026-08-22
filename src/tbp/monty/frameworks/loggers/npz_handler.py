@@ -1,0 +1,414 @@
+# Copyright 2026 Thousand Brains Project
+#
+# Copyright may exist in Contributors' modifications
+# and/or contributions to the work.
+#
+# Use of this source code is governed by the MIT
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT.
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping
+from fnmatch import fnmatchcase
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import orjson
+
+from tbp.monty.frameworks.experiments.mode import ExperimentMode
+from tbp.monty.frameworks.loggers.monty_handlers import MontyHandler
+from tbp.monty.frameworks.models.buffer import BufferEncoder
+from tbp.monty.frameworks.utils.logging_utils import maybe_rename_existing_dir
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Container, Sequence
+
+__all__ = [
+    "NpzHandler",
+    "PathFilter",
+    "load_episode",
+]
+
+logger = logging.getLogger(__name__)
+
+# Subdirectory of the output directory holding the per-episode files.
+EPISODES_DIR = "episode_stats"
+
+# The npz member holding the episode's JSON.
+INDEX_KEY = "__index__"
+
+# In the JSON, an object with only this key stands in for an array stored as
+# its own npz member: {"__array__": {"key", "dtype", "shape"}}.
+ARRAY_REFERENCE = "__array__"
+
+
+class NpzHandler(MontyHandler):
+    """Writes detailed episode stats to npz files with optional filtering.
+
+    Saves each episode's detailed stats to an npz file. The file contains JSON
+    structured like DetailedJSONHandler's output but with arrays are replaced
+    with references to them. The referenced arrays live alongside the JSON index
+    in the npz file.
+
+    See :class:`PathFilter` for the path and pattern syntax. From the command
+    line, keys the logging group does not declare need the append prefix:
+    ``+experiment.config.logging.exclude=[attention_system/goals]``.
+    """
+
+    def __init__(
+        self,
+        episodes: Container[int] | None = None,
+        include: Sequence[str] = (),
+        exclude: Sequence[str] = (),
+        min_array_size: int = 1024,
+        float_dtype: str | None = "float32",
+        compressed: bool = True,
+    ) -> None:
+        """Initialize the handler.
+
+        Args:
+            episodes: The global episode ids to save; None or empty (default)
+                saves every episode.
+            include: Path patterns to keep; empty keeps everything.
+                See :class:`PathFilter`.
+            exclude: Path patterns to drop, applied after include.
+            min_array_size: Arrays with at least this many elements go to the
+                npz file.
+            float_dtype: Cast floating-point arrays to this dtype (e.g.
+                ``"float32"``) before writing; None keeps them as they are.
+            compressed: Whether to deflate the npz members.
+        """
+        self._episodes = episodes
+        self._path_filter = PathFilter(include, exclude)
+        self._moved_previous_run = False
+        self._min_array_size = min_array_size
+        self._float_dtype = float_dtype
+        self._compressed = compressed
+
+    @property
+    def path_filter(self) -> PathFilter:
+        return self._path_filter
+
+    @classmethod
+    def log_level(cls) -> str:
+        return "DETAILED"
+
+    @staticmethod
+    def episode_stats(
+        data: dict[str, Any],
+        global_episode_id: int,
+        local_episode: int,
+        mode: ExperimentMode,
+    ) -> dict[str, Any]:
+        """Merge an episode's DETAILED blocks over its BASIC stats row.
+
+        The same stats ``DetailedJSONHandler`` writes.
+
+        Args:
+            data: The logger's data, with ``BASIC`` and ``DETAILED`` pools.
+            global_episode_id: Combined train+eval episode id, which keys the
+                DETAILED pool.
+            local_episode: Episode number within the mode, which keys the
+                BASIC pool.
+            mode: The experiment mode.
+
+        Returns:
+            The episode's stats.
+        """
+        basic = data["BASIC"][f"{mode}_stats"][local_episode]
+        detailed = data["DETAILED"].get(local_episode)
+        if detailed is None:
+            detailed = data["DETAILED"][global_episode_id]
+        return {**basic, **detailed}
+
+    def close(self) -> None:
+        pass
+
+    def report_episode(
+        self,
+        data: Mapping[str, Any],
+        output_dir: str,
+        local_episode: int,
+        mode: ExperimentMode = ExperimentMode.TRAIN,
+        **kwargs,
+    ) -> None:
+        """Filter and write one episode's telemetry."""
+        global_episode_id = kwargs[f"{mode}_episodes_to_total"][local_episode]
+
+        if self._episodes and global_episode_id not in self._episodes:
+            logger.debug(
+                "Skipping telemetry for episode %s (not requested)",
+                global_episode_id,
+            )
+            return
+
+        stats = self.episode_stats(data, global_episode_id, local_episode, mode)
+        episode = self._path_filter.prune(stats)
+
+        episodes_dir = Path(output_dir) / EPISODES_DIR
+        if not self._moved_previous_run:
+            maybe_rename_existing_dir(episodes_dir)
+            self._moved_previous_run = True
+        episodes_dir.mkdir(exist_ok=True, parents=True)
+        path = episodes_dir / f"episode_{global_episode_id:06d}.npz"
+        self.write(global_episode_id, episode, path)
+
+        logger.debug("Saved telemetry for episode %s to %s", global_episode_id, path)
+
+    def write(self, episode_id: int, episode: Mapping[str, Any], path: Path) -> None:
+        """Write one episode's file.
+
+        Args:
+            episode_id: The global episode id.
+            episode: The episode's stats, holding only dicts, lists, arrays
+                and scalars (see :meth:`PathFilter.prune`).
+            path: The npz file to write, overwriting whatever is there.
+        """
+        npz_items: dict[str, np.ndarray] = {}
+
+        def reference_or_array(array: np.ndarray, array_path: str) -> np.ndarray | dict:
+            # Optional floating-point conversion for storage efficiency.
+            if self._float_dtype is not None and np.issubdtype(
+                array.dtype, np.floating
+            ):
+                array = array.astype(self._float_dtype)
+            # Just put small arrays directly in the JSON.
+            if array.size < self._min_array_size:
+                return array
+            # Otherwise, store the array separately and return a reference.
+            npz_items[array_path] = array
+            return {
+                ARRAY_REFERENCE: {
+                    "key": array_path,
+                    "dtype": array.dtype.str,
+                    "shape": list(array.shape),
+                }
+            }
+
+        index = _map_arrays(episode, reference_or_array)
+        npz_items[INDEX_KEY] = np.frombuffer(
+            _dumps({episode_id: index}), dtype=np.uint8
+        )
+        save = np.savez_compressed if self._compressed else np.savez
+        save(path, **npz_items)
+
+
+def _map_arrays(
+    stats: Any,
+    fn: Callable[[np.ndarray, str], Any],
+    path: str = "",
+) -> Any:
+    """Rebuild stats with every array replaced by ``fn(array, path)``.
+
+    The path of an array is its key path with list indices, e.g.
+    ``SM_3/raw_observations/12/rgba``.
+
+    Args:
+        stats: The stats, or any part of them.
+        fn: Maps an array and its path to the value that replaces it.
+        path: The path of ``stats``; empty at the root.
+
+    Returns:
+        The rebuilt stats.
+    """
+    if isinstance(stats, np.ndarray):
+        return fn(stats, path)
+    if isinstance(stats, dict):
+        return {
+            key: _map_arrays(value, fn, _join_path(path, key))
+            for key, value in stats.items()
+        }
+    if isinstance(stats, (list, tuple)):
+        return [
+            _map_arrays(item, fn, _join_path(path, index))
+            for index, item in enumerate(stats)
+        ]
+    return stats
+
+
+# Sentinel value that marks a part of the stats to be dropped by the filter.
+_DROP = object()
+
+
+class PathFilter:
+    """Include/exclude filter over the paths of an episode's stats.
+
+    **Paths** join the keys from the episode root with ``/``; a list item's
+    key is its index. The root holds the episode's stats (``target``, ...)
+    and one block per module: ``LM_<n>``, ``SM_<n>``, ``attention_system``,
+    ``motor_system``::
+
+        target
+        SM_3/raw_observations/12/rgba
+        attention_system/goals/12/locations
+
+    **Patterns** are :func:`fnmatch.fnmatchcase` globs over whole paths:
+    ``*`` matches any run of characters *including* ``/`` (so it covers
+    list indices at any depth), ``?`` one character, ``[abc]`` a
+    one-character class (not a comma list). A pattern that matches a path
+    selects everything below it::
+
+        attention_system                     the whole block
+        SM_*/raw_observations/*/depth        one field of every observation
+        LM_[01]/evidences                    learning modules 0 and 1
+
+    **Decisions.** A node is kept when an include pattern matches it or an
+    ancestor (or there are no include patterns) and no exclude pattern
+    matches it or an ancestor; exclude wins. Containers emptied by the
+    filter are dropped::
+
+        include=["target", "LM_2"]
+            -> the target and learning module 2, nothing else
+        exclude=["SM_*/raw_observations/*/semantic_3d"]
+            -> everything except that field
+    """
+
+    def __init__(
+        self, include: Sequence[str] = (), exclude: Sequence[str] = ()
+    ) -> None:
+        """Initialize the filter.
+
+        Args:
+            include: Patterns of the paths to keep; empty keeps everything.
+            exclude: Patterns of the paths to drop; they win over include.
+        """
+        self.include = tuple(str(pattern) for pattern in include)
+        self.exclude = tuple(str(pattern) for pattern in exclude)
+
+    def matches_include(self, path: str) -> bool:
+        return any(fnmatchcase(path, pattern) for pattern in self.include)
+
+    def matches_exclude(self, path: str) -> bool:
+        return any(fnmatchcase(path, pattern) for pattern in self.exclude)
+
+    def prune(self, stats: Mapping[str, Any]) -> dict[str, Any]:
+        """Expand an episode's stats and keep only the paths this filter allows.
+
+        Objects the stats hold beyond dicts, lists, arrays and scalars (goals,
+        voxel grids, dataclasses, quaternions, ...) are expanded through
+        :class:`BufferEncoder` so the filter can see inside them and the
+        result holds only dicts, lists, arrays and scalars. Containers emptied
+        by the filter are dropped; a list keeps its length, with ``None``
+        standing in for dropped items, so indices stay meaningful.
+
+        Args:
+            stats: An episode's stats.
+
+        Returns:
+            The expanded, filtered stats.
+        """
+        pruned = self._prune(stats, "", included=not self.include)
+        return {} if pruned is _DROP else pruned
+
+    def _prune(self, obj: Any, path: str, included: bool) -> Any:
+        # The walk visits ancestors before descendants, so an ancestor's
+        # include match is carried down and an exclude match ends the walk
+        # right here.
+        if path:
+            if self.matches_exclude(path):
+                return _DROP
+            included = included or self.matches_include(path)
+
+        if isinstance(obj, Mapping):
+            if not obj:
+                return obj if included else _DROP
+            kept = {}
+            for key, value in obj.items():
+                pruned = self._prune(value, _join_path(path, key), included)
+                if pruned is not _DROP:
+                    kept[key] = pruned
+            return kept or _DROP
+
+        if isinstance(obj, (list, tuple)):
+            if not obj or all(_is_atomic(item) for item in obj):
+                return obj if included else _DROP
+            pruned = [
+                self._prune(item, _join_path(path, index), included)
+                for index, item in enumerate(obj)
+            ]
+            if all(item is _DROP for item in pruned):
+                return _DROP
+            return [None if item is _DROP else item for item in pruned]
+
+        if _is_atomic(obj):
+            return obj if included else _DROP
+
+        try:
+            expanded = BufferEncoder().default(obj)
+        except TypeError:
+            # Nothing knows how to expand it; the serializer gets to complain.
+            return obj if included else _DROP
+        return self._prune(expanded, path, included)
+
+
+def _dumps(payload: Any) -> bytes:
+    """Serialize episode stats.
+
+    Arrays serialize straight from their buffers; everything else
+    (dataclasses, quaternions, rotations, ...) goes through
+    :class:`BufferEncoder`. NaN is written as null, and int dict keys (the
+    episode id) are written as strings.
+
+    Args:
+        payload: The JSON-encodable payload.
+
+    Returns:
+        The serialized payload.
+    """
+    return orjson.dumps(
+        payload,
+        default=BufferEncoder().default,
+        option=orjson.OPT_SERIALIZE_NUMPY
+        | orjson.OPT_NON_STR_KEYS
+        | orjson.OPT_PASSTHROUGH_DATACLASS,
+    )
+
+
+def _join_path(path: str, key: Any) -> str:
+    return str(key) if not path else f"{path}/{key}"
+
+
+def _is_atomic(obj: Any) -> bool:
+    return obj is None or isinstance(
+        obj, (bool, int, float, str, bytes, np.ndarray, np.generic)
+    )
+
+
+def load_episode(path: str | Path) -> dict[str, Any]:
+    """Load an episode written by :class:`NpzHandler`.
+
+    Args:
+        path: The episode's ``.npz`` file.
+
+    Returns:
+        ``{"<episode_id>": {<episode stats>}}`` with every array reference
+        replaced by the array.
+    """
+    with np.load(path) as npz:
+        return resolve(orjson.loads(npz[INDEX_KEY].tobytes()), npz)
+
+
+def resolve(stats: Any, arrays: Mapping[str, np.ndarray]) -> Any:
+    """Replace the array references in loaded stats with the arrays themselves.
+
+    Args:
+        stats: Loaded JSON stats.
+        arrays: The arrays the references point to, by key; typically the
+            open npz file.
+
+    Returns:
+        The stats with every reference replaced by its array.
+    """
+
+    def _resolve(node: Any) -> Any:
+        if isinstance(node, dict):
+            if node.keys() == {ARRAY_REFERENCE}:
+                return arrays[node[ARRAY_REFERENCE]["key"]]
+            return {key: _resolve(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [_resolve(item) for item in node]
+        return node
+
+    return _resolve(stats)

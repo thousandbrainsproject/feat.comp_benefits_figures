@@ -48,11 +48,12 @@ NEAR_POINTS = (point_in(NEAR_VOXEL, offset=0.25), point_in(NEAR_VOXEL, offset=0.
 FAR_POINT = point_in(FAR_VOXEL)
 
 
-def goal_at(location) -> Goal:
+def goal_at(location, sender_id: str = "SM_0") -> Goal:
     """Build a goal at the given location.
 
     Returns:
-        A goal whose only meaningful property here is its location.
+        A goal whose only meaningful properties here are its location and
+        sender.
 
     """
     return Goal(
@@ -61,7 +62,7 @@ def goal_at(location) -> Goal:
         non_morphological_features=None,
         confidence=0.5,
         pass_message=False,
-        sender_id="SM_0",
+        sender_id=sender_id,
         sender_type="SM",
         process_features_in_lm=False,
         goal_tolerances=None,
