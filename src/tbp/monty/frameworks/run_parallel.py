@@ -41,6 +41,7 @@ from tbp.monty.frameworks.loggers.monty_handlers import (
     DetailedJSONHandler,
 )
 from tbp.monty.frameworks.loggers.npz_handler import EXPERIMENT_SUBDIRECTORY, NpzHandler
+from tbp.monty.frameworks.run import output_dir_from_run_name, save_config_yaml
 from tbp.monty.frameworks.utils.logging_utils import (
     maybe_rename_existing_dir,
     maybe_rename_existing_file,
@@ -768,6 +769,11 @@ def main(cfg: DictConfig):
 
     print_config(cfg)
     register_resolvers()
+
+    if not cfg.print_cfg:
+        # The same reference config single runs write (run.py); the chunked
+        # parallel configs derive from it.
+        save_config_yaml(cfg, output_dir_from_run_name(cfg))
 
     if cfg.experiment.config.do_train:
         assert issubclass(
