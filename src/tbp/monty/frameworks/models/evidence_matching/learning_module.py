@@ -368,7 +368,7 @@ class EvidenceGraphLM(GraphLM):
         for proposer in self._region_proposers:
             proposer.reset()
 
-    def propose_region(self) -> AttentionRegion:
+    def propose_region(self) -> AttentionRegion | None:
         """Collect the regions this LM's region proposers emit.
 
         Returns:
@@ -376,8 +376,17 @@ class EvidenceGraphLM(GraphLM):
             evaluated against the LM's current recognition state.
         """
         context = EvidenceLMRegionContext(self)
+        regions = []
+        for proposer in self._region_proposers:
+            region = proposer(context)
+            if region is not None:
+                regions.append(region)
+        if len(regions) == 0:
+            return None
+        if len(regions) == 1:
+            return regions[0]
         return AttentionRegion.concat(
-            (proposer(context) for proposer in self._region_proposers),
+            regions,
             sender_id=self.learning_module_id,
         )
 

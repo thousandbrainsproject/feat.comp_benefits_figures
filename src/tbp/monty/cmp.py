@@ -414,8 +414,8 @@ class AttentionRegion:
             no single sender, such as after merging several.
     """
 
-    locations: npt.NDArray[np.float64]
-    weights: npt.NDArray[np.float64]
+    locations: npt.NDArray[np.floating]
+    weights: npt.NDArray[np.floating]
     sender_id: str = ""
 
     def __post_init__(self) -> None:
@@ -425,8 +425,8 @@ class AttentionRegion:
             ValueError: If ``locations`` is not (N, 3) or ``weights`` is not
                 (N,) for the same N.
         """
-        locations = np.asarray(self.locations, dtype=np.float64).reshape(-1, 3)
-        weights = np.asarray(self.weights, dtype=np.float64).reshape(-1)
+        locations = np.asarray(self.locations)
+        weights = np.asarray(self.weights)
         if len(locations) != len(weights):
             raise ValueError(
                 "locations and weights must describe the same number of points, "
@@ -490,4 +490,4 @@ class AttentionRegion:
 
     def __len__(self) -> int:
         """Return the number of locations in the region."""
-        return len(self.weights)
+        return len(self.locations)

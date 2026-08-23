@@ -13,6 +13,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from tbp.monty.cmp import MIN_ATTENTION_WEIGHT, AttentionRegion
+from tbp.monty.frameworks.models.evidence_matching.region_proposal.protocol import (
+    RegionProposer,
+)
 
 if TYPE_CHECKING:
     import numpy.typing as npt
@@ -54,7 +57,7 @@ def thicken_surface(
     return np.vstack([points, layers.reshape(-1, 3)])
 
 
-class InhibitRecognizedObject:
+class InhibitRecognizedObject(RegionProposer):
     """Inhibit an object's whole surface once the LM has recognized it.
 
     Once the LM is down to a single possible match with a unique pose, there
@@ -82,7 +85,7 @@ class InhibitRecognizedObject:
         self._num_layers = num_layers
         self._weight = weight
 
-    def __call__(self, context: RegionContext) -> AttentionRegion:
+    def __call__(self, context: RegionContext) -> AttentionRegion | None:
         """Propose the recognized object's shell, or nothing.
 
         Args:
@@ -94,7 +97,7 @@ class InhibitRecognizedObject:
         """
         object_id = context.recognized_object
         if object_id is None or context.current_location is None:
-            return AttentionRegion.empty()
+            return None
         points, normals = context.surface(object_id)
         shell = thicken_surface(points, normals, self._thickness, self._num_layers)
         return AttentionRegion.uniform(

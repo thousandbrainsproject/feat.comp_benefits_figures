@@ -448,8 +448,8 @@ class LearningModule(
     def load_state_dict(self, memento: Memento) -> None:
         pass
 
-    def propose_region(self) -> AttentionRegion:
-        return AttentionRegion.empty()
+    def propose_region(self) -> AttentionRegion | None:
+        return None
 
 
 class LMMemory(Snapshotable, metaclass=abc.ABCMeta):
@@ -580,5 +580,5 @@ class SensorModule(RuntimeSensorModule, ExperimentSensorModule, metaclass=abc.AB
     def reset(self) -> None:
         pass
 
-    def propose_region(self) -> AttentionRegion:
-        return AttentionRegion.empty()
+    def propose_region(self) -> AttentionRegion | None:
+        return None

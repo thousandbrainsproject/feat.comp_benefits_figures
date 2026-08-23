@@ -350,9 +350,11 @@ class MontyBase(Monty):
             goals = sm.propose_goals()
             self._goals.extend(goals)
 
-        # Regions are collected fresh each step, like goals: one per module.
-        self._regions = [lm.propose_region() for lm in self.learning_modules]
-        self._regions.extend(sm.propose_region() for sm in self.sensor_modules)
+        # Regions are collected fresh each step.
+        regions = [lm.propose_region() for lm in self.learning_modules]
+        regions.extend(sm.propose_region() for sm in self.sensor_modules)
+        regions = [r for r in regions if r is not None]
+        self._regions = regions
 
         # The attention system folds the proposed regions into its voxel grid and
         # returns only the goals that fall within it.

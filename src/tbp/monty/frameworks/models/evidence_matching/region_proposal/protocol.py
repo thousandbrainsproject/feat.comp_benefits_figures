@@ -69,7 +69,7 @@ class RegionProposer(Protocol):
     it has nothing to say.
     """
 
-    def __call__(self, context: RegionContext) -> AttentionRegion: ...
+    def __call__(self, context: RegionContext) -> AttentionRegion | None: ...
 
     def reset(self) -> None:
         """Forget any per-episode state."""

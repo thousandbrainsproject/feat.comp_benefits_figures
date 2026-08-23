@@ -65,7 +65,7 @@ class SalienceSM(SensorModule):
         self._segmentation_strategy = segmentation_strategy
 
         self._goals: list[Goal] = []
-        self._region = AttentionRegion.empty(self._sensor_module_id)
+        self._region = None
 
         # TODO: Goes away once experiment code is extracted
         self.is_exploring = False
@@ -86,7 +86,7 @@ class SalienceSM(SensorModule):
 
     def reset(self) -> None:
         self._goals.clear()
-        self._region = AttentionRegion.empty(self._sensor_module_id)
+        self._region = None
         self._return_inhibitor.reset()
         self._snapshot_telemetry.reset()
         self.is_exploring = False
@@ -106,7 +106,7 @@ class SalienceSM(SensorModule):
     def propose_goals(self) -> list[Goal]:
         return self._goals
 
-    def propose_region(self) -> AttentionRegion:
+    def propose_region(self) -> AttentionRegion | None:
         return self._region
 
     def step(
