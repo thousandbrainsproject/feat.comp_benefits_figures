@@ -37,7 +37,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # Subdirectory of the output directory holding the per-episode files.
-EPISODES_DIR = "episode_stats"
+EXPERIMENT_SUBDIRECTORY = "telemetry"
 
 # The npz member holding the episode's JSON.
 INDEX_KEY = "__index__"
@@ -51,8 +51,8 @@ class NpzHandler(MontyHandler):
     """Writes detailed episode stats to npz files with optional filtering.
 
     Saves each episode's detailed stats to an npz file. The file contains JSON
-    structured like DetailedJSONHandler's output but with arrays are replaced
-    with references to them. The referenced arrays live alongside the JSON index
+    structured like DetailedJSONHandler's output but with every array replaced
+    by a reference to it. The referenced arrays live alongside the JSON index
     in the npz file.
 
     See :class:`PathFilter` for the path and pattern syntax. From the command
@@ -65,7 +65,6 @@ class NpzHandler(MontyHandler):
         episodes: Container[int] | None = None,
         include: Sequence[str] = (),
         exclude: Sequence[str] = (),
-        min_array_size: int = 1024,
         float_dtype: str | None = "float32",
         compressed: bool = True,
     ) -> None:
@@ -77,8 +76,6 @@ class NpzHandler(MontyHandler):
             include: Path patterns to keep; empty keeps everything.
                 See :class:`PathFilter`.
             exclude: Path patterns to drop, applied after include.
-            min_array_size: Arrays with at least this many elements go to the
-                npz file.
             float_dtype: Cast floating-point arrays to this dtype (e.g.
                 ``"float32"``) before writing; None keeps them as they are.
             compressed: Whether to deflate the npz members.
@@ -86,7 +83,6 @@ class NpzHandler(MontyHandler):
         self._episodes = episodes
         self._path_filter = PathFilter(include, exclude)
         self._moved_previous_run = False
-        self._min_array_size = min_array_size
         self._float_dtype = float_dtype
         self._compressed = compressed
 
@@ -150,12 +146,12 @@ class NpzHandler(MontyHandler):
         stats = self.episode_stats(data, global_episode_id, local_episode, mode)
         episode = self._path_filter.prune(stats)
 
-        episodes_dir = Path(output_dir) / EPISODES_DIR
+        telemetry_dir = Path(output_dir) / EXPERIMENT_SUBDIRECTORY
         if not self._moved_previous_run:
-            maybe_rename_existing_dir(episodes_dir)
+            maybe_rename_existing_dir(telemetry_dir)
             self._moved_previous_run = True
-        episodes_dir.mkdir(exist_ok=True, parents=True)
-        path = episodes_dir / f"episode_{global_episode_id:06d}.npz"
+        telemetry_dir.mkdir(exist_ok=True, parents=True)
+        path = telemetry_dir / f"episode_{global_episode_id:06d}.npz"
         self.write(global_episode_id, episode, path)
 
         logger.debug("Saved telemetry for episode %s to %s", global_episode_id, path)
@@ -171,16 +167,14 @@ class NpzHandler(MontyHandler):
         """
         npz_items: dict[str, np.ndarray] = {}
 
-        def reference_or_array(array: np.ndarray, array_path: str) -> np.ndarray | dict:
+        def reference(array: np.ndarray, array_path: str) -> dict:
             # Optional floating-point conversion for storage efficiency.
             if self._float_dtype is not None and np.issubdtype(
                 array.dtype, np.floating
             ):
                 array = array.astype(self._float_dtype)
-            # Just put small arrays directly in the JSON.
-            if array.size < self._min_array_size:
-                return array
-            # Otherwise, store the array separately and return a reference.
+            # Store the array as its own member and return a reference, so
+            # no array data rides as text in the JSON.
             npz_items[array_path] = array
             return {
                 ARRAY_REFERENCE: {
@@ -190,7 +184,7 @@ class NpzHandler(MontyHandler):
                 }
             }
 
-        index = _map_arrays(episode, reference_or_array)
+        index = _map_arrays(episode, reference)
         npz_items[INDEX_KEY] = np.frombuffer(
             _dumps({episode_id: index}), dtype=np.uint8
         )

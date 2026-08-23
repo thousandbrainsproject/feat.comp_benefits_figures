@@ -28,7 +28,7 @@ from tbp.monty.frameworks.experiments.mode import ExperimentMode
 from tbp.monty.frameworks.loggers.monty_handlers import MontyHandler
 from tbp.monty.frameworks.loggers.npz_handler import (
     ARRAY_REFERENCE,
-    EPISODES_DIR,
+    EXPERIMENT_SUBDIRECTORY,
     INDEX_KEY,
     NpzHandler,
     PathFilter,
@@ -116,7 +116,9 @@ class NpzHandlerTest(unittest.TestCase):
         self.assertEqual(episode_id, GLOBAL_EPISODE)
         self.assertEqual(
             path,
-            Path(self.output_dir) / EPISODES_DIR / f"episode_{GLOBAL_EPISODE:06d}.npz",
+            Path(self.output_dir)
+            / EXPERIMENT_SUBDIRECTORY
+            / f"episode_{GLOBAL_EPISODE:06d}.npz",
         )
         self.assertEqual(
             list(episode), ["LM_0", "target", "attention_system", "motor_system"]
@@ -163,15 +165,15 @@ class NpzHandlerTest(unittest.TestCase):
         with patch.object(handler, "write", return_value=[]):
             report(handler, self.output_dir)
 
-        self.assertTrue((Path(self.output_dir) / EPISODES_DIR).is_dir())
+        self.assertTrue((Path(self.output_dir) / EXPERIMENT_SUBDIRECTORY).is_dir())
 
     def test_moves_a_previous_runs_directory_aside_before_the_first_write(
         self,
     ) -> None:
-        episodes_dir = Path(self.output_dir) / EPISODES_DIR
+        episodes_dir = Path(self.output_dir) / EXPERIMENT_SUBDIRECTORY
         episodes_dir.mkdir()
         (episodes_dir / "episode_000000.npz").write_text("previous run")
-        old_dir = episodes_dir.with_name(f"{EPISODES_DIR}_old")
+        old_dir = episodes_dir.with_name(f"{EXPERIMENT_SUBDIRECTORY}_old")
         old_dir.mkdir()
         (old_dir / "stale.npz").write_text("older run")
         handler = NpzHandler()
@@ -187,7 +189,7 @@ class NpzHandlerTest(unittest.TestCase):
         )
 
     def test_moves_the_directory_aside_only_once_per_run(self) -> None:
-        episodes_dir = Path(self.output_dir) / EPISODES_DIR
+        episodes_dir = Path(self.output_dir) / EXPERIMENT_SUBDIRECTORY
         handler = NpzHandler()
 
         report(handler, self.output_dir)
@@ -216,17 +218,14 @@ class NpzHandlerTest(unittest.TestCase):
         report(handler, self.output_dir)
 
         loaded = load_episode(
-            Path(self.output_dir) / EPISODES_DIR / f"episode_{GLOBAL_EPISODE:06d}.npz"
+            Path(self.output_dir)
+            / EXPERIMENT_SUBDIRECTORY
+            / f"episode_{GLOBAL_EPISODE:06d}.npz"
         )
-        self.assertEqual(
-            loaded,
-            {
-                str(GLOBAL_EPISODE): {
-                    "LM_0": {"evidences": [[0.0, 1, 2, 3]]},
-                    "target": {"primary_target_object": "mug"},
-                }
-            },
-        )
+        episode = loaded[str(GLOBAL_EPISODE)]
+        self.assertEqual(list(loaded), [str(GLOBAL_EPISODE)])
+        self.assertEqual(episode["target"], {"primary_target_object": "mug"})
+        nptest.assert_array_equal(episode["LM_0"]["evidences"], [[0.0, 1, 2, 3]])
 
 
 class NpzHandlerEpisodesTest(unittest.TestCase):
@@ -562,8 +561,6 @@ class PruneTest(unittest.TestCase):
 # many elements, and the npz-member threshold sits inside that range so a draw
 # can land on either side of it.
 MAX_ARRAY_LENGTH = 64
-MIN_ARRAY_SIZE = 8
-
 # Finite values that survive a float32 cast; JSON has no inf or nan.
 finite_floats = st.floats(-1e6, 1e6, width=64, allow_nan=False)
 
@@ -571,12 +568,6 @@ float_arrays = arrays(
     np.float64, st.integers(1, MAX_ARRAY_LENGTH), elements=finite_floats
 )
 int_arrays = arrays(np.int64, st.integers(1, MAX_ARRAY_LENGTH))
-large_arrays = arrays(
-    np.float64, st.integers(MIN_ARRAY_SIZE, MAX_ARRAY_LENGTH), elements=finite_floats
-)
-small_arrays = arrays(
-    np.float64, st.integers(1, MIN_ARRAY_SIZE - 1), elements=finite_floats
-)
 
 
 class DumpsTest(unittest.TestCase):
@@ -628,7 +619,7 @@ class NpzHandlerWriteTest(unittest.TestCase):
         self.path = Path(self.tmp.name) / "episode_000000.npz"
         # float_dtype=None keeps the arrays as drawn; the default is tested
         # on its own.
-        self.handler = NpzHandler(min_array_size=MIN_ARRAY_SIZE, float_dtype=None)
+        self.handler = NpzHandler(float_dtype=None)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -655,8 +646,8 @@ class NpzHandlerWriteTest(unittest.TestCase):
 
         self.assertEqual(self.read_index(), {str(episode_id): {"name": "sensor"}})
 
-    @given(episode_id=episode_ids, array=large_arrays)
-    def test_replaces_large_arrays_with_a_reference_to_their_member(
+    @given(episode_id=episode_ids, array=float_arrays)
+    def test_replaces_arrays_with_a_reference_to_their_member(
         self,
         episode_id: int,
         array: np.ndarray,
@@ -684,16 +675,17 @@ class NpzHandlerWriteTest(unittest.TestCase):
         with np.load(self.path) as npz:
             nptest.assert_array_equal(npz["SM_0/maps/0"], array)
 
-    @given(array=small_arrays)
-    def test_keeps_small_arrays_inline(self, array: np.ndarray) -> None:
-        self.handler.write(0, {"a": array}, self.path)
+    def test_references_even_single_element_arrays(self) -> None:
+        self.handler.write(0, {"a": np.zeros(1)}, self.path)
 
-        nptest.assert_array_equal(self.read_index()["0"]["a"], array)
-        self.assertEqual(self.array_keys(), [])
+        self.assertEqual(self.array_keys(), ["a"])
+        self.assertEqual(
+            self.read_index()["0"]["a"][ARRAY_REFERENCE]["shape"], [1]
+        )
 
-    @given(array=large_arrays)
+    @given(array=float_arrays)
     def test_casts_float_arrays_to_float_dtype(self, array: np.ndarray) -> None:
-        handler = NpzHandler(min_array_size=MIN_ARRAY_SIZE, float_dtype="float32")
+        handler = NpzHandler(float_dtype="float32")
 
         handler.write(0, {"a": array}, self.path)
 
@@ -701,15 +693,15 @@ class NpzHandlerWriteTest(unittest.TestCase):
         with np.load(self.path) as npz:
             nptest.assert_array_equal(npz["a"], array.astype(np.float32))
 
-    @given(array=large_arrays)
+    @given(array=float_arrays)
     def test_casts_float_arrays_to_float32_by_default(self, array: np.ndarray) -> None:
-        NpzHandler(min_array_size=MIN_ARRAY_SIZE).write(0, {"a": array}, self.path)
+        NpzHandler().write(0, {"a": array}, self.path)
 
         with np.load(self.path) as npz:
             self.assertEqual(npz["a"].dtype, np.float32)
 
     def test_keeps_the_array_dtype(self) -> None:
-        array = np.arange(MIN_ARRAY_SIZE, dtype=np.uint8)
+        array = np.arange(8, dtype=np.uint8)
 
         self.handler.write(0, {"rgba": array}, self.path)
 
@@ -717,15 +709,15 @@ class NpzHandlerWriteTest(unittest.TestCase):
             self.assertEqual(npz["rgba"].dtype, np.uint8)
 
     def test_overwrites_an_existing_file_in_place(self) -> None:
-        self.handler.write(0, {"a": np.zeros(MIN_ARRAY_SIZE)}, self.path)
+        self.handler.write(0, {"a": np.zeros(8)}, self.path)
 
-        self.handler.write(0, {"a": np.ones(MIN_ARRAY_SIZE)}, self.path)
+        self.handler.write(0, {"a": np.ones(8)}, self.path)
 
         self.assertEqual(
             [path.name for path in self.path.parent.iterdir()], ["episode_000000.npz"]
         )
         with np.load(self.path) as npz:
-            nptest.assert_array_equal(npz["a"], np.ones(MIN_ARRAY_SIZE))
+            nptest.assert_array_equal(npz["a"], np.ones(8))
 
     def test_leaves_scalars_and_strings_in_the_json(self) -> None:
         stats = {"a": {"n": 1, "s": "text", "none": None, "flags": [True, False]}}
@@ -753,7 +745,7 @@ class LoadEpisodeTest(unittest.TestCase):
 
     def test_loads_an_episode_the_handler_wrote(self) -> None:
         stats = {"SM_0": {"maps": [np.arange(16.0), np.arange(16.0) * 2], "name": "s"}}
-        NpzHandler(min_array_size=4).write(7, stats, self.path)
+        NpzHandler().write(7, stats, self.path)
 
         loaded = load_episode(self.path)
 
@@ -762,7 +754,7 @@ class LoadEpisodeTest(unittest.TestCase):
         nptest.assert_array_equal(loaded["7"]["SM_0"]["maps"], stats["SM_0"]["maps"])
 
     def test_loads_every_array_before_closing_the_file(self) -> None:
-        NpzHandler(min_array_size=4).write(7, {"a": np.arange(4.0)}, self.path)
+        NpzHandler().write(7, {"a": np.arange(4.0)}, self.path)
 
         loaded = load_episode(self.path)
 
@@ -786,7 +778,7 @@ class LazyLoadTest(unittest.TestCase):
             },
             "target": {"object": "mug", "position": [0.0, 1.0, 2.0]},
         }
-        NpzHandler(min_array_size=4, float_dtype=None).write(0, self.stats, self.path)
+        NpzHandler(float_dtype=None).write(0, self.stats, self.path)
         self.lazy = load_episode(self.path, lazy=True)["0"]
 
     def tearDown(self) -> None:

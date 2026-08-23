@@ -15,7 +15,10 @@ import unittest
 import hydra
 
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
-from tbp.monty.frameworks.loggers.npz_handler import EPISODES_DIR, load_episode
+from tbp.monty.frameworks.loggers.npz_handler import (
+    EXPERIMENT_SUBDIRECTORY,
+    load_episode,
+)
 from tbp.monty.hydra import instantiate_experiment
 from tests import HYDRA_ROOT
 
@@ -89,7 +92,7 @@ class TelemetryLoggingConfigTest(unittest.TestCase):
             exp.model.set_experiment_mode(ExperimentMode.EVAL)
             exp.run_epoch()
 
-        episodes_dir = exp.output_dir / EPISODES_DIR
+        episodes_dir = exp.output_dir / EXPERIMENT_SUBDIRECTORY
         episode = load_episode(episodes_dir / "episode_000000.npz")["0"]
         self.assertIn("LM_0", episode)
         self.assertIn("target", episode)

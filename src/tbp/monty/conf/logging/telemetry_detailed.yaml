@@ -1,9 +1,9 @@
 # @package experiment.config.logging
 
 # DETAILED-level logging through the NpzHandler: the same per-episode
-# stats DetailedJSONHandler writes, as episode_stats/episode_NNNNNN.npz (the
-# stats as JSON in one member, arrays of >= min_array_size elements as members
-# of their own), with path filters (include / exclude) over the stats.
+# stats DetailedJSONHandler writes, as telemetry/episode_NNNNNN.npz (the
+# stats as JSON in one member, every array as a member of its own), with
+# path filters (include / exclude) over the stats.
 monty_log_level: DETAILED
 monty_handlers:
 - ${monty.class:tbp.monty.frameworks.loggers.monty_handlers.BasicCSVStatsHandler}

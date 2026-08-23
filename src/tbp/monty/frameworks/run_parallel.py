@@ -40,7 +40,7 @@ from tbp.monty.frameworks.loggers.monty_handlers import (
     BasicCSVStatsHandler,
     DetailedJSONHandler,
 )
-from tbp.monty.frameworks.loggers.npz_handler import EPISODES_DIR, NpzHandler
+from tbp.monty.frameworks.loggers.npz_handler import EXPERIMENT_SUBDIRECTORY, NpzHandler
 from tbp.monty.frameworks.utils.logging_utils import (
     maybe_rename_existing_dir,
     maybe_rename_existing_file,
@@ -498,7 +498,7 @@ def collect_telemetry_episode_names(parallel_dirs: Iterable[Path]) -> list[Path]
     # Every per-episode file NpzHandler wrote.
     filenames = []
     for pdir in parallel_dirs:
-        filenames.extend((pdir / EPISODES_DIR).glob("episode_*"))
+        filenames.extend((pdir / EXPERIMENT_SUBDIRECTORY).glob("episode_*"))
     return filenames
 
 
@@ -523,7 +523,7 @@ def post_parallel_eval(experiments: list[Mapping], base_dir: Path) -> None:
     for handler in logging_config["monty_handlers"]:
         if issubclass(handler, NpzHandler):
             filenames = collect_telemetry_episode_names(parallel_dirs)
-            outdir = base_dir / EPISODES_DIR
+            outdir = base_dir / EXPERIMENT_SUBDIRECTORY
             maybe_rename_existing_dir(outdir)
             post_parallel_log_cleanup(filenames, outdir, cat_fn=mv_files)
             continue
@@ -590,7 +590,7 @@ def post_parallel_train(experiments: list[Mapping], base_dir: Path) -> None:
     for handler in logging_config["monty_handlers"]:
         if issubclass(handler, NpzHandler):
             filenames = collect_telemetry_episode_names(parallel_dirs)
-            outdir = base_dir / EPISODES_DIR
+            outdir = base_dir / EXPERIMENT_SUBDIRECTORY
             maybe_rename_existing_dir(outdir)
             post_parallel_log_cleanup(filenames, outdir, cat_fn=mv_files)
             continue
