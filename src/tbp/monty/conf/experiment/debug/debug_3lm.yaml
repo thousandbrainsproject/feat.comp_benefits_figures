@@ -58,13 +58,13 @@ experiment:
           # Hair-trigger recognition so InhibitRecognizedObject fires in this
           # short debug episode; cube/disk/cylinder evidences run within ~1-4%
           # of each other on the shared surface.
-          x_percent_threshold: 1
+          x_percent_threshold: 10
           region_proposers:
             - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.inhibit_recognized_object.InhibitRecognizedObject
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
         learning_module_2:
-          x_percent_threshold: 1
+          x_percent_threshold: 10
           region_proposers:
             - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.inhibit_recognized_object.InhibitRecognizedObject
           telemetry:
