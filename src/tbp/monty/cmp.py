@@ -451,7 +451,7 @@ class AttentionRegion:
             ValueError: If ``locations`` is not (N, 3) or ``weights`` is not
                 (N,) for the same N.
         """
-        locations = np.asarray(self.locations)
+        locations = np.asarray(self.locations).reshape(-1, 3)
         weights = np.asarray(self.weights)
         if len(locations) != len(weights):
             raise ValueError(
