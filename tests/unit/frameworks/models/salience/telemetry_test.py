@@ -162,12 +162,9 @@ class NoopSalienceSMTelemetryTest(unittest.TestCase):
         self.telemetry.goals([goal(1.0, 0.5)])
         self.telemetry.attention_region(AttentionRegion.empty())
 
-        self.telemetry.step(3)
-
         self.assertEqual(
             self.telemetry.state_dict(),
             {
-                "steps": [],
                 "raw_observations": [],
                 "sm_properties": [],
                 "salience_maps": [],

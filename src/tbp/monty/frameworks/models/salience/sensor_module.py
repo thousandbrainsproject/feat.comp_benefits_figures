@@ -66,9 +66,6 @@ class SalienceSM(SensorModule):
 
         self._goals: list[Goal] = []
         self._region = None
-        # Steps this episode, counted here since the step loop does not say:
-        # the telemetry records which ones it holds data for.
-        self._step = -1
 
         # TODO: Goes away once experiment code is extracted
         self.is_exploring = False
@@ -90,7 +87,6 @@ class SalienceSM(SensorModule):
     def reset(self) -> None:
         self._goals.clear()
         self._region = None
-        self._step = -1
         self._return_inhibitor.reset()
         self._snapshot_telemetry.reset()
         self.is_exploring = False
@@ -131,7 +127,6 @@ class SalienceSM(SensorModule):
             motor_only_step: Whether the current step is a motor-only step.
 
         """
-        self._step += 1
         if motor_only_step:
             return
 
@@ -166,7 +161,6 @@ class SalienceSM(SensorModule):
         )
 
         if not self.is_exploring:
-            self._snapshot_telemetry.step(self._step)
             self._snapshot_telemetry.raw_observation(
                 observation, self.state.rotation, self.state.position
             )
