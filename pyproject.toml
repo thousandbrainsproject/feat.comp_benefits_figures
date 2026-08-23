@@ -137,6 +137,7 @@ exclude = ['venv', '\.venv', '\.direnv', '\.git', 'setup\.py']
 experimental_namespace_package = true # recognize tbp.monty as a namespace package
 ignore = ['DEP002']
 known_first_party = [
+    'analysis',
     'attr', # transitive dependency bundled with habitat-sim
     'magnum', # transitive dependency bundled with habitat-sim
     'quaternion', # transitive add-on for numpy installed via conda (conda-forge::quaternion)
