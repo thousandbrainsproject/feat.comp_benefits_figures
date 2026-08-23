@@ -23,12 +23,15 @@ from tbp.monty.frameworks.models.buffer import BufferEncoder
 from tbp.monty.frameworks.utils.logging_utils import maybe_rename_existing_dir
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Container, Sequence
+    from collections.abc import Callable, Container, Iterator, Sequence
 
 __all__ = [
+    "LazyDict",
+    "LazyList",
     "NpzHandler",
     "PathFilter",
     "load_episode",
+    "materialize",
 ]
 
 logger = logging.getLogger(__name__)
@@ -376,18 +379,150 @@ def _is_atomic(obj: Any) -> bool:
     )
 
 
-def load_episode(path: str | Path) -> dict[str, Any]:
+def load_episode(path: str | Path, lazy: bool = False) -> dict[str, Any]:
     """Load an episode written by :class:`NpzHandler`.
 
     Args:
         path: The episode's ``.npz`` file.
+        lazy: Read array members from the file on first access instead of
+            all at once. The stats then hold :class:`LazyDict` /
+            :class:`LazyList` nodes (``dict`` / ``list`` subclasses) that
+            resolve a reference the first time it is looked up, iterated or
+            unpacked, and keep the file open as long as they live; copying
+            or pickling one resolves everything below it into plain dicts
+            and lists. Only C code that reads a dict's items without
+            calling ``__getitem__`` (``orjson.dumps``) sees unresolved
+            references.
 
     Returns:
         ``{"<episode_id>": {<episode stats>}}`` with every array reference
         replaced by the array.
     """
-    with np.load(path) as npz:
-        return resolve(orjson.loads(npz[INDEX_KEY].tobytes()), npz)
+    npz = np.load(path)
+    index = orjson.loads(npz[INDEX_KEY].tobytes())
+    if lazy:
+        return LazyDict(index, npz)
+    with npz:
+        return resolve(index, npz)
+
+
+class LazyDict(dict):
+    """A dict that resolves array references from an open npz on access.
+
+    Each lookup replaces the looked-up value in place -- a reference by its
+    array, a plain child dict or list by a lazy one -- so a value is read
+    from the file once and is an ordinary object afterwards. Whole-dict
+    access (``items``, ``values``, iteration, ``**`` unpacking, ``dict(...)``)
+    resolves every value at this level first.
+    """
+
+    __slots__ = ("_npz",)
+
+    def __init__(self, items: Mapping[str, Any], npz: Mapping[str, np.ndarray]) -> None:
+        super().__init__(items)
+        self._npz = npz
+
+    def __getitem__(self, key: Any) -> Any:
+        value = super().__getitem__(key)
+        resolved = _resolve_lazy(value, self._npz)
+        if resolved is not value:
+            super().__setitem__(key, resolved)
+        return resolved
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        # dict.get bypasses __getitem__, so resolve here.
+        if key in self:
+            return self[key]
+        return default
+
+    def __iter__(self) -> Iterator:
+        # Overriding __iter__ also steers dict(...) and {**...} away from
+        # the C fast path that would copy raw references.
+        return iter(list(super().__iter__()))
+
+    def _resolve_all(self) -> None:
+        for key in list(super().__iter__()):
+            self[key]
+
+    def items(self) -> Any:
+        self._resolve_all()
+        return super().items()
+
+    def values(self) -> Any:
+        self._resolve_all()
+        return super().values()
+
+    def copy(self) -> dict:
+        self._resolve_all()
+        return dict(super().items())
+
+    def __reduce__(self) -> tuple:
+        # Pickles and deep-copies become plain, fully loaded dicts.
+        return (dict, (materialize(self),))
+
+
+class LazyList(list):
+    """A list whose dict and list items are lazy; see :class:`LazyDict`.
+
+    Array references directly in the list are resolved when the list is
+    created, so C code reading list items directly (``np.asarray``) never
+    sees one; nested dicts and lists stay lazy.
+    """
+
+    __slots__ = ("_npz",)
+
+    def __init__(self, items: list, npz: Mapping[str, np.ndarray]) -> None:
+        super().__init__(
+            _resolve_lazy(item, npz) if _is_reference(item) else item for item in items
+        )
+        self._npz = npz
+
+    def __getitem__(self, index: Any) -> Any:
+        if isinstance(index, slice):
+            return LazyList(super().__getitem__(index), self._npz)
+        value = super().__getitem__(index)
+        resolved = _resolve_lazy(value, self._npz)
+        if resolved is not value:
+            super().__setitem__(index, resolved)
+        return resolved
+
+    def __iter__(self) -> Iterator:
+        return (self[index] for index in range(len(self)))
+
+    def __reduce__(self) -> tuple:
+        return (list, (materialize(self),))
+
+
+def materialize(stats: Any) -> Any:
+    """A fully loaded, plain-dict-and-list copy of (possibly lazy) stats.
+
+    Args:
+        stats: Stats from :func:`load_episode`, lazy or not.
+
+    Returns:
+        The same tree with every reference resolved and no lazy nodes.
+    """
+    if isinstance(stats, dict):
+        return {key: materialize(value) for key, value in stats.items()}
+    if isinstance(stats, list):
+        return [materialize(item) for item in stats]
+    return stats
+
+
+def _is_reference(value: Any) -> bool:
+    return isinstance(value, dict) and value.keys() == {ARRAY_REFERENCE}
+
+
+def _resolve_lazy(value: Any, npz: Mapping[str, np.ndarray]) -> Any:
+    if isinstance(value, (LazyDict, LazyList)):
+        return value
+    if _is_reference(value):
+        return npz[value[ARRAY_REFERENCE]["key"]]
+    if isinstance(value, dict):
+        return LazyDict(value, npz)
+    if isinstance(value, list):
+        return LazyList(value, npz)
+    return value
 
 
 def resolve(stats: Any, arrays: Mapping[str, np.ndarray]) -> Any:

@@ -8,6 +8,8 @@
 # https://opensource.org/licenses/MIT.
 from __future__ import annotations
 
+import copy
+import pickle
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,6 +36,7 @@ from tbp.monty.frameworks.loggers.npz_handler import (
     _join_path,
     _map_arrays,
     load_episode,
+    materialize,
     resolve,
 )
 
@@ -765,6 +768,95 @@ class LoadEpisodeTest(unittest.TestCase):
 
         self.path.unlink()
         nptest.assert_array_equal(loaded["7"]["a"], np.arange(4.0))
+
+
+class LazyLoadTest(unittest.TestCase):
+    """``load_episode(lazy=True)`` reads members on access and acts like dicts."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "episode_000000.npz"
+        self.stats = {
+            "SM_0": {
+                "raw_observations": [
+                    {"rgba": np.full((4, 4), step)} for step in range(3)
+                ],
+                "maps": [np.arange(16.0), np.arange(16.0) * 2],
+                "name": "s",
+            },
+            "target": {"object": "mug", "position": [0.0, 1.0, 2.0]},
+        }
+        NpzHandler(min_array_size=4, float_dtype=None).write(0, self.stats, self.path)
+        self.lazy = load_episode(self.path, lazy=True)["0"]
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_reads_members_on_access_only(self) -> None:
+        reads: list[str] = []
+        original = np.lib.npyio.NpzFile.__getitem__
+
+        def counting(npz: np.lib.npyio.NpzFile, key: str) -> np.ndarray:
+            reads.append(key)
+            return original(npz, key)
+
+        with patch.object(np.lib.npyio.NpzFile, "__getitem__", counting):
+            lazy = load_episode(self.path, lazy=True)["0"]
+            self.assertEqual(reads, [INDEX_KEY])
+            lazy["target"]
+            self.assertEqual(reads, [INDEX_KEY])
+            lazy["SM_0"]["raw_observations"][1]["rgba"]
+            lazy["SM_0"]["raw_observations"][1]["rgba"]
+
+        self.assertEqual(reads, [INDEX_KEY, "SM_0/raw_observations/1/rgba"])
+
+    def test_equals_the_eager_tree_everywhere(self) -> None:
+        eager = load_episode(self.path)["0"]
+
+        self.assertIsInstance(self.lazy, dict)
+        self.assertEqual(self.lazy["target"], eager["target"])
+        nptest.assert_array_equal(
+            self.lazy["SM_0"]["raw_observations"][2]["rgba"],
+            eager["SM_0"]["raw_observations"][2]["rgba"],
+        )
+        nptest.assert_array_equal(self.lazy["SM_0"]["maps"], eager["SM_0"]["maps"])
+
+    def test_whole_dict_access_resolves(self) -> None:
+        block = self.lazy["SM_0"]
+
+        self.assertEqual(list(block), ["raw_observations", "maps", "name"])
+        self.assertEqual(block.get("name"), "s")
+        self.assertIsNone(block.get("missing"))
+        values = dict(block.items())
+        nptest.assert_array_equal(values["maps"][0], np.arange(16.0))
+        nptest.assert_array_equal(dict(block)["maps"][1], np.arange(16.0) * 2)
+        nptest.assert_array_equal({**block}["maps"][0], np.arange(16.0))
+
+    def test_lists_iterate_slice_and_convert(self) -> None:
+        observations = self.lazy["SM_0"]["raw_observations"]
+
+        self.assertEqual(len(observations), 3)
+        self.assertEqual([o["rgba"][0, 0] for o in observations], [0, 1, 2])
+        self.assertEqual(observations[1:][0]["rgba"][0, 0], 1)
+        nptest.assert_array_equal(np.stack(self.lazy["SM_0"]["maps"]).shape, (2, 16))
+
+    def test_copies_and_pickles_as_plain_loaded_dicts(self) -> None:
+        copied = copy.deepcopy(self.lazy)
+        unpickled = pickle.loads(pickle.dumps(self.lazy))  # noqa: S301
+
+        for tree in (copied, unpickled):
+            self.assertIs(type(tree), dict)
+            self.assertIs(type(tree["SM_0"]["raw_observations"]), list)
+            nptest.assert_array_equal(
+                tree["SM_0"]["raw_observations"][0]["rgba"], np.zeros((4, 4))
+            )
+
+    def test_materialize_gives_the_eager_tree(self) -> None:
+        plain = materialize(self.lazy)
+
+        self.assertIs(type(plain), dict)
+        self.assertIs(type(plain["SM_0"]["raw_observations"][0]), dict)
+        nptest.assert_array_equal(plain["SM_0"]["maps"][0], np.arange(16.0))
 
 
 class ResolveTest(unittest.TestCase):
