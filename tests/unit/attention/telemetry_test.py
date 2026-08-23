@@ -39,17 +39,17 @@ class AttentionSystemTelemetryTest(unittest.TestCase):
     def test_each_step_records_a_snapshot(self) -> None:
         self.system.step([], [region(NEAR_POINT)])
         self.system.step([], [region(FAR_POINT)])
-        self.assertEqual(len(self.system.state_dict()["voxel_grids"]), 2)
+        self.assertEqual(len(self.system.state_dict()["grids"]), 2)
 
     def test_a_snapshot_is_unaffected_by_later_steps(self) -> None:
         self.system.step([], [region(NEAR_POINT)])
-        first = self.system.state_dict()["voxel_grids"][0]
+        first = self.system.state_dict()["grids"][0]
         weight_then = first["weight"].to_numpy().copy()
 
         # The next step decays the live grid in place and grows it.
         self.system.step([], [region(FAR_POINT)])
 
-        grids = self.system.state_dict()["voxel_grids"]
+        grids = self.system.state_dict()["grids"]
         np.testing.assert_array_equal(grids[0]["weight"].to_numpy(), weight_then)
         self.assertEqual(len(grids[0]), 1)
         self.assertEqual(len(grids[1]), 2)
@@ -57,21 +57,21 @@ class AttentionSystemTelemetryTest(unittest.TestCase):
     def test_reset_discards_the_snapshots(self) -> None:
         self.system.step([], [region(NEAR_POINT)])
         self.system.reset()
-        self.assertEqual(self.system.state_dict()["voxel_grids"], [])
+        self.assertEqual(self.system.state_dict()["grids"], [])
 
     def test_the_proposed_grid_holds_only_this_steps_regions(self) -> None:
         self.system.step([], [region(NEAR_POINT)])
         self.system.step([], [region(FAR_POINT)])
 
         state = self.system.state_dict()
-        self.assertEqual(len(state["proposed"][1]), 1)
-        self.assertEqual(len(state["voxel_grids"][1]), 2)
+        self.assertEqual(len(state["proposed_grids"][1]), 1)
+        self.assertEqual(len(state["grids"][1]), 2)
 
     def test_snapshots_encode_into_arrays(self) -> None:
         self.system.step([], [region(NEAR_POINT, weight=2)])
         self.system.step([], [region(NEAR_POINT, FAR_POINT, weight=2)])
         encoded = json.loads(json.dumps(self.system.state_dict(), cls=BufferEncoder))
-        snapshot = encoded["voxel_grids"][1]
+        snapshot = encoded["grids"][1]
         self.assertEqual(snapshot["voxels"], [list(NEAR_VOXEL), list(FAR_VOXEL)])
         # Both voxels take this step's freshly proposed weight outright.
         self.assertEqual(snapshot["weight"], [2, 2])
@@ -82,19 +82,19 @@ class AttentionSystemTelemetryTest(unittest.TestCase):
         # clamping it and expiring the voxel.
         self.system.step([], [])
         self.system.step([], [])
-        snapshot = self.system.state_dict()["voxel_grids"][2]
+        snapshot = self.system.state_dict()["grids"][2]
         self.assertEqual(len(snapshot), 0)
 
     def test_state_dict_is_json_encodable(self) -> None:
         self.system.step([], [region(NEAR_POINT)])
         self.system.step([], [])
         encoded = json.loads(json.dumps(self.system.state_dict(), cls=BufferEncoder))
-        self.assertEqual(encoded["voxel_grids"][0]["voxels"], [list(NEAR_VOXEL)])
+        self.assertEqual(encoded["grids"][0]["voxels"], [list(NEAR_VOXEL)])
 
     def test_a_default_telemetry_is_created_when_none_is_supplied(self) -> None:
         system = AttentionSystem()
         system.step([], [region(NEAR_POINT)])
-        self.assertEqual(len(system.state_dict()["voxel_grids"]), 1)
+        self.assertEqual(len(system.state_dict()["grids"]), 1)
 
     def test_state_dict_carries_the_grid_geometry(self) -> None:
         state = self.system.state_dict()
@@ -111,6 +111,6 @@ class NoopAttentionSystemTelemetryTest(unittest.TestCase):
 
         state = self.system.state_dict()
         self.assertEqual(
-            {k: state[k] for k in ("voxel_grids", "proposed")},
-            {"voxel_grids": [], "proposed": []},
+            {k: state[k] for k in ("grids", "proposed_grids")},
+            {"grids": [], "proposed_grids": []},
         )

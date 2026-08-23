@@ -154,7 +154,7 @@ class MotorSystem(RuntimeMotorSystem, ExperimentMotorSystem):
         percept: Message,
         goals: Sequence[Goal],
     ) -> list[Action]:
-        self._telemetry.goals(goals)
+        self._telemetry.goals_in(goals)
         motor_system_state = MotorSystemState(proprioceptive_state)
         policy_result = self._policy_selector(
             ctx, observations, motor_system_state, percept, goals

@@ -23,9 +23,9 @@ __all__ = [
 class AttentionSystemTelemetryProtocol(Protocol):
     def reset(self) -> None: ...
 
-    def proposed(self, grid: VoxelGrid) -> None: ...
+    def proposed_grid(self, grid: VoxelGrid) -> None: ...
 
-    def voxel_grid(self, grid: VoxelGrid) -> None: ...
+    def grid(self, grid: VoxelGrid) -> None: ...
 
     def state_dict(self) -> Memento: ...
 
@@ -34,39 +34,39 @@ class NoopAttentionSystemTelemetry(AttentionSystemTelemetryProtocol):
     def reset(self) -> None:
         pass
 
-    def proposed(self, grid: VoxelGrid) -> None:
+    def proposed_grid(self, grid: VoxelGrid) -> None:
         pass
 
-    def voxel_grid(self, grid: VoxelGrid) -> None:
+    def grid(self, grid: VoxelGrid) -> None:
         pass
 
     def state_dict(self) -> Memento:
         # The empty schema, so consumers indexing these keys stay simple.
-        return dict(voxel_grids=[], proposed=[])
+        return dict(grids=[], proposed_grids=[])
 
 
 class AttentionSystemTelemetry(AttentionSystemTelemetryProtocol):
     """Keeps each step's grids for the episode: the proposals and the result."""
 
     def __init__(self) -> None:
-        self._voxel_grids: list[VoxelGrid] = []
-        self._proposed: list[VoxelGrid] = []
+        self._grids: list[VoxelGrid] = []
+        self._proposed_grids: list[VoxelGrid] = []
 
     def reset(self) -> None:
-        self._voxel_grids = []
-        self._proposed = []
+        self._grids = []
+        self._proposed_grids = []
 
-    def voxel_grid(self, grid: VoxelGrid) -> None:
+    def grid(self, grid: VoxelGrid) -> None:
         # Snapshot: decay updates the live grid's frame in place.
-        self._voxel_grids.append(grid.copy())
+        self._grids.append(grid.copy())
 
-    def proposed(self, grid: VoxelGrid) -> None:
-        self._proposed.append(grid)
+    def proposed_grid(self, grid: VoxelGrid) -> None:
+        self._proposed_grids.append(grid)
 
     def state_dict(self) -> Memento:
         # The grids ride along as objects; BufferEncoder flattens them at
         # serialization time (see voxel_grid.encode_voxel_grid).
         return dict(
-            voxel_grids=list(self._voxel_grids),
-            proposed=list(self._proposed),
+            grids=list(self._grids),
+            proposed_grids=list(self._proposed_grids),
         )

@@ -99,7 +99,7 @@ class AttentionSystem(AttentionSystemProtocol):
         voxel_size = float(voxel_size)
         assert voxel_size > 0, "voxel_size must be positive"
         self._voxel_size = voxel_size
-        self._voxel_grid = VoxelGrid(voxel_size)
+        self._grid = VoxelGrid(voxel_size)
         self._pool_weights = (
             negative_priority_max_pool if pool_weights is None else pool_weights
         )
@@ -114,9 +114,9 @@ class AttentionSystem(AttentionSystemProtocol):
         return self._voxel_size
 
     @property
-    def voxel_grid(self) -> VoxelGrid:
+    def grid(self) -> VoxelGrid:
         """The persistent voxel grid."""
-        return self._voxel_grid
+        return self._grid
 
     def step(self, goals: list[Goal], regions: Sequence[AttentionRegion]) -> list[Goal]:
         """Update the attention system with new regions and filter goals.
@@ -129,21 +129,21 @@ class AttentionSystem(AttentionSystemProtocol):
         Returns:
             Filtered list of goals.
         """
-        proposed: VoxelGrid = self.voxelize_attention_regions(regions)
-        self._telemetry.proposed(proposed)
+        proposed_grid = self.voxelize_attention_regions(regions)
+        self._telemetry.proposed_grid(proposed_grid)
         # Decay what is already held before folding in what was just proposed,
         # so that a re-proposed voxel's fresh row lands on top of the tick
         # rather than after it.
-        self._decay(self._voxel_grid)
-        merged = self._merge(self._voxel_grid, proposed)
-        self._voxel_grid = self.expire(merged)
-        self._telemetry.voxel_grid(self._voxel_grid)
+        self._decay(self._grid)
+        merged = self._merge(self._grid, proposed_grid)
+        self._grid = self.expire(merged)
+        self._telemetry.grid(self._grid)
 
         return self.filter_goals(goals)
 
     def reset(self) -> None:
         """Discard the current grid and recorded telemetry."""
-        self._voxel_grid = VoxelGrid(self._voxel_size)
+        self._grid = VoxelGrid(self._voxel_size)
         self._telemetry.reset()
 
     def state_dict(self) -> Memento:
@@ -217,7 +217,7 @@ class AttentionSystem(AttentionSystemProtocol):
         """
         for g in goals:
             g.info["passed_attention_filter"] = False
-        filtered = self._goal_filter(self._voxel_grid, goals)
+        filtered = self._goal_filter(self._grid, goals)
         for g in filtered:
             g.info["passed_attention_filter"] = True
         return filtered

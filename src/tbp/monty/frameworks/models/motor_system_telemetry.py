@@ -30,7 +30,7 @@ class MotorSystemTelemetryProtocol(Protocol):
 
     def reset(self) -> None: ...
 
-    def goals(self, goals: Sequence[Goal]) -> None: ...
+    def goals_in(self, goals: Sequence[Goal]) -> None: ...
 
     def state_dict(self) -> Memento: ...
 
@@ -41,29 +41,29 @@ class NoopMotorSystemTelemetry(MotorSystemTelemetryProtocol):
     def reset(self) -> None:
         pass
 
-    def goals(self, goals: Sequence[Goal]) -> None:
+    def goals_in(self, goals: Sequence[Goal]) -> None:
         pass
 
     def state_dict(self) -> Memento:
         # The empty schema, so consumers indexing these keys stay simple.
-        return dict(goals=[])
+        return dict(goals_in=[])
 
 
 class MotorSystemTelemetry(MotorSystemTelemetryProtocol):
-    """Keeps the goals the motor system received each step.
+    """Keeps the goals the motor system received each step, as ``goals_in``.
 
     Each step's goals are kept as columns (see
     :func:`~tbp.monty.cmp.goals_to_columns`) rather than as ``Goal`` objects.
     """
 
     def __init__(self) -> None:
-        self._goals: list[dict[str, object]] = []
+        self._goals_in: list[dict[str, object]] = []
 
     def reset(self) -> None:
-        self._goals = []
+        self._goals_in = []
 
-    def goals(self, goals: Sequence[Goal]) -> None:
-        self._goals.append(goals_to_columns(goals))
+    def goals_in(self, goals: Sequence[Goal]) -> None:
+        self._goals_in.append(goals_to_columns(goals))
 
     def state_dict(self) -> Memento:
-        return dict(goals=list(self._goals))
+        return dict(goals_in=list(self._goals_in))

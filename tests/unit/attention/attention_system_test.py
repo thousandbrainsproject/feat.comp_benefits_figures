@@ -96,7 +96,7 @@ def weights_by_voxel(system: AttentionSystem) -> dict[tuple[int, int, int], floa
         Voxel coordinate to weight, for every voxel the system holds.
 
     """
-    data = system.voxel_grid.to_pandas()
+    data = system.grid.to_pandas()
     voxels = [tuple(int(c) for c in index) for index in data.index]
     return dict(zip(voxels, data["weight"].to_numpy().ravel().tolist()))
 
@@ -107,15 +107,15 @@ class AttentionSystemGridTest(unittest.TestCase):
 
     def test_locations_sharing_a_voxel_collapse_to_one_row(self) -> None:
         self.system.step([], [region(*NEAR_POINTS, FAR_POINT)])
-        self.assertEqual(len(self.system.voxel_grid), 2)
+        self.assertEqual(len(self.system.grid), 2)
 
     def test_no_regions_yield_an_empty_grid(self) -> None:
         self.system.step([], [])
-        self.assertEqual(len(self.system.voxel_grid), 0)
+        self.assertEqual(len(self.system.grid), 0)
 
     def test_empty_regions_yield_an_empty_grid(self) -> None:
         self.system.step([], [AttentionRegion.empty(), AttentionRegion.empty()])
-        self.assertEqual(len(self.system.voxel_grid), 0)
+        self.assertEqual(len(self.system.grid), 0)
 
     def test_a_step_adds_to_the_grid_rather_than_replacing_it(self) -> None:
         self.system.step([], [region(*NEAR_POINTS)])
@@ -129,7 +129,7 @@ class AttentionSystemGridTest(unittest.TestCase):
     def test_reset_discards_the_grid(self) -> None:
         self.system.step([], [region(*NEAR_POINTS)])
         self.system.reset()
-        self.assertEqual(len(self.system.voxel_grid), 0)
+        self.assertEqual(len(self.system.grid), 0)
 
 
 class AttentionSystemWeightTest(unittest.TestCase):
@@ -198,7 +198,7 @@ class AttentionSystemWeightTest(unittest.TestCase):
         self.observe_near(weight=0.15)
         for _ in range(2):
             self.system.step([], [])
-        self.assertEqual(len(self.system.voxel_grid), 0)
+        self.assertEqual(len(self.system.grid), 0)
 
 
 class AttentionSystemFilterTest(unittest.TestCase):
@@ -318,7 +318,7 @@ class AttentionSystemPipelineTest(unittest.TestCase):
     def test_the_grid_index_is_sorted(self) -> None:
         # Proposals arrive in arbitrary order; the grid is kept sorted.
         self.system.step([], [region(FAR_POINT, NEAR_POINTS[0])])
-        index = self.system.voxel_grid.index
+        index = self.system.grid.index
         self.assertTrue(index.is_monotonic_increasing)
 
     def test_a_custom_pooler_is_used(self) -> None:
@@ -331,7 +331,7 @@ class AttentionSystemPipelineTest(unittest.TestCase):
         self.system.step([], [region(NEAR_POINTS[0])])
         state = self.system.state_dict()
         self.assertEqual(state["voxel_size"], DEFAULT_VOXEL_SIZE)
-        self.assertEqual(len(state["voxel_grids"]), 1)
+        self.assertEqual(len(state["grids"]), 1)
 
     def test_goals_and_regions_flow_through_one_step(self) -> None:
         # End to end: a region admits its goal, everything else is dropped.

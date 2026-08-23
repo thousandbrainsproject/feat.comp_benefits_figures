@@ -33,7 +33,7 @@ class MotorSystemTest(unittest.TestCase):
         state_dict = self.motor_system.state_dict()
 
         self.assertEqual(state_dict["policy"], sentinel.policy)
-        self.assertEqual(state_dict["telemetry"], {"goals": []})
+        self.assertEqual(state_dict["telemetry"], {"goals_in": []})
 
     def test_records_the_goals_it_receives_in_its_telemetry(self):
         telemetry = MotorSystemTelemetry()
@@ -55,7 +55,7 @@ class MotorSystemTest(unittest.TestCase):
         motor_system(Mock(), Mock(), {}, Mock(), [goal])
         motor_system(Mock(), Mock(), {}, Mock(), [])
 
-        goals = motor_system.state_dict()["telemetry"]["goals"]
+        goals = motor_system.state_dict()["telemetry"]["goals_in"]
         self.assertEqual(len(goals), 2)
         np.testing.assert_array_equal(goals[0]["locations"], [[1.0, 2.0, 3.0]])
         self.assertEqual(list(goals[0]["sender_ids"]), ["view_finder"])

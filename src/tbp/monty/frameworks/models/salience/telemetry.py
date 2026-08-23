@@ -32,6 +32,8 @@ __all__ = [
 class SalienceSMTelemetryProtocol(Protocol):
     def reset(self) -> None: ...
 
+    def step(self, step: int) -> None: ...
+
     def raw_observation(
         self,
         raw_observation: SensorObservation,
@@ -52,6 +54,9 @@ class SalienceSMTelemetryProtocol(Protocol):
 
 class NoopSalienceSMTelemetry(SalienceSMTelemetryProtocol):
     def reset(self) -> None:
+        pass
+
+    def step(self, step: int) -> None:
         pass
 
     def raw_observation(
@@ -77,6 +82,7 @@ class NoopSalienceSMTelemetry(SalienceSMTelemetryProtocol):
     def state_dict(self) -> Memento:
         # The empty schema, so consumers indexing these keys stay simple.
         return dict(
+            steps=[],
             raw_observations=[],
             sm_properties=[],
             salience_maps=[],
@@ -89,9 +95,11 @@ class NoopSalienceSMTelemetry(SalienceSMTelemetryProtocol):
 class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
     """Keeps track of all of SalienceSM's telemetry.
 
-    Records per step: raw observation snapshots with their poses, the 2D
-    salience map, the 2D segmentation mask, the goals proposed (as columns,
-    see :func:`~tbp.monty.cmp.goals_to_columns`) and the attention region
+    Records per step: the episode step it happened at (``steps``, since a
+    sensor module records nothing on exploratory steps), raw observation
+    snapshots with their poses, the 2D salience map, the 2D segmentation
+    mask, the goals proposed (as columns, see
+    :func:`~tbp.monty.cmp.goals_to_columns`) and the attention region
     proposed from the mask. Whether anything is recorded at all is the sensor module's
     decision (its `save_raw_obs` switch).
     Everything stored here is JSON-encodable by BufferEncoder, so the state
@@ -99,6 +107,7 @@ class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
     """
 
     def __init__(self) -> None:
+        self.steps: list[int] = []
         self.raw_observations: list[SensorObservation] = []
         self.poses: list[dict[str, np.ndarray]] = []
         self.salience_maps: list[np.ndarray] = []
@@ -108,12 +117,21 @@ class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
 
     def reset(self) -> None:
         """Reset the telemetry."""
+        self.steps = []
         self.raw_observations = []
         self.poses = []
         self.salience_maps = []
         self.segmentation_maps = []
         self._goals = []
         self._attention_regions = []
+
+    def step(self, step: int) -> None:
+        """Record the episode step the next recordings belong to.
+
+        Args:
+            step: The step, counted from 0 at the start of the episode.
+        """
+        self.steps.append(step)
 
     def raw_observation(
         self,
@@ -183,6 +201,7 @@ class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
             proposed regions in `attention_regions`.
         """
         return dict(
+            steps=self.steps,
             goals=self._goals,
             attention_regions=self._attention_regions,
             raw_observations=self.raw_observations,

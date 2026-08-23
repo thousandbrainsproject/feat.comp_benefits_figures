@@ -328,6 +328,18 @@ class SalienceSMTelemetryRecordingTest(unittest.TestCase):
         self.assertEqual(step["locations"].shape, (3, 3))
         self.assertEqual(set(step["sender_ids"]), {"test"})
 
+    def test_step_records_the_episode_step_it_ran_at(self) -> None:
+        self.step()
+        self.sensor_module.step(self.ctx, self.observation, motor_only_step=True)
+        self.step()
+        self.assertEqual(self.telemetry.state_dict()["steps"], [0, 2])
+
+    def test_reset_restarts_the_step_count(self) -> None:
+        self.step()
+        self.sensor_module.reset()
+        self.step()
+        self.assertEqual(self.telemetry.state_dict()["steps"], [0])
+
     def test_step_records_the_proposed_region(self) -> None:
         self.step()
         (region,) = self.telemetry.state_dict()["attention_regions"]
@@ -358,6 +370,7 @@ class SalienceSMTelemetryRecordingTest(unittest.TestCase):
                 "salience_maps",
                 "goals",
                 "attention_regions",
+                "steps",
             },
         )
 
