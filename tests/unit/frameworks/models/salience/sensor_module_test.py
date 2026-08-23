@@ -320,10 +320,25 @@ class SalienceSMTelemetryRecordingTest(unittest.TestCase):
             state["segmentation_maps"][0], self.segmentation_map
         )
 
+    def test_step_records_the_goals_as_columns(self) -> None:
+        self.step()
+        (step,) = self.telemetry.state_dict()["goals"]
+        # One goal per on-object pixel, with the weighted salience as confidence.
+        np.testing.assert_array_equal(step["confidences"], self.weighted_salience)
+        self.assertEqual(step["locations"].shape, (3, 3))
+        self.assertEqual(set(step["sender_ids"]), {"test"})
+
+    def test_step_records_the_proposed_region(self) -> None:
+        self.step()
+        (region,) = self.telemetry.state_dict()["attention_regions"]
+        self.assertIs(region, self.sensor_module.propose_region())
+
     def test_step_does_not_record_while_exploring(self) -> None:
         self.sensor_module.is_exploring = True
         self.step()
         self.assertEqual(self.telemetry.state_dict()["segmentation_maps"], [])
+        self.assertEqual(self.telemetry.state_dict()["goals"], [])
+        self.assertEqual(self.telemetry.state_dict()["attention_regions"], [])
 
     def test_without_a_segmentation_strategy_none_is_recorded(self) -> None:
         self.sensor_module._segmentation_strategy = None
@@ -341,6 +356,8 @@ class SalienceSMTelemetryRecordingTest(unittest.TestCase):
                 "sm_properties",
                 "segmentation_maps",
                 "salience_maps",
+                "goals",
+                "attention_regions",
             },
         )
 

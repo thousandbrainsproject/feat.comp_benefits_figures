@@ -12,7 +12,6 @@ import json
 import unittest
 
 import numpy as np
-import numpy.testing as nptest
 
 from tbp.monty.attention.attention_system import (
     DEFAULT_VOXEL_SIZE,
@@ -22,7 +21,6 @@ from tbp.monty.attention.telemetry import (
     AttentionSystemTelemetry,
     NoopAttentionSystemTelemetry,
 )
-from tbp.monty.cmp import AttentionRegion
 from tbp.monty.frameworks.models.buffer import BufferEncoder
 
 from .attention_system_test import goal_at, point_in, region
@@ -113,111 +111,6 @@ class NoopAttentionSystemTelemetryTest(unittest.TestCase):
 
         state = self.system.state_dict()
         self.assertEqual(
-            {k: state[k] for k in ("voxel_grids", "goals", "regions", "proposed")},
-            {"voxel_grids": [], "goals": [], "regions": [], "proposed": []},
+            {k: state[k] for k in ("voxel_grids", "proposed")},
+            {"voxel_grids": [], "proposed": []},
         )
-
-
-class AttentionSystemGoalTelemetryTest(unittest.TestCase):
-    """Each step's goals are recorded as columns, tagged with the filter decision."""
-
-    def setUp(self) -> None:
-        self.telemetry = AttentionSystemTelemetry()
-        self.system = AttentionSystem(telemetry=self.telemetry)
-
-    def test_each_step_records_every_goal_with_its_filter_decision(self) -> None:
-        inside = goal_at(NEAR_POINT)
-        outside = goal_at([9.0, 9, 9])
-        self.system.step([inside, outside], [region(NEAR_POINT)])
-
-        (step,) = self.system.state_dict()["goals"]
-        # Locations are recorded as float32.
-        nptest.assert_allclose(
-            step["locations"], [inside.location, outside.location], rtol=1e-6
-        )
-        nptest.assert_array_equal(step["passed_attention_filter"], [True, False])
-
-    def test_a_pass_through_step_tags_every_goal_as_passed(self) -> None:
-        self.system.step([goal_at(NEAR_POINT)], [])
-
-        (step,) = self.system.state_dict()["goals"]
-        nptest.assert_array_equal(step["passed_attention_filter"], [True])
-
-    def test_senders_are_listed_once_and_indexed_per_goal(self) -> None:
-        goals = [goal_at(NEAR_POINT, sender_id="a"), goal_at(NEAR_POINT, sender_id="b")]
-        self.system.step([*goals, goal_at(NEAR_POINT, sender_id="a")], [])
-
-        (step,) = self.system.state_dict()["goals"]
-        self.assertEqual(step["senders"], ["a", "b"])
-        self.assertEqual(step["sender_types"], ["SM", "SM"])
-        nptest.assert_array_equal(step["sender"], [0, 1, 0])
-
-    def test_a_goal_without_a_location_is_recorded_as_nan(self) -> None:
-        goal = goal_at(NEAR_POINT)
-        goal.location = None
-        self.system.step([goal], [])
-
-        (step,) = self.system.state_dict()["goals"]
-        self.assertTrue(np.isnan(step["locations"]).all())
-
-    def test_columns_are_json_encodable(self) -> None:
-        self.system.step([goal_at(NEAR_POINT)], [region(NEAR_POINT)])
-
-        encoded = json.loads(json.dumps(self.system.state_dict(), cls=BufferEncoder))
-        self.assertEqual(encoded["goals"][0]["passed_attention_filter"], [True])
-
-    def test_reset_discards_the_goal_records(self) -> None:
-        self.system.step([goal_at(NEAR_POINT)], [region(NEAR_POINT)])
-        self.system.reset()
-
-        self.assertEqual(self.system.state_dict()["goals"], [])
-
-
-class AttentionSystemRegionTelemetryTest(unittest.TestCase):
-    """Each step's proposals are kept as received, one region per module."""
-
-    def setUp(self) -> None:
-        self.system = AttentionSystem(telemetry=AttentionSystemTelemetry())
-
-    def test_each_step_records_the_proposed_regions_unmerged(self) -> None:
-        near = AttentionRegion.uniform([NEAR_POINT], 1.0, sender_id="SM_3")
-        far = AttentionRegion.uniform([FAR_POINT], -1.0, sender_id="learning_module_2")
-        self.system.step([], [near, far])
-        self.system.step([], [])
-
-        self.assertEqual(self.system.state_dict()["regions"], [[near, far], []])
-
-    def test_records_the_regions_before_they_are_merged(self) -> None:
-        # The grid pools co-voxel points and drops senders; the record does not.
-        region_a = AttentionRegion.uniform([NEAR_POINT], 1.0, sender_id="a")
-        region_b = AttentionRegion.uniform([NEAR_POINT], -1.0, sender_id="b")
-        self.system.step([], [region_a, region_b])
-
-        state = self.system.state_dict()
-        self.assertEqual([r.sender_id for r in state["regions"][0]], ["a", "b"])
-        self.assertEqual(len(state["voxel_grids"][0]), 1)
-
-    def test_regions_are_json_encodable(self) -> None:
-        self.system.step([], [AttentionRegion.uniform([NEAR_POINT], 1.0, "SM_3")])
-
-        encoded = json.loads(json.dumps(self.system.state_dict(), cls=BufferEncoder))
-        self.assertEqual(
-            encoded["regions"],
-            [
-                [
-                    {
-                        "locations": [list(NEAR_POINT)],
-                        "weights": [1.0],
-                        "sender_id": "SM_3",
-                    }
-                ]
-            ],
-        )
-
-    def test_reset_discards_the_region_records(self) -> None:
-        self.system.step([], [region(NEAR_POINT)])
-        self.system.reset()
-
-        state = self.system.state_dict()
-        self.assertEqual(state["regions"], [])
-        self.assertEqual(state["proposed"], [])

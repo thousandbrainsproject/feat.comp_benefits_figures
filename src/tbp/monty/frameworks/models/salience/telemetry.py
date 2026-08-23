@@ -8,13 +8,19 @@
 # https://opensource.org/licenses/MIT.
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 import quaternion as qt
 
+from tbp.monty.cmp import goals_to_columns
 from tbp.monty.frameworks.models.abstract_monty_classes import SensorObservation
 from tbp.monty.memento import Memento
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from tbp.monty.cmp import AttentionRegion, Goal
 
 __all__ = [
     "NoopSalienceSMTelemetry",
@@ -37,6 +43,10 @@ class SalienceSMTelemetryProtocol(Protocol):
 
     def segmentation_map(self, segmentation_map: np.ndarray | None) -> None: ...
 
+    def goals(self, goals: Sequence[Goal]) -> None: ...
+
+    def attention_region(self, region: AttentionRegion | None) -> None: ...
+
     def state_dict(self) -> Memento: ...
 
 
@@ -58,6 +68,12 @@ class NoopSalienceSMTelemetry(SalienceSMTelemetryProtocol):
     def segmentation_map(self, segmentation_map: np.ndarray | None) -> None:
         pass
 
+    def goals(self, goals: Sequence[Goal]) -> None:
+        pass
+
+    def attention_region(self, region: AttentionRegion | None) -> None:
+        pass
+
     def state_dict(self) -> Memento:
         # The empty schema, so consumers indexing these keys stay simple.
         return dict(
@@ -65,6 +81,8 @@ class NoopSalienceSMTelemetry(SalienceSMTelemetryProtocol):
             sm_properties=[],
             salience_maps=[],
             segmentation_maps=[],
+            goals=[],
+            attention_regions=[],
         )
 
 
@@ -72,9 +90,9 @@ class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
     """Keeps track of all of SalienceSM's telemetry.
 
     Records per step: raw observation snapshots with their poses, the 2D
-    salience map, and the 2D segmentation mask. The region proposed from the
-    mask is not recorded here; the attention system logs every module's
-    proposal. Whether anything is recorded at all is the sensor module's
+    salience map, the 2D segmentation mask, the goals proposed (as columns,
+    see :func:`~tbp.monty.cmp.goals_to_columns`) and the attention region
+    proposed from the mask. Whether anything is recorded at all is the sensor module's
     decision (its `save_raw_obs` switch).
     Everything stored here is JSON-encodable by BufferEncoder, so the state
     dict rides into the detailed logging stream with no special handling.
@@ -85,6 +103,8 @@ class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
         self.poses: list[dict[str, np.ndarray]] = []
         self.salience_maps: list[np.ndarray] = []
         self.segmentation_maps: list[np.ndarray | None] = []
+        self._goals: list[dict[str, np.ndarray]] = []
+        self._attention_regions: list[AttentionRegion | None] = []
 
     def reset(self) -> None:
         """Reset the telemetry."""
@@ -92,6 +112,8 @@ class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
         self.poses = []
         self.salience_maps = []
         self.segmentation_maps = []
+        self._goals = []
+        self._attention_regions = []
 
     def raw_observation(
         self,
@@ -131,6 +153,22 @@ class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
         """
         self.segmentation_maps.append(segmentation_map)
 
+    def goals(self, goals: Sequence[Goal]) -> None:
+        """Record one step's proposed goals as columns.
+
+        Args:
+            goals: The goals the sensor module proposed this step.
+        """
+        self._goals.append(goals_to_columns(goals))
+
+    def attention_region(self, region: AttentionRegion | None) -> None:
+        """Record the attention region proposed this step.
+
+        Args:
+            region: The region, or None when the sensor module proposed none.
+        """
+        self._attention_regions.append(region)
+
     def state_dict(self) -> Memento:
         """Return all recorded telemetry.
 
@@ -140,10 +178,13 @@ class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
 
         Returns:
             Raw observations in `raw_observations` with poses in
-            `sm_properties`, salience maps in `salience_maps`, and segmentation
-            masks in `segmentation_maps`.
+            `sm_properties`, salience maps in `salience_maps`, segmentation
+            masks in `segmentation_maps`, goal columns in `goals`, and the
+            proposed regions in `attention_regions`.
         """
         return dict(
+            goals=self._goals,
+            attention_regions=self._attention_regions,
             raw_observations=self.raw_observations,
             sm_properties=self.poses,
             salience_maps=self.salience_maps,

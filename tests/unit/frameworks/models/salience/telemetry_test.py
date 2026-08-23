@@ -14,6 +14,7 @@ import unittest
 import numpy as np
 import quaternion as qt
 
+from tbp.monty.cmp import AttentionRegion, Goal
 from tbp.monty.frameworks.models.buffer import BufferEncoder
 from tbp.monty.frameworks.models.salience.telemetry import (
     NoopSalienceSMTelemetry,
@@ -77,6 +78,77 @@ class SalienceSMTelemetrySalienceTest(unittest.TestCase):
         self.assertEqual(self.telemetry.state_dict()["salience_maps"], [])
 
 
+def goal(x: float, confidence: float) -> Goal:
+    return Goal(
+        location=np.array([x, 0.0, 0.0]),
+        morphological_features=None,
+        non_morphological_features=None,
+        confidence=confidence,
+        pass_message=False,
+        sender_id="view_finder",
+        sender_type="SM",
+        process_features_in_lm=False,
+        goal_tolerances=None,
+    )
+
+
+class SalienceSMTelemetryGoalsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.telemetry = SalienceSMTelemetry()
+
+    def test_each_step_records_its_goals_as_columns(self) -> None:
+        self.telemetry.goals([goal(1.0, 0.2), goal(2.0, 0.8)])
+        self.telemetry.goals([])
+
+        steps = self.telemetry.state_dict()["goals"]
+
+        self.assertEqual(len(steps), 2)
+        np.testing.assert_array_equal(steps[0]["locations"], [[1.0, 0, 0], [2.0, 0, 0]])
+        np.testing.assert_array_equal(steps[0]["confidences"], [0.2, 0.8])
+        self.assertEqual(list(steps[0]["sender_ids"]), ["view_finder"] * 2)
+        self.assertEqual(steps[1]["locations"].shape, (0, 3))
+
+    def test_columns_are_json_encodable(self) -> None:
+        self.telemetry.goals([goal(1.0, 0.5)])
+
+        encoded = json.loads(json.dumps(self.telemetry.state_dict(), cls=BufferEncoder))
+
+        self.assertEqual(encoded["goals"][0]["confidences"], [0.5])
+
+    def test_reset_discards_the_goals(self) -> None:
+        self.telemetry.goals([goal(1.0, 0.5)])
+        self.telemetry.reset()
+        self.assertEqual(self.telemetry.state_dict()["goals"], [])
+
+
+class SalienceSMTelemetryRegionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.telemetry = SalienceSMTelemetry()
+        self.region = AttentionRegion.uniform(
+            [[1.0, 0, 0]], 1.0, sender_id="view_finder"
+        )
+
+    def test_each_step_records_its_region_or_none(self) -> None:
+        self.telemetry.attention_region(self.region)
+        self.telemetry.attention_region(None)
+
+        regions = self.telemetry.state_dict()["attention_regions"]
+
+        self.assertEqual(regions, [self.region, None])
+
+    def test_regions_are_json_encodable(self) -> None:
+        self.telemetry.attention_region(self.region)
+
+        encoded = json.loads(json.dumps(self.telemetry.state_dict(), cls=BufferEncoder))
+
+        self.assertEqual(encoded["attention_regions"][0]["sender_id"], "view_finder")
+
+    def test_reset_discards_the_regions(self) -> None:
+        self.telemetry.attention_region(self.region)
+        self.telemetry.reset()
+        self.assertEqual(self.telemetry.state_dict()["attention_regions"], [])
+
+
 class NoopSalienceSMTelemetryTest(unittest.TestCase):
     def setUp(self) -> None:
         self.telemetry = NoopSalienceSMTelemetry()
@@ -87,6 +159,8 @@ class NoopSalienceSMTelemetryTest(unittest.TestCase):
         )
         self.telemetry.salience_map(np.zeros((2, 2)))
         self.telemetry.segmentation_map(np.zeros((2, 2), dtype=np.uint8))
+        self.telemetry.goals([goal(1.0, 0.5)])
+        self.telemetry.attention_region(AttentionRegion.empty())
 
         self.assertEqual(
             self.telemetry.state_dict(),
@@ -95,6 +169,8 @@ class NoopSalienceSMTelemetryTest(unittest.TestCase):
                 "sm_properties": [],
                 "salience_maps": [],
                 "segmentation_maps": [],
+                "goals": [],
+                "attention_regions": [],
             },
         )
 

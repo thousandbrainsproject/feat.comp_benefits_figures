@@ -129,7 +129,6 @@ class AttentionSystem(AttentionSystemProtocol):
         Returns:
             Filtered list of goals.
         """
-        self._telemetry.regions(regions)
         proposed: VoxelGrid = self.voxelize_attention_regions(regions)
         self._telemetry.proposed(proposed)
         # Decay what is already held before folding in what was just proposed,
@@ -140,9 +139,7 @@ class AttentionSystem(AttentionSystemProtocol):
         self._voxel_grid = self.expire(merged)
         self._telemetry.voxel_grid(self._voxel_grid)
 
-        filtered_goals = self.filter_goals(goals)
-        self._telemetry.goals(goals)
-        return filtered_goals
+        return self.filter_goals(goals)
 
     def reset(self) -> None:
         """Discard the current grid and recorded telemetry."""

@@ -569,6 +569,8 @@ class DetailedGraphMatchingLogger(BasicGraphMatchingLogger):
             lm_dict.update(lm.buffer.stats)
             lm_dict.update(mode=model.experiment_mode.value)
             lm_dict.update({"stepwise_targets_list": lm.stepwise_targets_list})
+            # What the LM's telemetry recorded, if it has one (EvidenceGraphLM).
+            lm_dict.update(lm.state_dict().get("telemetry", {}))
             buffer_data[f"LM_{i}"] = lm_dict  # NOTE: probably same for all LMs
 
         for i, sm in enumerate(model.sensor_modules):
@@ -592,6 +594,10 @@ class DetailedGraphMatchingLogger(BasicGraphMatchingLogger):
         buffer_data["motor_system"]["policy_selector"] = {
             "selected_goals": model.motor_system._policy_selector._selected_goals,
         }
+        # What the motor system's telemetry recorded (the goals it received).
+        buffer_data["motor_system"].update(
+            model.motor_system.state_dict().get("telemetry", {})
+        )
 
         self.data["DETAILED"][episodes] = buffer_data
 

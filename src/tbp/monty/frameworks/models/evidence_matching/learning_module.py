@@ -39,6 +39,10 @@ from tbp.monty.frameworks.models.evidence_matching.region_proposal.context impor
 from tbp.monty.frameworks.models.evidence_matching.region_proposal.protocol import (
     RegionProposer,
 )
+from tbp.monty.frameworks.models.evidence_matching.telemetry import (
+    EvidenceGraphLMTelemetryProtocol,
+    NoopEvidenceGraphLMTelemetry,
+)
 from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
 from tbp.monty.frameworks.models.graph_matching import GraphLM
 from tbp.monty.frameworks.utils.graph_matching_utils import (
@@ -46,6 +50,7 @@ from tbp.monty.frameworks.utils.graph_matching_utils import (
     get_scaled_evidences,
 )
 from tbp.monty.geometry import Rotation
+from tbp.monty.memento import Memento
 from tbp.monty.runtime import is_location_only_step
 
 __all__ = ["EvidenceGraphLM", "InvalidEvidenceThresholdConfig"]
@@ -264,6 +269,7 @@ class EvidenceGraphLM(GraphLM):
         hypotheses_updater_class: type[HypothesesUpdater] = DefaultHypothesesUpdater,
         hypotheses_updater_args: dict | None = None,
         region_proposers: Sequence[RegionProposer] = (),
+        telemetry: EvidenceGraphLMTelemetryProtocol | None = None,
         *args,
         **kwargs,
     ) -> None:
@@ -272,6 +278,10 @@ class EvidenceGraphLM(GraphLM):
         # Strategies that turn this LM's recognition state into attention
         # weights for the attention system; none by default.
         self._region_proposers = tuple(region_proposers)
+        # Records what the LM proposed each step; nothing by default.
+        self._telemetry = (
+            NoopEvidenceGraphLMTelemetry() if telemetry is None else telemetry
+        )
         # --- LM components ---
         self.graph_memory = EvidenceGraphMemory(
             graph_delta_thresholds=graph_delta_thresholds,
@@ -362,18 +372,26 @@ class EvidenceGraphLM(GraphLM):
             # TODO: could do this in the object model class
             self.graph_memory.initialize_feature_arrays()
 
+    def state_dict(self) -> Memento:
+        # What the telemetry recorded rides along under "telemetry"; the
+        # detailed logger lifts it into the LM's block. load_state_dict
+        # ignores it.
+        return {**super().state_dict(), "telemetry": self._telemetry.state_dict()}
+
     def reset_stm(self) -> None:
         super().reset_stm()
         self._init_EvidenceGraphLM()
         for proposer in self._region_proposers:
             proposer.reset()
+        self._telemetry.reset()
 
     def propose_region(self) -> AttentionRegion | None:
         """Collect the regions this LM's region proposers emit.
 
         Returns:
             The concatenated proposals of every configured region proposer,
-            evaluated against the LM's current recognition state.
+            evaluated against the LM's current recognition state; None when
+            none of them proposed anything.
         """
         context = EvidenceLMRegionContext(self)
         regions = []
@@ -382,13 +400,16 @@ class EvidenceGraphLM(GraphLM):
             if region is not None:
                 regions.append(region)
         if len(regions) == 0:
-            return None
-        if len(regions) == 1:
-            return regions[0]
-        return AttentionRegion.concat(
-            regions,
-            sender_id=self.learning_module_id,
-        )
+            proposed = None
+        elif len(regions) == 1:
+            proposed = regions[0]
+        else:
+            proposed = AttentionRegion.concat(
+                regions,
+                sender_id=self.learning_module_id,
+            )
+        self._telemetry.attention_region(proposed)
+        return proposed
 
     def matching_step(
         self,
