@@ -92,8 +92,8 @@ class InhibitRecognizedObject(RegionProposer):
             context: The LM's current region context.
 
         Returns:
-            The shell at the configured weight, or an empty region while no
-            object is recognized.
+            The shell at the configured weight, or None while no object is
+            recognized.
         """
         object_id = context.recognized_object
         if object_id is None or context.current_location is None:

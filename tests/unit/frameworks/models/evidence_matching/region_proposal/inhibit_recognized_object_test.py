@@ -143,7 +143,7 @@ class InhibitRecognizedObjectTest(unittest.TestCase):
     ) -> None:
         context.recognized_object = None
 
-        self.assertEqual(len(InhibitRecognizedObject()(context)), 0)
+        self.assertIsNone(InhibitRecognizedObject()(context))
 
     @given(context=recognized_contexts())
     def test_proposes_nothing_without_a_current_location(
@@ -152,7 +152,7 @@ class InhibitRecognizedObjectTest(unittest.TestCase):
     ) -> None:
         context.current_location = None
 
-        self.assertEqual(len(InhibitRecognizedObject()(context)), 0)
+        self.assertIsNone(InhibitRecognizedObject()(context))
 
     @given(
         context=recognized_contexts(), thickness=thicknesses, num_layers=layer_counts
