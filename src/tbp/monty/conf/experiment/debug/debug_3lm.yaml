@@ -52,3 +52,4 @@ experiment:
           save_raw_obs: true
           segmentation_strategy:
             _target_: tbp.monty.frameworks.models.salience.segmentation.strategies.slic_merge.SlicMerge
+
