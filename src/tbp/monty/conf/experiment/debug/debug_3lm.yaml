@@ -6,7 +6,8 @@ defaults:
   - /monty/learning_module: evidence_3lm_heterarchy
   - /monty/sensor_module: 3sm_2d3d_dist_slic
   - /monty/connectivity: 3lm_3sm_heterarchy
-  - /environment: mujoco_dist_agent_sensors3_slic
+  - /monty/attention_system: default
+  - /environment: mujoco_dist_agent_sensors3_256
   - /env_interface: eval_objects_with_stickers_predefined
   - /env_interface/positioning_procedures_eval: getgoodview_viewfinder_patch0
   - /env_interface/transform: gaussianblur_missing_depthto3d_sensor4_256
@@ -34,7 +35,7 @@ experiment:
     python_log_level: DEBUG
     eval_env_interface_args:
       object_names:
-        - 021_logo_tbp
+        - 002_cube_tbp
       object_init_sampler:
         _target_: tbp.monty.frameworks.environments.object_init_samplers.Predefined
         rotations:
