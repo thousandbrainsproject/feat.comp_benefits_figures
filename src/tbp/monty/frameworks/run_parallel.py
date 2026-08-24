@@ -40,6 +40,7 @@ from tbp.monty.frameworks.loggers.monty_handlers import (
     BasicCSVStatsHandler,
     DetailedJSONHandler,
 )
+from tbp.monty.frameworks.loggers.npz_handler import EXPERIMENT_SUBDIRECTORY, NpzHandler
 from tbp.monty.frameworks.run import output_dir_from_run_name, save_config_yaml
 from tbp.monty.frameworks.utils.logging_utils import (
     maybe_rename_existing_dir,
@@ -494,6 +495,14 @@ def collect_detailed_episodes_names(parallel_dirs: Iterable[Path]) -> list[Path]
     return filenames
 
 
+def collect_telemetry_episode_names(parallel_dirs: Iterable[Path]) -> list[Path]:
+    # Every per-episode file NpzHandler wrote.
+    filenames = []
+    for pdir in parallel_dirs:
+        filenames.extend((pdir / EXPERIMENT_SUBDIRECTORY).glob("episode_*"))
+    return filenames
+
+
 def post_parallel_eval(experiments: list[Mapping], base_dir: Path) -> None:
     """Post-execution cleanup after running evaluation in parallel.
 
@@ -513,6 +522,13 @@ def post_parallel_eval(experiments: list[Mapping], base_dir: Path) -> None:
 
     # Loop over types of loggers, figure out how to clean up each one
     for handler in logging_config["monty_handlers"]:
+        if issubclass(handler, NpzHandler):
+            filenames = collect_telemetry_episode_names(parallel_dirs)
+            outdir = base_dir / EXPERIMENT_SUBDIRECTORY
+            maybe_rename_existing_dir(outdir)
+            post_parallel_log_cleanup(filenames, outdir, cat_fn=mv_files)
+            continue
+
         if issubclass(handler, DetailedJSONHandler):
             if save_per_episode:
                 filenames = collect_detailed_episodes_names(parallel_dirs)
@@ -573,6 +589,13 @@ def post_parallel_train(experiments: list[Mapping], base_dir: Path) -> None:
     save_per_episode = logging_config.get("detailed_save_per_episode")
 
     for handler in logging_config["monty_handlers"]:
+        if issubclass(handler, NpzHandler):
+            filenames = collect_telemetry_episode_names(parallel_dirs)
+            outdir = base_dir / EXPERIMENT_SUBDIRECTORY
+            maybe_rename_existing_dir(outdir)
+            post_parallel_log_cleanup(filenames, outdir, cat_fn=mv_files)
+            continue
+
         if issubclass(handler, DetailedJSONHandler):
             if save_per_episode:
                 filenames = collect_detailed_episodes_names(parallel_dirs)
