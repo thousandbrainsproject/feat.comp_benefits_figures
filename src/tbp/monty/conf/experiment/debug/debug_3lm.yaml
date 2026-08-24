@@ -46,3 +46,9 @@ experiment:
       run_name: debug_3lm
       detailed_save_per_episode: true
       output_dir: ${path.expanduser:'~/tbp/results/comp_benefits_figures'}
+    monty_config:
+      sensor_modules:
+        sensor_module_3:
+          save_raw_obs: true
+          segmentation_strategy:
+            _target_: tbp.monty.frameworks.models.salience.segmentation.strategies.slic_merge.SlicMerge
