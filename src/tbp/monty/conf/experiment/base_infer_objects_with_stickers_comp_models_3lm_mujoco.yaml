@@ -10,7 +10,7 @@ defaults:
   - /env_interface: eval_objects_with_stickers_predefined
   - /env_interface/positioning_procedures_eval: getgoodview_viewfinder_patch0
   - /env_interface/transform: gaussianblur_missing_depthto3d_sensor4
-  - /logging: basic_info_evidence_eval_runs
+  - /logging: basic_warning_wandb_evidence_eval_runs
 
 experiment:
   _target_: tbp.monty.frameworks.experiments.object_recognition_experiments.MontyObjectRecognitionExperiment
