@@ -390,8 +390,9 @@ class EvidenceGraphLM(GraphLM):
 
         Returns:
             The concatenated proposals of every configured region proposer,
-            evaluated against the LM's current recognition state; None when
-            none of them proposed anything.
+            evaluated against the LM's current recognition state (its goals
+            included, through the region context); None when none of them
+            proposed anything.
         """
         context = EvidenceLMRegionContext(self)
         regions = []

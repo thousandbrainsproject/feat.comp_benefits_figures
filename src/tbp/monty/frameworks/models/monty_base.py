@@ -350,7 +350,9 @@ class MontyBase(Monty):
             goals = sm.propose_goals()
             self._goals.extend(goals)
 
-        # Regions are collected fresh each step.
+        # Regions are collected fresh each step. An LM's region proposers
+        # read that LM's own goals off it, so a goal can attract attention
+        # to its own target; SM goals stay out of region proposal.
         regions = [lm.propose_region() for lm in self.learning_modules]
         regions.extend(sm.propose_region() for sm in self.sensor_modules)
         regions = [r for r in regions if r is not None]

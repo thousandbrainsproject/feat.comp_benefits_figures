@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
     import numpy.typing as npt
 
+    from tbp.monty.cmp import Goal
     from tbp.monty.frameworks.models.evidence_matching.learning_module import (
         EvidenceGraphLM,
     )
@@ -43,6 +44,11 @@ class EvidenceLMRegionContext:
     def possible_matches(self) -> Sequence[str]:
         """The object ids still consistent with the evidence."""
         return self._lm.get_possible_matches()
+
+    @property
+    def goals(self) -> Sequence[Goal]:
+        """The goals the LM proposed this step; empty when it proposed none."""
+        return tuple(self._lm.propose_goals())
 
     @property
     def recognized_object(self) -> str | None:

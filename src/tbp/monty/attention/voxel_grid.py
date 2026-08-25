@@ -8,14 +8,19 @@
 # https://opensource.org/licenses/MIT.
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
 
 from tbp.monty.frameworks.models.buffer import BufferEncoder
 
-# A voxel's integer (x, y, z) grid coordinate: the lower corner, in voxels.
-Voxel = tuple[int, int, int]
+if TYPE_CHECKING:
+    # A voxel's integer (x, y, z) grid coordinate: the lower corner, in
+    # voxels. Only annotations use it; keeping it out of runtime lets the
+    # module import under the habitat conda env's Python 3.8.
+    Voxel = tuple[int, int, int]
 
 # Edge length of a voxel, in meters, when none is specified.
 DEFAULT_VOXEL_SIZE = 0.005
@@ -108,17 +113,28 @@ class VoxelGrid:
     empty ``weight`` column so it merges, looks up, and encodes like any
     other grid. The attention system's ``decay`` updates a grid's weights in
     place; its ``merge`` and ``expire`` build new grids from old ones.
+
+    A grid built from one step's proposals may carry the ``inhibit_all``
+    signal (see ``AttentionRegion``): a request to the merge to inhibit
+    everything, which the merged result itself never carries.
     """
 
-    def __init__(self, voxel_size: float, data: pd.DataFrame | None = None):
+    def __init__(
+        self,
+        voxel_size: float,
+        data: pd.DataFrame | None = None,
+        inhibit_all: bool = False,
+    ):
         """Initialize the voxel grid.
 
         Args:
             voxel_size: Edge length of a voxel, in meters.
             data: The backing frame, indexed by voxel with one column per
                 feature; an empty grid when None.
+            inhibit_all: Whether the grid carries the inhibit-all signal.
         """
         self._voxel_size = voxel_size
+        self._inhibit_all = inhibit_all
         if data is None:
             # The weight column must carry a numeric dtype: a bare empty
             # column would be object dtype and poison later concats.
@@ -135,6 +151,11 @@ class VoxelGrid:
         return self._voxel_size
 
     @property
+    def inhibit_all(self) -> bool:
+        """Whether the grid asks the merge to inhibit everything."""
+        return self._inhibit_all
+
+    @property
     def index(self) -> pd.MultiIndex:
         """The occupied voxel coordinates, as pandas multi-index."""
         return self._data.index
@@ -146,7 +167,7 @@ class VoxelGrid:
 
     def copy(self) -> VoxelGrid:
         """Return a (deep) copy of the voxel grid."""
-        return VoxelGrid(self._voxel_size, self._data.copy())
+        return VoxelGrid(self._voxel_size, self._data.copy(), self._inhibit_all)
 
     def to_pandas(self) -> pd.DataFrame:
         """Return the backing frame, not a copy.
@@ -219,11 +240,13 @@ def encode_voxel_grid(grid: VoxelGrid) -> dict:
         grid: The grid to encode.
 
     Returns:
-        The grid's voxel size, its occupied voxels as a (V, 3) array, and
-        one (V,) array per feature column, keyed by the feature name.
+        The grid's voxel size, its inhibit-all signal, its occupied voxels as
+        a (V, 3) array, and one (V,) array per feature column, keyed by the
+        feature name.
     """
     return {
         "voxel_size": grid.voxel_size,
+        "inhibit_all": grid.inhibit_all,
         # As a (V, 3) array: the MultiIndex itself is not JSON-encodable.
         "voxels": grid.index.to_frame(index=False).to_numpy(),
         **{feature: grid[feature].to_numpy() for feature in grid.features},

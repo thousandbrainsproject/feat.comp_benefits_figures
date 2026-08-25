@@ -45,6 +45,20 @@ def grid() -> VoxelGrid:
     return VoxelGrid(VOXEL_SIZE, frame)
 
 
+def all_inhibited_grid() -> VoxelGrid:
+    """Build a grid whose every voxel is inhibited.
+
+    Returns:
+        A grid holding voxels (0,0,0) and (1,0,0), both at weight -3.
+
+    """
+    frame = pd.DataFrame(
+        {"weight": [-3.0, -3.0]},
+        index=pd.MultiIndex.from_tuples([(0, 0, 0), (1, 0, 0)], names=VOXEL_LEVELS),
+    )
+    return VoxelGrid(VOXEL_SIZE, frame)
+
+
 class HardGoalFilterTest(unittest.TestCase):
     def setUp(self) -> None:
         self.filter = HardGoalFilter()
@@ -67,6 +81,39 @@ class HardGoalFilterTest(unittest.TestCase):
     def test_everything_passes_an_empty_grid(self) -> None:
         goals = [goal_at(ATTENDED_POINT), goal_at(OUTSIDE_POINT)]
         self.assertEqual(self.filter(VoxelGrid(VOXEL_SIZE), goals), goals)
+
+
+class HardGoalFilterAllInhibitedTest(unittest.TestCase):
+    """A grid attending to nothing only says where not to go."""
+
+    def setUp(self) -> None:
+        self.filter = HardGoalFilter()
+        self.grid = all_inhibited_grid()
+
+    def test_an_out_of_grid_goal_is_kept(self) -> None:
+        goal = goal_at(OUTSIDE_POINT)
+        self.assertEqual(self.filter(self.grid, [goal]), [goal])
+
+    def test_an_inhibited_goal_is_still_dropped(self) -> None:
+        self.assertEqual(self.filter(self.grid, [goal_at(INHIBITED_POINT)]), [])
+        self.assertEqual(self.filter(self.grid, [goal_at(ATTENDED_POINT)]), [])
+
+    def test_a_single_attended_voxel_closes_the_outside_again(self) -> None:
+        # Back to the ordinary rule the moment anything is attended, even at
+        # weight zero.
+        frame = self.grid.to_pandas().copy()
+        frame.loc[(0, 0, 0), "weight"] = 0.0
+        self.assertEqual(
+            self.filter(VoxelGrid(VOXEL_SIZE, frame), [goal_at(OUTSIDE_POINT)]), []
+        )
+
+    def test_kept_goals_preserve_their_relative_order(self) -> None:
+        first = goal_at(OUTSIDE_POINT)
+        dropped = goal_at(INHIBITED_POINT)
+        second = goal_at(OUTSIDE_POINT)
+        unlocated = goal_at(None)
+        returned = self.filter(self.grid, [unlocated, first, dropped, second])
+        self.assertEqual(returned, [first, second, unlocated])
 
 
 class SoftGoalFilterTest(unittest.TestCase):

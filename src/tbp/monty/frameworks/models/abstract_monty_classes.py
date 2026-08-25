@@ -449,6 +449,11 @@ class LearningModule(
         pass
 
     def propose_region(self) -> AttentionRegion | None:
+        """Propose an attention region.
+
+        Returns:
+            The proposed region, or None.
+        """
         return None
 
 

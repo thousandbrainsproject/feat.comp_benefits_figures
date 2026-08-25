@@ -511,7 +511,9 @@ class PruneTest(unittest.TestCase):
             {"regions": [[region]]}
         )
 
-        self.assertEqual(list(pruned["regions"][0][0]), ["locations", "sender_id"])
+        self.assertEqual(
+            list(pruned["regions"][0][0]), ["locations", "sender_id", "inhibit_all"]
+        )
         nptest.assert_array_equal(
             pruned["regions"][0][0]["locations"], region.locations
         )
@@ -586,7 +588,12 @@ class DumpsTest(unittest.TestCase):
 
         self.assertEqual(
             orjson.loads(_dumps(region)),
-            {"locations": [[0.0, 0, 0]], "weights": [1.0], "sender_id": "SM_0"},
+            {
+                "locations": [[0.0, 0, 0]],
+                "weights": [1.0],
+                "sender_id": "SM_0",
+                "inhibit_all": False,
+            },
         )
 
 
@@ -679,9 +686,7 @@ class NpzHandlerWriteTest(unittest.TestCase):
         self.handler.write(0, {"a": np.zeros(1)}, self.path)
 
         self.assertEqual(self.array_keys(), ["a"])
-        self.assertEqual(
-            self.read_index()["0"]["a"][ARRAY_REFERENCE]["shape"], [1]
-        )
+        self.assertEqual(self.read_index()["0"]["a"][ARRAY_REFERENCE]["shape"], [1])
 
     @given(array=float_arrays)
     def test_casts_float_arrays_to_float_dtype(self, array: np.ndarray) -> None:

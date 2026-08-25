@@ -94,6 +94,19 @@ class MontyBasePrivateTest(unittest.TestCase):
             ],
         )
 
+    def test_pass_goals_asks_each_module_for_a_region_once(self) -> None:
+        self.monty_base.step_type = "matching_step"
+        self.lm2.propose_goals.return_value = [sentinel.lm2_goal]
+        self.sm1.propose_goals.return_value = [sentinel.sm1_goal]
+        self.monty_base._attention_system = MagicMock()
+
+        self.monty_base._pass_goals()
+
+        # Goals are never handed over: an LM reads its own goals off itself,
+        # and SM-generated goals never reach region proposal.
+        for module in (self.lm1, self.lm2, self.lm3, self.sm1, self.sm2):
+            module.propose_region.assert_called_once_with()
+
     def test_pass_goals_hands_the_collected_regions_to_the_attention_system(
         self,
     ) -> None:
