@@ -123,6 +123,30 @@ class InhibitionFlipsGridTest(unittest.TestCase):
         )
         self.assertTrue((merged["weight"] == MIN_ATTENTION_WEIGHT).all())
 
+    def test_an_inhibited_voxel_cannot_be_excited_again(self) -> None:
+        grid_a = grid_of({(0, 0, 0): -0.4, (1, 0, 0): 0.5})
+        grid_b = grid_of({(0, 0, 0): 1.0, (1, 0, 0): 1.0, (2, 0, 0): 1.0})
+        merged = self.merge(grid_a, grid_b)
+        self.assertEqual(
+            as_dict(merged), {(0, 0, 0): -0.4, (1, 0, 0): 1.0, (2, 0, 0): 1.0}
+        )
+
+    def test_a_zero_weight_does_not_excite_an_inhibited_voxel(self) -> None:
+        merged = self.merge(grid_of({(0, 0, 0): -1}), grid_of({(0, 0, 0): 0.0}))
+        self.assertEqual(as_dict(merged), {(0, 0, 0): -1})
+
+    def test_a_fresh_negative_weight_still_replaces_an_inhibited_one(self) -> None:
+        merged = self.merge(grid_of({(0, 0, 0): -1}), grid_of({(0, 0, 0): -0.2}))
+        self.assertEqual(as_dict(merged), {(0, 0, 0): -0.2})
+
+    def test_inhibition_sticks_after_a_flip(self) -> None:
+        flipped = self.merge(
+            grid_of({(0, 0, 0): 1, (1, 0, 0): 1}),
+            VoxelGrid(VOXEL_SIZE, inhibit_all=True),
+        )
+        merged = self.merge(flipped, grid_of({(1, 0, 0): 1, (2, 0, 0): 1}))
+        self.assertEqual(as_dict(merged), {(0, 0, 0): -1, (1, 0, 0): -1, (2, 0, 0): 1})
+
     def test_an_empty_signalling_proposal_inhibits_the_whole_grid(self) -> None:
         grid_a = grid_of({(0, 0, 0): 0.7, (1, 0, 0): -0.3})
         merged = self.merge(grid_a, VoxelGrid(VOXEL_SIZE, inhibit_all=True))
