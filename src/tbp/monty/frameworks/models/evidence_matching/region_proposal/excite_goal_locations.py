@@ -32,9 +32,7 @@ DEFAULT_RADIUS = 0.01
 DEFAULT_LATTICE_STEPS = 4
 
 
-def sample_ball(
-    center: npt.NDArray, radius: float, lattice_steps: int
-) -> npt.NDArray:
+def sample_ball(center: npt.NDArray, radius: float, lattice_steps: int) -> npt.NDArray:
     """Sample a solid ball on a cubic lattice.
 
     Args:

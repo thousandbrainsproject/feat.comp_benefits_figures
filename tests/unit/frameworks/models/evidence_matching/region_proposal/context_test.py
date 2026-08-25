@@ -49,6 +49,22 @@ def lm_with_pose(
     return lm
 
 
+class GoalsTest(unittest.TestCase):
+    def test_are_the_goals_the_lm_proposes(self) -> None:
+        lm = MagicMock()
+        lm.propose_goals.return_value = [sentinel.goal_a, sentinel.goal_b]
+
+        self.assertEqual(
+            EvidenceLMRegionContext(lm).goals, (sentinel.goal_a, sentinel.goal_b)
+        )
+
+    def test_are_empty_when_the_lm_proposes_none(self) -> None:
+        lm = MagicMock()
+        lm.propose_goals.return_value = []
+
+        self.assertEqual(EvidenceLMRegionContext(lm).goals, ())
+
+
 class RecognizedObjectTest(unittest.TestCase):
     def test_is_the_sole_match_once_the_terminal_state_is_match(self) -> None:
         lm = MagicMock()

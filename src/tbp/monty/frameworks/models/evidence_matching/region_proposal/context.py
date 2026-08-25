@@ -32,15 +32,13 @@ class EvidenceLMRegionContext:
     which advances the LM's symmetry counter as a side effect.
     """
 
-    def __init__(self, lm: EvidenceGraphLM, goals: Sequence[Goal] = ()) -> None:
+    def __init__(self, lm: EvidenceGraphLM) -> None:
         """Wrap a learning module.
 
         Args:
             lm: The learning module to expose.
-            goals: The goals the LM proposed this step.
         """
         self._lm = lm
-        self._goals = tuple(goals)
 
     @property
     def possible_matches(self) -> Sequence[str]:
@@ -50,7 +48,7 @@ class EvidenceLMRegionContext:
     @property
     def goals(self) -> Sequence[Goal]:
         """The goals the LM proposed this step; empty when it proposed none."""
-        return self._goals
+        return tuple(self._lm.propose_goals())
 
     @property
     def recognized_object(self) -> str | None:

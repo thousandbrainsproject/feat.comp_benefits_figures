@@ -50,9 +50,7 @@ class SampleBallTest(unittest.TestCase):
 
         points = sample_ball(center, radius=0.01, lattice_steps=4)
 
-        nptest.assert_array_less(
-            np.linalg.norm(points - center, axis=1), 0.01 + 1e-12
-        )
+        nptest.assert_array_less(np.linalg.norm(points - center, axis=1), 0.01 + 1e-12)
 
     def test_spans_the_full_diameter(self) -> None:
         points = sample_ball(np.zeros(3), radius=0.01, lattice_steps=4)

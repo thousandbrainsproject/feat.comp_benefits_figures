@@ -343,18 +343,17 @@ class MontyBase(Monty):
         # means goals can get sent to the motor system that were proposed in the last
         # non-motor-only step.
 
-        # Regions are collected fresh each step. Each LM's region proposers
-        # see the goals that LM just proposed, so a goal can attract
-        # attention to its own target; SM goals stay out of region proposal.
-        regions = []
         for lm in self.learning_modules:
             goals = lm.propose_goals()
             self._goals.extend(goals)
-            regions.append(lm.propose_region(goals))
         for sm in self.sensor_modules:
             goals = sm.propose_goals()
             self._goals.extend(goals)
 
+        # Regions are collected fresh each step. An LM's region proposers
+        # read that LM's own goals off it, so a goal can attract attention
+        # to its own target; SM goals stay out of region proposal.
+        regions = [lm.propose_region() for lm in self.learning_modules]
         regions.extend(sm.propose_region() for sm in self.sensor_modules)
         regions = [r for r in regions if r is not None]
         self._regions = regions

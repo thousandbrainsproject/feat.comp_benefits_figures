@@ -49,7 +49,7 @@ class ProposeRegionTest(unittest.TestCase):
         lm = lm_with_proposers(first, second)
 
         with patch(CONTEXT_PATCH, return_value=sentinel.context):
-            region = EvidenceGraphLM.propose_region(lm, [])
+            region = EvidenceGraphLM.propose_region(lm)
 
         nptest.assert_array_equal(region.locations[:, 0], [1.0, 2.0, 3.0])
 
@@ -60,7 +60,7 @@ class ProposeRegionTest(unittest.TestCase):
         )
 
         with patch(CONTEXT_PATCH, return_value=sentinel.context):
-            region = EvidenceGraphLM.propose_region(lm, [])
+            region = EvidenceGraphLM.propose_region(lm)
 
         self.assertEqual(region.sender_id, "learning_module_7")
 
@@ -69,27 +69,25 @@ class ProposeRegionTest(unittest.TestCase):
         lm = lm_with_proposers(MagicMock(return_value=proposal))
 
         with patch(CONTEXT_PATCH, return_value=sentinel.context):
-            region = EvidenceGraphLM.propose_region(lm, [])
+            region = EvidenceGraphLM.propose_region(lm)
 
         self.assertIs(region, proposal)
 
-    def test_calls_each_proposer_with_a_context_over_this_lm_and_its_goals(
-        self,
-    ) -> None:
+    def test_calls_each_proposer_with_a_context_over_this_lm(self) -> None:
         proposer = MagicMock(return_value=AttentionRegion.empty())
         lm = lm_with_proposers(proposer)
 
         with patch(CONTEXT_PATCH, return_value=sentinel.context) as context_mock:
-            EvidenceGraphLM.propose_region(lm, sentinel.goals)
+            EvidenceGraphLM.propose_region(lm)
 
-        context_mock.assert_called_once_with(lm, sentinel.goals)
+        context_mock.assert_called_once_with(lm)
         proposer.assert_called_once_with(sentinel.context)
 
     def test_proposes_none_without_proposers(self) -> None:
         lm = lm_with_proposers()
 
         with patch(CONTEXT_PATCH, return_value=sentinel.context):
-            region = EvidenceGraphLM.propose_region(lm, [])
+            region = EvidenceGraphLM.propose_region(lm)
 
         self.assertIsNone(region)
 
@@ -97,8 +95,8 @@ class ProposeRegionTest(unittest.TestCase):
         lm = lm_with_proposers(MagicMock(side_effect=[region_at(1.0), None]))
 
         with patch(CONTEXT_PATCH, return_value=sentinel.context):
-            EvidenceGraphLM.propose_region(lm, [])
-            EvidenceGraphLM.propose_region(lm, [])
+            EvidenceGraphLM.propose_region(lm)
+            EvidenceGraphLM.propose_region(lm)
 
         proposed = lm._telemetry.state_dict()["attention_regions"]
         self.assertEqual(len(proposed), 2)
