@@ -20,7 +20,9 @@ from tbp.monty.cmp import MIN_ATTENTION_WEIGHT
 VOXEL_SIZE = 0.01
 
 
-def grid_of(weights_by_voxel: dict[tuple[int, int, int], float]) -> VoxelGrid:
+def grid_of(
+    weights_by_voxel: dict[tuple[int, int, int], float], inhibit_all: bool = False
+) -> VoxelGrid:
     """Build a grid holding the given voxels and weights.
 
     Returns:
@@ -31,7 +33,7 @@ def grid_of(weights_by_voxel: dict[tuple[int, int, int], float]) -> VoxelGrid:
         {"weight": np.asarray(list(weights_by_voxel.values()), dtype=float)},
         index=pd.MultiIndex.from_tuples(weights_by_voxel.keys(), names=VOXEL_LEVELS),
     )
-    return VoxelGrid(VOXEL_SIZE, frame)
+    return VoxelGrid(VOXEL_SIZE, frame, inhibit_all)
 
 
 def as_dict(grid: VoxelGrid) -> dict[tuple[int, int, int], float]:
@@ -97,15 +99,23 @@ class InhibitionFlipsGridTest(unittest.TestCase):
     def setUp(self) -> None:
         self.merge = InhibitionFlipsGrid()
 
-    def test_without_inhibition_it_is_a_union(self) -> None:
+    def test_without_the_signal_it_is_a_union(self) -> None:
         grid_a = grid_of({(0, 0, 0): 1, (1, 0, 0): 2})
         grid_b = grid_of({(1, 0, 0): 9, (2, 0, 0): 3})
         merged = self.merge(grid_a, grid_b)
         self.assertEqual(as_dict(merged), {(0, 0, 0): 1, (1, 0, 0): 9, (2, 0, 0): 3})
 
-    def test_one_inhibited_proposal_flips_every_voxel(self) -> None:
+    def test_a_negative_weight_alone_does_not_flip_the_grid(self) -> None:
         grid_a = grid_of({(0, 0, 0): 1, (1, 0, 0): 0.5})
         grid_b = grid_of({(1, 0, 0): 0.9, (2, 0, 0): -0.2})
+        merged = self.merge(grid_a, grid_b)
+        self.assertEqual(
+            as_dict(merged), {(0, 0, 0): 1, (1, 0, 0): 0.9, (2, 0, 0): -0.2}
+        )
+
+    def test_the_signal_flips_every_voxel(self) -> None:
+        grid_a = grid_of({(0, 0, 0): 1, (1, 0, 0): 0.5})
+        grid_b = grid_of({(1, 0, 0): 0.9, (2, 0, 0): 0.2}, inhibit_all=True)
         merged = self.merge(grid_a, grid_b)
         self.assertEqual(
             as_dict(merged),
@@ -113,14 +123,16 @@ class InhibitionFlipsGridTest(unittest.TestCase):
         )
         self.assertTrue((merged["weight"] == MIN_ATTENTION_WEIGHT).all())
 
-    def test_inhibition_already_in_the_grid_does_not_flip_it(self) -> None:
-        # Only the proposal decides; a remembered inhibition is just a voxel.
-        grid_a = grid_of({(0, 0, 0): -1, (1, 0, 0): 0.5})
-        grid_b = grid_of({(2, 0, 0): 0.3})
-        merged = self.merge(grid_a, grid_b)
-        self.assertEqual(
-            as_dict(merged), {(0, 0, 0): -1, (1, 0, 0): 0.5, (2, 0, 0): 0.3}
+    def test_an_empty_signalling_proposal_inhibits_the_whole_grid(self) -> None:
+        grid_a = grid_of({(0, 0, 0): 0.7, (1, 0, 0): -0.3})
+        merged = self.merge(grid_a, VoxelGrid(VOXEL_SIZE, inhibit_all=True))
+        self.assertEqual(as_dict(merged), {(0, 0, 0): -1, (1, 0, 0): -1})
+
+    def test_the_result_does_not_carry_the_signal(self) -> None:
+        merged = self.merge(
+            grid_of({(0, 0, 0): 0.7}), VoxelGrid(VOXEL_SIZE, inhibit_all=True)
         )
+        self.assertFalse(merged.inhibit_all)
 
     def test_an_empty_proposal_leaves_the_grid_as_is(self) -> None:
         grid_a = grid_of({(0, 0, 0): 0.7})
@@ -129,7 +141,8 @@ class InhibitionFlipsGridTest(unittest.TestCase):
 
     def test_the_input_grids_are_not_mutated(self) -> None:
         grid_a = grid_of({(0, 0, 0): 1})
-        grid_b = grid_of({(1, 0, 0): -1})
+        grid_b = grid_of({(1, 0, 0): 0.5}, inhibit_all=True)
         self.merge(grid_a, grid_b)
         self.assertEqual(as_dict(grid_a), {(0, 0, 0): 1})
-        self.assertEqual(as_dict(grid_b), {(1, 0, 0): -1})
+        self.assertEqual(as_dict(grid_b), {(1, 0, 0): 0.5})
+        self.assertTrue(grid_b.inhibit_all)

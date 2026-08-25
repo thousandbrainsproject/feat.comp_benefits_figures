@@ -23,7 +23,9 @@ from hypothesis.extra.numpy import arrays
 
 from tbp.monty.attention.voxel_grid import (
     Voxel,
+    VoxelGrid,
     as_row_points,
+    encode_voxel_grid,
     voxelize_and_bin_points,
     voxelize_points,
 )
@@ -271,3 +273,16 @@ class VoxelizeAndBinPointsTest(unittest.TestCase):
         )
         for feature_name, feature_values in binned.features.items():
             nptest.assert_array_equal(result[feature_name], feature_values)
+
+
+class VoxelGridInhibitAllTest(unittest.TestCase):
+    def test_is_off_unless_given(self) -> None:
+        self.assertFalse(VoxelGrid(0.01).inhibit_all)
+
+    def test_is_carried_by_a_copy(self) -> None:
+        self.assertTrue(VoxelGrid(0.01, inhibit_all=True).copy().inhibit_all)
+
+    def test_is_encoded(self) -> None:
+        signalling = VoxelGrid(0.01, inhibit_all=True)
+        self.assertTrue(encode_voxel_grid(signalling)["inhibit_all"])
+        self.assertFalse(encode_voxel_grid(VoxelGrid(0.01))["inhibit_all"])

@@ -13,8 +13,8 @@ defaults:
   - /env_interface/transform: gaussianblur_missing_depthto3d_sensor4_256
   - /logging: telemetry_detailed
 
-# debug_3lm with the inhibition-flip attention system: no decay, and one
-# inhibitory proposal flips the whole remembered grid to inhibition
+# debug_3lm with the inhibition-flip attention system: no decay, and the
+# sticker LM's recognition flips the whole remembered grid to inhibition
 # (/monty/attention_system: inhibition_flip).
 experiment:
   _target_: tbp.monty.frameworks.experiments.object_recognition_experiments.MontyObjectRecognitionExperiment
@@ -64,10 +64,12 @@ experiment:
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
         learning_module_1:
-          # The sticker LM is the one that recognizes in this episode; its
-          # inhibitory proposal is what flips the grid.
+          # The sticker LM is the one that recognizes in this episode. It
+          # sends only the inhibit-all signal that flips the grid, no
+          # locations: its shell proposals landed hundreds of meters off
+          # whenever its pose estimate slipped.
           region_proposers:
-            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.inhibit_recognized_object.InhibitRecognizedObject
+            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.inhibit_all_on_recognition.InhibitAllOnRecognition
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
         learning_module_2:

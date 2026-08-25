@@ -131,6 +131,30 @@ class AttentionSystemGridTest(unittest.TestCase):
         self.system.reset()
         self.assertEqual(len(self.system.grid), 0)
 
+    def test_the_proposed_grid_carries_no_signal_unless_a_region_does(self) -> None:
+        proposed = self.system.voxelize_attention_regions([region(*NEAR_POINTS)])
+        self.assertFalse(proposed.inhibit_all)
+
+    def test_the_proposed_grid_carries_the_inhibit_all_signal(self) -> None:
+        proposed = self.system.voxelize_attention_regions(
+            [region(*NEAR_POINTS), AttentionRegion.empty(inhibit_all=True)]
+        )
+        self.assertTrue(proposed.inhibit_all)
+        self.assertEqual(len(proposed), 1)
+
+    def test_an_empty_signalling_region_yields_an_empty_signalling_grid(
+        self,
+    ) -> None:
+        proposed = self.system.voxelize_attention_regions(
+            [AttentionRegion.empty(inhibit_all=True)]
+        )
+        self.assertTrue(proposed.inhibit_all)
+        self.assertEqual(len(proposed), 0)
+
+    def test_the_merged_grid_does_not_keep_the_signal(self) -> None:
+        self.system.step([], [AttentionRegion.empty(inhibit_all=True)])
+        self.assertFalse(self.system.grid.inhibit_all)
+
 
 class AttentionSystemWeightTest(unittest.TestCase):
     """Voxel weights decay toward zero and expire when they reach it."""

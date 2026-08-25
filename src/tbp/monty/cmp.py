@@ -438,11 +438,15 @@ class AttentionRegion:
         sender_id: The id of the module that proposed the region (e.g.
             ``"SM_3"`` or ``"learning_module_2"``); empty when the region has
             no single sender, such as after merging several.
+        inhibit_all: A signal asking the attention system to inhibit
+            everything it holds, not just these locations. It rides along
+            without any locations, so an empty region can carry it.
     """
 
     locations: npt.NDArray[np.floating]
     weights: npt.NDArray[np.floating]
     sender_id: str = ""
+    inhibit_all: bool = False
 
     def __post_init__(self) -> None:
         """Coerce the arrays and check they describe the same N locations.
@@ -463,16 +467,17 @@ class AttentionRegion:
         object.__setattr__(self, "weights", weights)
 
     @classmethod
-    def empty(cls, sender_id: str = "") -> AttentionRegion:
+    def empty(cls, sender_id: str = "", inhibit_all: bool = False) -> AttentionRegion:
         """Return a region holding no locations.
 
         Args:
             sender_id: The id of the proposing module.
+            inhibit_all: Whether the region carries the inhibit-all signal.
 
         Returns:
             The empty region.
         """
-        return cls(np.empty((0, 3)), np.empty(0), sender_id)
+        return cls(np.empty((0, 3)), np.empty(0), sender_id, inhibit_all)
 
     @classmethod
     def uniform(
@@ -503,7 +508,8 @@ class AttentionRegion:
                 are not carried over, since a merge has no single sender.
 
         Returns:
-            One region holding every location of every input region.
+            One region holding every location of every input region; it
+            carries the inhibit-all signal if any input does.
         """
         regions = list(regions)
         if not regions:
@@ -512,6 +518,7 @@ class AttentionRegion:
             np.concatenate([region.locations for region in regions]),
             np.concatenate([region.weights for region in regions]),
             sender_id,
+            any(region.inhibit_all for region in regions),
         )
 
     def __len__(self) -> int:

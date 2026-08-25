@@ -37,6 +37,7 @@ def regions(draw: st.DrawFn) -> AttentionRegion:
         draw(arrays(dtype=np.float64, shape=(num_points, 3), elements=coordinates)),
         draw(arrays(dtype=np.float64, shape=(num_points,), elements=weight_values)),
         draw(sender_ids),
+        draw(st.booleans()),
     )
 
 
@@ -76,6 +77,17 @@ class AttentionRegionTest(unittest.TestCase):
     def test_sender_id_is_empty_unless_given(self) -> None:
         self.assertEqual(AttentionRegion(np.zeros((1, 3)), np.zeros(1)).sender_id, "")
         self.assertEqual(AttentionRegion.empty().sender_id, "")
+
+    def test_inhibit_all_is_off_unless_given(self) -> None:
+        self.assertFalse(AttentionRegion(np.zeros((1, 3)), np.zeros(1)).inhibit_all)
+        self.assertFalse(AttentionRegion.empty().inhibit_all)
+        self.assertFalse(AttentionRegion.uniform(np.zeros((2, 3)), 1.0).inhibit_all)
+
+    def test_empty_can_carry_the_inhibit_all_signal(self) -> None:
+        signal = AttentionRegion.empty(inhibit_all=True)
+
+        self.assertTrue(signal.inhibit_all)
+        self.assertEqual(len(signal), 0)
 
     @given(sender_id=sender_ids)
     def test_empty_and_uniform_carry_the_sender_id(self, sender_id: str) -> None:
@@ -117,6 +129,15 @@ class AttentionRegionTest(unittest.TestCase):
         nptest.assert_array_equal(joined.locations, expected_locations)
         nptest.assert_array_equal(joined.weights, expected_weights)
 
+    @given(parts=st.lists(regions(), min_size=0, max_size=MAX_REGIONS))
+    def test_concat_signals_inhibit_all_if_any_part_does(
+        self,
+        parts: list[AttentionRegion],
+    ) -> None:
+        joined = AttentionRegion.concat(parts)
+
+        self.assertEqual(joined.inhibit_all, any(part.inhibit_all for part in parts))
+
     @given(
         parts=st.lists(regions(), min_size=0, max_size=MAX_REGIONS),
         sender_id=sender_ids,
@@ -136,8 +157,11 @@ class AttentionRegionTest(unittest.TestCase):
     ) -> None:
         encoded = json.loads(json.dumps(region, cls=BufferEncoder))
 
-        self.assertEqual(set(encoded), {"locations", "weights", "sender_id"})
+        self.assertEqual(
+            set(encoded), {"locations", "weights", "sender_id", "inhibit_all"}
+        )
         self.assertEqual(encoded["sender_id"], region.sender_id)
+        self.assertEqual(encoded["inhibit_all"], region.inhibit_all)
         # An empty region encodes its locations as [], which has no width.
         decoded_locations = np.asarray(encoded["locations"]).reshape(-1, 3)
         nptest.assert_array_equal(decoded_locations, region.locations)

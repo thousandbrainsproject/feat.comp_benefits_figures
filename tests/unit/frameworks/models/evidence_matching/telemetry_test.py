@@ -71,6 +71,7 @@ class EvidenceGraphLMTelemetryTest(unittest.TestCase):
                 "locations": [[1.0, 0.0, 0.0]],
                 "weights": [1.0],
                 "sender_id": "learning_module_2",
+                "inhibit_all": False,
             },
         )
         self.assertIsNone(encoded["attention_regions"][1])

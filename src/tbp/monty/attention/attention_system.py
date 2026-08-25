@@ -163,12 +163,13 @@ class AttentionSystem(AttentionSystemProtocol):
             regions: The regions proposed this step, one per module.
 
         Returns:
-            The grid built from this step's regions alone.
+            The grid built from this step's regions alone, carrying the
+            inhibit-all signal if any region does.
 
         """
         region = AttentionRegion.concat(regions)
         if len(region) == 0:
-            return VoxelGrid(self._voxel_size)
+            return VoxelGrid(self._voxel_size, inhibit_all=region.inhibit_all)
 
         points = voxelize_and_bin_points(
             region.locations, self._voxel_size, features={"weight": region.weights}
@@ -180,7 +181,9 @@ class AttentionSystem(AttentionSystemProtocol):
             {"weight": voxel_weights.to_numpy()},
             index=pd.MultiIndex.from_tuples(voxel_weights.index, names=VOXEL_LEVELS),
         )
-        return VoxelGrid(self._voxel_size, df.sort_index())
+        return VoxelGrid(
+            self._voxel_size, df.sort_index(), inhibit_all=region.inhibit_all
+        )
 
     def expire(self, merged: VoxelGrid) -> VoxelGrid:
         """Drop voxels whose weight has decayed to zero.

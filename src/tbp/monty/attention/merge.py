@@ -66,12 +66,13 @@ class Union(VoxelGridMerge):
 
 
 class InhibitionFlipsGrid(VoxelGridMerge):
-    """Union, unless the proposal inhibits anywhere: then all is inhibited.
+    """Union, unless the proposal signals inhibit-all: then all is inhibited.
 
-    A single negative weight among the proposed voxels (grid_b) flips the
-    whole merged grid: the result holds every voxel of either grid, all at
-    ``MIN_ATTENTION_WEIGHT``. With no inhibition proposed this is a plain
-    :class:`Union`.
+    A proposal (grid_b) carrying the ``inhibit_all`` signal flips the whole
+    merged grid: the result holds every voxel of either grid, all at
+    ``MIN_ATTENTION_WEIGHT``. Without the signal this is a plain
+    :class:`Union`; negative weights on their own inhibit only their voxels.
+    The result never carries the signal itself.
     """
 
     def __init__(self) -> None:
@@ -86,11 +87,11 @@ class InhibitionFlipsGrid(VoxelGridMerge):
 
         Returns:
             The union of both grids' voxels: at grid_b's weights on overlap
-            when nothing in grid_b is negative, else all at
+            unless grid_b signals inhibit-all, then all at
             ``MIN_ATTENTION_WEIGHT``.
         """
         merged = self._union(grid_a, grid_b)
-        if (grid_b.to_pandas()[WEIGHT_FEATURE] < 0).any():
+        if grid_b.inhibit_all:
             inhibited = merged.to_pandas().assign(
                 **{WEIGHT_FEATURE: MIN_ATTENTION_WEIGHT}
             )

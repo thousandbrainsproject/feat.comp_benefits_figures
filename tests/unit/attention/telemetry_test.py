@@ -21,6 +21,7 @@ from tbp.monty.attention.telemetry import (
     AttentionSystemTelemetry,
     NoopAttentionSystemTelemetry,
 )
+from tbp.monty.cmp import AttentionRegion
 from tbp.monty.frameworks.models.buffer import BufferEncoder
 
 from .attention_system_test import goal_at, point_in, region
@@ -75,6 +76,17 @@ class AttentionSystemTelemetryTest(unittest.TestCase):
         self.assertEqual(snapshot["voxels"], [list(NEAR_VOXEL), list(FAR_VOXEL)])
         # Both voxels take this step's freshly proposed weight outright.
         self.assertEqual(snapshot["weight"], [2, 2])
+
+    def test_a_proposed_grid_encodes_its_inhibit_all_signal(self) -> None:
+        self.system.step([], [region(NEAR_POINT)])
+        self.system.step([], [AttentionRegion.empty(inhibit_all=True)])
+        encoded = json.loads(json.dumps(self.system.state_dict(), cls=BufferEncoder))
+        self.assertEqual(
+            [grid["inhibit_all"] for grid in encoded["proposed_grids"]], [False, True]
+        )
+        self.assertEqual(
+            [grid["inhibit_all"] for grid in encoded["grids"]], [False, False]
+        )
 
     def test_an_empty_grid_snapshot_is_exported_empty(self) -> None:
         self.system.step([], [region(NEAR_POINT, weight=0.15)])
