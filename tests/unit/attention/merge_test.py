@@ -13,8 +13,9 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from tbp.monty.attention.merge import Union
+from tbp.monty.attention.merge import InhibitionFlipsGrid, Union
 from tbp.monty.attention.voxel_grid import VOXEL_LEVELS, VoxelGrid
+from tbp.monty.cmp import MIN_ATTENTION_WEIGHT
 
 VOXEL_SIZE = 0.01
 
@@ -90,3 +91,45 @@ class UnionTest(unittest.TestCase):
         merged = self.merge(VoxelGrid(VOXEL_SIZE), grid_of({(0, 0, 0): 2}))
         weights = merged["weight"].to_numpy()
         self.assertTrue(np.issubdtype(weights.dtype, np.floating))
+
+
+class InhibitionFlipsGridTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.merge = InhibitionFlipsGrid()
+
+    def test_without_inhibition_it_is_a_union(self) -> None:
+        grid_a = grid_of({(0, 0, 0): 1, (1, 0, 0): 2})
+        grid_b = grid_of({(1, 0, 0): 9, (2, 0, 0): 3})
+        merged = self.merge(grid_a, grid_b)
+        self.assertEqual(as_dict(merged), {(0, 0, 0): 1, (1, 0, 0): 9, (2, 0, 0): 3})
+
+    def test_one_inhibited_proposal_flips_every_voxel(self) -> None:
+        grid_a = grid_of({(0, 0, 0): 1, (1, 0, 0): 0.5})
+        grid_b = grid_of({(1, 0, 0): 0.9, (2, 0, 0): -0.2})
+        merged = self.merge(grid_a, grid_b)
+        self.assertEqual(
+            as_dict(merged),
+            {(0, 0, 0): -1, (1, 0, 0): -1, (2, 0, 0): -1},
+        )
+        self.assertTrue((merged["weight"] == MIN_ATTENTION_WEIGHT).all())
+
+    def test_inhibition_already_in_the_grid_does_not_flip_it(self) -> None:
+        # Only the proposal decides; a remembered inhibition is just a voxel.
+        grid_a = grid_of({(0, 0, 0): -1, (1, 0, 0): 0.5})
+        grid_b = grid_of({(2, 0, 0): 0.3})
+        merged = self.merge(grid_a, grid_b)
+        self.assertEqual(
+            as_dict(merged), {(0, 0, 0): -1, (1, 0, 0): 0.5, (2, 0, 0): 0.3}
+        )
+
+    def test_an_empty_proposal_leaves_the_grid_as_is(self) -> None:
+        grid_a = grid_of({(0, 0, 0): 0.7})
+        merged = self.merge(grid_a, VoxelGrid(VOXEL_SIZE))
+        self.assertEqual(as_dict(merged), {(0, 0, 0): 0.7})
+
+    def test_the_input_grids_are_not_mutated(self) -> None:
+        grid_a = grid_of({(0, 0, 0): 1})
+        grid_b = grid_of({(1, 0, 0): -1})
+        self.merge(grid_a, grid_b)
+        self.assertEqual(as_dict(grid_a), {(0, 0, 0): 1})
+        self.assertEqual(as_dict(grid_b), {(1, 0, 0): -1})

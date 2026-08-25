@@ -12,7 +12,8 @@ from typing import Protocol
 
 import pandas as pd
 
-from tbp.monty.attention.voxel_grid import VoxelGrid
+from tbp.monty.attention.voxel_grid import WEIGHT_FEATURE, VoxelGrid
+from tbp.monty.cmp import MIN_ATTENTION_WEIGHT
 
 
 def _check_can_merge(grid_a: VoxelGrid, grid_b: VoxelGrid) -> None:
@@ -62,3 +63,36 @@ class Union(VoxelGridMerge):
 
         df = pd.concat([a_to_merge, b_to_merge])
         return VoxelGrid(grid_a.voxel_size, df)
+
+
+class InhibitionFlipsGrid(VoxelGridMerge):
+    """Union, unless the proposal inhibits anywhere: then all is inhibited.
+
+    A single negative weight among the proposed voxels (grid_b) flips the
+    whole merged grid: the result holds every voxel of either grid, all at
+    ``MIN_ATTENTION_WEIGHT``. With no inhibition proposed this is a plain
+    :class:`Union`.
+    """
+
+    def __init__(self) -> None:
+        self._union = Union()
+
+    def __call__(self, grid_a: VoxelGrid, grid_b: VoxelGrid) -> VoxelGrid:
+        """Merge grid_b into grid_a.
+
+        Args:
+            grid_a: The grid being merged into.
+            grid_b: The grid being merged in.
+
+        Returns:
+            The union of both grids' voxels: at grid_b's weights on overlap
+            when nothing in grid_b is negative, else all at
+            ``MIN_ATTENTION_WEIGHT``.
+        """
+        merged = self._union(grid_a, grid_b)
+        if (grid_b.to_pandas()[WEIGHT_FEATURE] < 0).any():
+            inhibited = merged.to_pandas().assign(
+                **{WEIGHT_FEATURE: MIN_ATTENTION_WEIGHT}
+            )
+            return VoxelGrid(grid_a.voxel_size, inhibited)
+        return merged
