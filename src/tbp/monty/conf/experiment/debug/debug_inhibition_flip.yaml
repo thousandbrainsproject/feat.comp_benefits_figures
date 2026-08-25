@@ -60,9 +60,13 @@ experiment:
           # of each other on the shared surface.
           x_percent_threshold: 10
           region_proposers:
-            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.inhibit_recognized_object.InhibitRecognizedObject
+            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
+          gsg:
+            # Require at least 50 steps to elapse before the GSG will consider
+            # outputting a hypothesis-testing goal.
+            min_post_goal_success_steps: 20
         learning_module_1:
           # The sticker LM is the one that recognizes in this episode. It
           # sends only the inhibit-all signal that flips the grid, no
@@ -72,12 +76,16 @@ experiment:
             - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.inhibit_all_on_recognition.InhibitAllOnRecognition
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
+          # Only LM_0 generates goals; disable the goal generators of LM_1/LM_2.
+          gsg: null
         learning_module_2:
           x_percent_threshold: 10
           region_proposers:
-            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.inhibit_recognized_object.InhibitRecognizedObject
+            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
+          # Only LM_0 generates goals; disable the goal generators of LM_1/LM_2.
+          gsg: null
       sensor_modules:
         sensor_module_3:
           save_raw_obs: true
