@@ -64,7 +64,7 @@ eval_env_interface_args:
     - 021_logo_tbp
   object_names:
   - 001_cube
-  - 006_disk  
+  - 006_disk
   - 002_cube_tbp
   - 004_cube_numenta
   - 007_disk_tbp
