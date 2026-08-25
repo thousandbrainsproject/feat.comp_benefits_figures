@@ -44,8 +44,10 @@ class NoopGoalFilter(GoalFilter):
 class HardGoalFilter(GoalFilter):
     """Keep only the goals inside a non-negatively weighted voxel.
 
-    Goals outside the grid or in an inhibited (negative-weight) voxel are
-    dropped. Goals without a location pass through, as does everything when
+    Goals in an inhibited (negative-weight) voxel are dropped, and so are
+    goals outside the grid, unless every voxel is inhibited: a grid holding
+    nothing attended only says where not to go, so out-of-grid goals then
+    pass. Goals without a location pass through, as does everything when
     the grid is empty.
     """
 
@@ -58,7 +60,8 @@ class HardGoalFilter(GoalFilter):
 
         Returns:
             The goals inside a non-negatively weighted voxel, plus any
-            without a location. All goals, if the grid is empty.
+            without a location, plus those outside the grid when every voxel
+            is inhibited. All goals, if the grid is empty.
         """
         if len(voxel_grid) == 0 or len(goals) == 0:
             return list(goals)
@@ -70,13 +73,15 @@ class HardGoalFilter(GoalFilter):
 
         points = np.array([g.location for g in located])
         voxel_weights = voxel_grid.feature_at_points("weight", points)
-
-        # Out-of-grid lookups are NaN, and NaN comparisons are False, so
-        # out-of-grid goals are dropped along with the inhibited ones.
+        # Out-of-grid lookups are NaN, and a NaN comparison is False, so
+        # out-of-grid goals are dropped with the inhibited ones -- unless the
+        # grid attends to nothing at all, in which case they are all that is
+        # left to pursue.
+        all_inhibited = bool((voxel_grid["weight"].to_numpy() < 0).all())
         kept = [
             goal
             for goal, voxel_weight in zip(located, voxel_weights)
-            if voxel_weight >= 0
+            if voxel_weight >= 0 or (all_inhibited and np.isnan(voxel_weight))
         ]
         return kept + unlocated
 

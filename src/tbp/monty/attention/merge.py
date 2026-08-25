@@ -12,7 +12,8 @@ from typing import Protocol
 
 import pandas as pd
 
-from tbp.monty.attention.voxel_grid import VoxelGrid
+from tbp.monty.attention.voxel_grid import WEIGHT_FEATURE, VoxelGrid
+from tbp.monty.cmp import MIN_ATTENTION_WEIGHT
 
 
 def _check_can_merge(grid_a: VoxelGrid, grid_b: VoxelGrid) -> None:
@@ -62,3 +63,50 @@ class Union(VoxelGridMerge):
 
         df = pd.concat([a_to_merge, b_to_merge])
         return VoxelGrid(grid_a.voxel_size, df)
+
+
+class InhibitionFlipsGrid(VoxelGridMerge):
+    """Union in which inhibition sticks, and an inhibit-all signal inhibits all.
+
+    A proposal (grid_b) carrying the ``inhibit_all`` signal flips the whole
+    merged grid: the result holds every voxel of either grid, all at
+    ``MIN_ATTENTION_WEIGHT``. Otherwise this is a :class:`Union` in which an
+    inhibited voxel cannot be excited again: where the proposal re-proposes
+    a remembered negative voxel at a non-negative weight, the remembered
+    weight stays; a fresh negative weight still replaces it. The result
+    never carries the signal itself.
+    """
+
+    def __init__(self) -> None:
+        self._union = Union()
+
+    def __call__(self, grid_a: VoxelGrid, grid_b: VoxelGrid) -> VoxelGrid:
+        """Merge grid_b into grid_a.
+
+        Args:
+            grid_a: The grid being merged into.
+            grid_b: The grid being merged in.
+
+        Returns:
+            The union of both grids' voxels, all at ``MIN_ATTENTION_WEIGHT``
+            if grid_b signals inhibit-all; else at grid_b's weights on
+            overlap, except that grid_a's inhibited voxels keep their weight
+            against a non-negative proposal.
+        """
+        merged = self._union(grid_a, grid_b)
+        if grid_b.inhibit_all:
+            inhibited = merged.to_pandas().assign(
+                **{WEIGHT_FEATURE: MIN_ATTENTION_WEIGHT}
+            )
+            return VoxelGrid(grid_a.voxel_size, inhibited)
+
+        a_weights = grid_a.to_pandas()[WEIGHT_FEATURE]
+        b_weights = grid_b.to_pandas()[WEIGHT_FEATURE]
+        re_excited = a_weights.index[a_weights < 0].intersection(
+            b_weights.index[b_weights >= 0]
+        )
+        if len(re_excited):
+            data = merged.to_pandas().copy()
+            data.loc[re_excited, WEIGHT_FEATURE] = a_weights.loc[re_excited]
+            return VoxelGrid(grid_a.voxel_size, data)
+        return merged

@@ -11,7 +11,6 @@ from __future__ import annotations
 from typing import Protocol
 
 from tbp.monty.attention.voxel_grid import VoxelGrid
-from tbp.monty.cmp import Goal
 from tbp.monty.memento import Memento
 
 __all__ = [
@@ -24,9 +23,9 @@ __all__ = [
 class AttentionSystemTelemetryProtocol(Protocol):
     def reset(self) -> None: ...
 
-    def voxel_grid(self, grid: VoxelGrid) -> None: ...
+    def proposed_grid(self, grid: VoxelGrid) -> None: ...
 
-    def goal_filtering(self, pre: list[Goal], post: list[Goal]) -> None: ...
+    def grid(self, grid: VoxelGrid) -> None: ...
 
     def state_dict(self) -> Memento: ...
 
@@ -35,41 +34,39 @@ class NoopAttentionSystemTelemetry(AttentionSystemTelemetryProtocol):
     def reset(self) -> None:
         pass
 
-    def voxel_grid(self, grid: VoxelGrid) -> None:
+    def proposed_grid(self, grid: VoxelGrid) -> None:
         pass
 
-    def goal_filtering(self, pre: list[Goal], post: list[Goal]) -> None:
+    def grid(self, grid: VoxelGrid) -> None:
         pass
 
     def state_dict(self) -> Memento:
         # The empty schema, so consumers indexing these keys stay simple.
-        return dict(voxel_grids=[], pre_filter_goals=[], post_filter_goals=[])
+        return dict(grids=[], proposed_grids=[])
 
 
 class AttentionSystemTelemetry(AttentionSystemTelemetryProtocol):
+    """Keeps each step's grids for the episode: the proposals and the result."""
+
     def __init__(self) -> None:
-        self.voxel_grids: list[VoxelGrid] = []
-        self.pre_filter_goals: list[list[Goal]] = []
-        self.post_filter_goals: list[list[Goal]] = []
+        self._grids: list[VoxelGrid] = []
+        self._proposed_grids: list[VoxelGrid] = []
 
     def reset(self) -> None:
-        self.voxel_grids = []
-        self.pre_filter_goals = []
-        self.post_filter_goals = []
+        self._grids = []
+        self._proposed_grids = []
 
-    def voxel_grid(self, grid: VoxelGrid) -> None:
-        # Snapshot the backing frame so later steps cannot alter the record.
-        self.voxel_grids.append(VoxelGrid(grid.voxel_size, grid.to_pandas().copy()))
+    def grid(self, grid: VoxelGrid) -> None:
+        # Snapshot: decay updates the live grid's frame in place.
+        self._grids.append(grid.copy())
 
-    def goal_filtering(self, pre: list[Goal], post: list[Goal]) -> None:
-        self.pre_filter_goals.append(list(pre))
-        self.post_filter_goals.append(list(post))
+    def proposed_grid(self, grid: VoxelGrid) -> None:
+        self._proposed_grids.append(grid)
 
     def state_dict(self) -> Memento:
         # The grids ride along as objects; BufferEncoder flattens them at
         # serialization time (see voxel_grid.encode_voxel_grid).
         return dict(
-            voxel_grids=list(self.voxel_grids),
-            pre_filter_goals=self.pre_filter_goals,
-            post_filter_goals=self.post_filter_goals,
+            grids=list(self._grids),
+            proposed_grids=list(self._proposed_grids),
         )
