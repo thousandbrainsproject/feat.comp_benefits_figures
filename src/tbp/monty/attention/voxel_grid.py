@@ -8,14 +8,19 @@
 # https://opensource.org/licenses/MIT.
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
 
 from tbp.monty.frameworks.models.buffer import BufferEncoder
 
-# A voxel's integer (x, y, z) grid coordinate: the lower corner, in voxels.
-Voxel = tuple[int, int, int]
+if TYPE_CHECKING:
+    # A voxel's integer (x, y, z) grid coordinate: the lower corner, in
+    # voxels. Only annotations use it; keeping it out of runtime lets the
+    # module import under the habitat conda env's Python 3.8.
+    Voxel = tuple[int, int, int]
 
 # Edge length of a voxel, in meters, when none is specified.
 DEFAULT_VOXEL_SIZE = 0.005

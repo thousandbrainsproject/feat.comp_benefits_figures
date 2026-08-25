@@ -22,7 +22,6 @@ from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 
 from tbp.monty.attention.voxel_grid import (
-    Voxel,
     VoxelGrid,
     as_row_points,
     encode_voxel_grid,
@@ -44,6 +43,8 @@ from .strategies import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from tbp.monty.attention.voxel_grid import Voxel
 
 
 @st.composite
