@@ -60,7 +60,7 @@ experiment:
           # of each other on the shared surface.
           x_percent_threshold: 10
           region_proposers:
-            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.inhibit_recognized_object.InhibitRecognizedObject
+            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
         learning_module_1:
@@ -75,7 +75,7 @@ experiment:
         learning_module_2:
           x_percent_threshold: 10
           region_proposers:
-            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.inhibit_recognized_object.InhibitRecognizedObject
+            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
       sensor_modules:

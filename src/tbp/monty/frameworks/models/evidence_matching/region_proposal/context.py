@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
     import numpy.typing as npt
 
+    from tbp.monty.cmp import Goal
     from tbp.monty.frameworks.models.evidence_matching.learning_module import (
         EvidenceGraphLM,
     )
@@ -31,18 +32,25 @@ class EvidenceLMRegionContext:
     which advances the LM's symmetry counter as a side effect.
     """
 
-    def __init__(self, lm: EvidenceGraphLM) -> None:
+    def __init__(self, lm: EvidenceGraphLM, goals: Sequence[Goal] = ()) -> None:
         """Wrap a learning module.
 
         Args:
             lm: The learning module to expose.
+            goals: The goals the LM proposed this step.
         """
         self._lm = lm
+        self._goals = tuple(goals)
 
     @property
     def possible_matches(self) -> Sequence[str]:
         """The object ids still consistent with the evidence."""
         return self._lm.get_possible_matches()
+
+    @property
+    def goals(self) -> Sequence[Goal]:
+        """The goals the LM proposed this step; empty when it proposed none."""
+        return self._goals
 
     @property
     def recognized_object(self) -> str | None:

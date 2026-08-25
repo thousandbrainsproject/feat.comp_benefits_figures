@@ -448,7 +448,15 @@ class LearningModule(
     def load_state_dict(self, memento: Memento) -> None:
         pass
 
-    def propose_region(self) -> AttentionRegion | None:
+    def propose_region(self, goals: Sequence[Goal]) -> AttentionRegion | None:  # noqa: ARG002
+        """Propose an attention region, given the goals this LM just proposed.
+
+        Args:
+            goals: The goals this LM's propose_goals returned this step.
+
+        Returns:
+            The proposed region, or None.
+        """
         return None
 
 

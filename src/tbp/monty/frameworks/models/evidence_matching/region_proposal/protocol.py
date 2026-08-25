@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
     import numpy.typing as npt
 
-    from tbp.monty.cmp import AttentionRegion
+    from tbp.monty.cmp import AttentionRegion, Goal
 
 
 class RegionContext(Protocol):
@@ -29,6 +29,10 @@ class RegionContext(Protocol):
     @property
     def possible_matches(self) -> Sequence[str]:
         """The object ids still consistent with the evidence."""
+
+    @property
+    def goals(self) -> Sequence[Goal]:
+        """The goals the LM proposed this step; empty when it proposed none."""
 
     @property
     def recognized_object(self) -> str | None:

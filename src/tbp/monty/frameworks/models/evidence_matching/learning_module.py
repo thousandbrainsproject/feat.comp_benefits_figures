@@ -19,7 +19,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy.spatial import KDTree
 
-from tbp.monty.cmp import AttentionRegion, Message, location_mean
+from tbp.monty.cmp import AttentionRegion, Goal, Message, location_mean
 from tbp.monty.context import RuntimeContext
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
 from tbp.monty.frameworks.models.evidence_matching.graph_memory import (
@@ -385,15 +385,19 @@ class EvidenceGraphLM(GraphLM):
             proposer.reset()
         self._telemetry.reset()
 
-    def propose_region(self) -> AttentionRegion | None:
+    def propose_region(self, goals: Sequence[Goal]) -> AttentionRegion | None:
         """Collect the regions this LM's region proposers emit.
+
+        Args:
+            goals: The goals this LM's propose_goals returned this step,
+                exposed to the proposers through the region context.
 
         Returns:
             The concatenated proposals of every configured region proposer,
             evaluated against the LM's current recognition state; None when
             none of them proposed anything.
         """
-        context = EvidenceLMRegionContext(self)
+        context = EvidenceLMRegionContext(self, goals)
         regions = []
         for proposer in self._region_proposers:
             region = proposer(context)
