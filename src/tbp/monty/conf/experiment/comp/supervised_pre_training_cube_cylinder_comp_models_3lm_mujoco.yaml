@@ -2,7 +2,7 @@
 
 defaults:
   - /monty: evidencegraph_exp1000_e3_t3_tot2500
-  - /monty/motor_system_config: naive_scan_5
+  - /monty/motor_system_config: distant_5
   - /monty/learning_module: evidence_3lm_heterarchy
   - /monty/sensor_module: 3sm_2d3d_dist_slic
   - /monty/connectivity: 3lm_3sm_heterarchy
@@ -36,16 +36,40 @@ experiment:
     logging:
       run_name: supervised_pre_training_cube_cylinder_comp_models_3lm_mujoco
     monty_config:
+      motor_system_config:
+        telemetry:
+          _target_: tbp.monty.frameworks.models.motor_system_telemetry.MotorSystemTelemetry
       learning_modules:
         learning_module_0:
           region_proposers:
             - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
-          gsg: null
+          telemetry:
+            _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
+          gsg:
+            # Require at least 50 steps to elapse before the GSG will consider
+            # outputting a hypothesis-testing goal.
+            min_post_goal_success_steps: 20
         learning_module_1:
+          # The sticker LM is the one that recognizes in this episode. It
+          # sends only the inhibit-all signal that flips the grid, no
+          # locations: its shell proposals landed hundreds of meters off
+          # whenever its pose estimate slipped.
           region_proposers:
             - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.inhibit_all_on_recognition.InhibitAllOnRecognition
+          telemetry:
+            _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
+          # Only LM_0 generates goals; disable the goal generators of LM_1/LM_2.
           gsg: null
         learning_module_2:
           region_proposers:
             - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
+          telemetry:
+            _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
+          # Only LM_0 generates goals; disable the goal generators of LM_1/LM_2.
           gsg: null
+      sensor_modules:
+        sensor_module_3:
+          save_raw_obs: true
+          segmentation_strategy:
+            _target_: tbp.monty.frameworks.models.salience.segmentation.strategies.slic_merge.SlicMerge
+
