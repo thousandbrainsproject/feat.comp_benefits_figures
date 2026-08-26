@@ -7,7 +7,20 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 # ruff: noqa: DOC201,DOC501
-"""Plot the object models learned by any LM, colored by input channel."""
+"""Visualize the object models learned by a Monty learning module.
+
+Each point is drawn with the features learned at that location:
+
+- Patch channels are colored with the learned (HSV) color at each point.
+- LM input channels (compositional models) are colored by the learned child
+  object ID, using bold colors that do not occur on the objects themselves.
+- With --morphology, the stored surface normal (3D channels) or oriented edge
+  direction (2D channels) is drawn as a small arrow at each point.
+
+Channels are distinguished by marker shape. Figures are saved to the Desktop
+by default; pass --show to also open an interactive window where models can
+be rotated (click and drag) and zoomed (scroll).
+"""
 
 from __future__ import annotations
 
@@ -20,12 +33,18 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.colors import hsv_to_rgb
 from matplotlib.lines import Line2D
 
-# Faded style for raw sensor-patch channels when LM channels are also present.
-PATCH_STYLE = {"color": "#B3B3B3", "alpha": 0.3}
-ACCENT_COLORS = ["#00A0DF", "#F737BD", "#7A5CFA", "#FFB800", "#2ECC71", "#E74C3C"]
-POINT_SIZE = 3
+# Bold colors for learned object IDs; deliberately absent from the objects
+# themselves so they cannot be confused with learned patch colors.
+OBJECT_ID_COLORS = ["#FF2DAF", "#E8000B", "#00B140", "#FFC20A"]
+PATCH_MARKER = "o"
+LM_CHANNEL_MARKERS = ["*", "^", "s", "D", "v", "P"]
+PATCH_POINT_SIZE = 3
+OBJECT_ID_POINT_SIZE = 28
+FALLBACK_COLOR = "#808080"
+MORPHOLOGY_COLOR = "#333333"
 
 
 def positive_int(value: str) -> int:
@@ -52,15 +71,19 @@ def as_numpy(value: Any) -> np.ndarray:
     return np.asarray(value)
 
 
-def load_lm_memory(checkpoint: Path, lm_id: int) -> dict:
-    """Load one LM's graph memory from a checkpoint."""
+def load_lm_dict(checkpoint: Path) -> dict:
+    """Load the dictionary of all LM states from a checkpoint."""
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
     if not isinstance(state, dict):
         raise TypeError(f"Checkpoint does not contain a state dictionary: {checkpoint}")
     lm_dict = state.get("lm_dict")
     if not isinstance(lm_dict, dict):
         raise KeyError(f"Checkpoint has no lm_dict: {checkpoint}")
+    return lm_dict
 
+
+def get_lm_memory(lm_dict: dict, lm_id: int) -> dict:
+    """Return one LM's graph memory."""
     lm_key = lm_id if lm_id in lm_dict else str(lm_id)
     if lm_key not in lm_dict:
         raise KeyError(f"LM_{lm_id} not found; available: {list(lm_dict)}")
@@ -75,6 +98,27 @@ def load_lm_memory(checkpoint: Path, lm_id: int) -> dict:
             f"LM_{lm_id} has no learned models; LMs with models: {populated}"
         )
     return memory
+
+
+def encode_object_name(name: str) -> int:
+    """Encode an object name the way object_id features are stored in graphs."""
+    return sum(ord(character) for character in name)
+
+
+def decode_object_ids(lm_dict: dict) -> dict[int, str]:
+    """Map numeric object_id feature values back to object names.
+
+    Object IDs are encoded as the sum of the character codes of the object
+    name, so every object name stored anywhere in the checkpoint provides
+    one decodable ID.
+    """
+    names: dict[int, str] = {}
+    for lm_state in lm_dict.values():
+        memory = lm_state.get("graph_memory", {})
+        if isinstance(memory, dict):
+            for object_name in memory:
+                names[encode_object_name(object_name)] = object_name
+    return names
 
 
 def select_objects(memory: dict, requested: list[str] | None) -> list[str]:
@@ -97,29 +141,16 @@ def collect_channels(memory: dict, objects: list[str]) -> list[str]:
     return sorted(channels, key=lambda name: (not name.startswith("patch"), name))
 
 
-def build_channel_styles(channels: list[str]) -> dict[str, dict]:
-    """Assign a plot style to each channel.
-
-    With multiple channels, patch channels are drawn faded gray so LM inputs
-    stand out; with a single channel it gets a solid accent color.
-    """
-    accents = cycle(ACCENT_COLORS)
-    if len(channels) == 1:
-        return {channels[0]: {"color": next(accents), "alpha": 1.0}}
-    return {
-        channel: dict(PATCH_STYLE)
-        if channel.startswith("patch")
-        else {"color": next(accents), "alpha": 1.0}
-        for channel in channels
-    }
-
-
-def channel_points(memory: dict, object_name: str, channel: str) -> np.ndarray:
-    """Return one channel's finite Nx3 point array, or an empty array if absent."""
+def channel_graph(memory: dict, object_name: str, channel: str):
+    """Return the graph stored for one object/channel, or None if absent."""
     wrapper = memory[object_name].get(channel)
     if wrapper is None:
-        return np.empty((0, 3))
-    graph = getattr(wrapper, "_graph", wrapper)
+        return None
+    return getattr(wrapper, "_graph", wrapper)
+
+
+def graph_points(graph, object_name: str, channel: str) -> np.ndarray:
+    """Return a graph's finite Nx3 point array."""
     positions = getattr(graph, "pos", None)
     if positions is None:
         raise ValueError(f"{object_name!r}/{channel!r} has no point positions")
@@ -133,14 +164,95 @@ def channel_points(memory: dict, object_name: str, channel: str) -> np.ndarray:
     return points
 
 
-def set_equal_limits(axis, points: np.ndarray) -> None:
-    """Use equal cubic limits centered on the combined point cloud."""
+def feature_values(graph, feature: str) -> np.ndarray | None:
+    """Return one named feature's per-point values, or None if not stored."""
+    mapping = getattr(graph, "feature_mapping", None) or {}
+    if feature not in mapping:
+        return None
+    start, end = mapping[feature]
+    return as_numpy(graph.x)[:, start:end].astype(float)
+
+
+def morphology_vectors(graph) -> np.ndarray | None:
+    """Return the per-point normal (3D) or oriented edge (2D) unit vectors.
+
+    Pose vectors are stored as flattened 3x3 matrices: row 0 is the surface
+    normal and rows 1-2 span the tangent plane. Channels from 2D sensor
+    modules (identified by their edge_strength feature) store the oriented
+    edge direction in row 1, while row 0 is just the out-of-plane normal.
+    """
+    pose = feature_values(graph, "pose_vectors")
+    if pose is None or pose.shape[1] != 9:
+        return None
+    pose = pose.reshape(-1, 3, 3)
+    mapping = getattr(graph, "feature_mapping", None) or {}
+    row = 1 if "edge_strength" in mapping else 0
+    return pose[:, row, :]
+
+
+def is_2d_channel(graph) -> bool:
+    """Whether the channel comes from a 2D (edge-based) sensor module."""
+    mapping = getattr(graph, "feature_mapping", None) or {}
+    return "edge_strength" in mapping
+
+
+def channel_markers(channels: list[str]) -> dict[str, str]:
+    """Assign a marker shape to each channel; patches share circles."""
+    lm_markers = cycle(LM_CHANNEL_MARKERS)
+    return {
+        channel: PATCH_MARKER if channel.startswith("patch") else next(lm_markers)
+        for channel in channels
+    }
+
+
+def collect_object_id_colors(
+    memory: dict,
+    id_names: dict[int, str],
+) -> dict[float, str]:
+    """Assign a bold color to every object ID stored in the LM's memory.
+
+    Colors are assigned across all stored objects (not just the plotted
+    selection) so each ID keeps the same color regardless of --objects.
+    """
+    ids: set[float] = set()
+    for stored_channels in memory.values():
+        for wrapper in stored_channels.values():
+            graph = getattr(wrapper, "_graph", wrapper)
+            values = feature_values(graph, "object_id")
+            if values is not None:
+                ids.update(np.unique(values).tolist())
+    ordered = sorted(ids, key=lambda value: id_names.get(int(value), str(value)))
+    colors = cycle(OBJECT_ID_COLORS)
+    return {value: next(colors) for value in ordered}
+
+
+def point_colors(
+    graph,
+    object_id_colors: dict[float, str],
+) -> tuple[np.ndarray | str, bool]:
+    """Return per-point colors and whether they encode learned object IDs."""
+    ids = feature_values(graph, "object_id")
+    if ids is not None:
+        return np.array([object_id_colors[value] for value in ids[:, 0]]), True
+    hsv = feature_values(graph, "hsv")
+    if hsv is not None:
+        return hsv_to_rgb(np.clip(hsv, 0.0, 1.0)), False
+    return FALLBACK_COLOR, False
+
+
+def set_equal_limits(axis, points: np.ndarray) -> float:
+    """Use equal cubic limits centered on the combined point cloud.
+
+    Returns:
+        The half-width of the limits, for scaling other plot elements.
+    """
     center = (points.min(axis=0) + points.max(axis=0)) / 2.0
     radius = max(float(np.ptp(points, axis=0).max()) / 2.0, 1e-6) * 1.05
     axis.set_xlim(center[0] - radius, center[0] + radius)
     axis.set_ylim(center[1] - radius, center[1] + radius)
     axis.set_zlim(center[2] - radius, center[2] + radius)
     axis.set_box_aspect((1, 1, 1))
+    return radius
 
 
 def short_channel(channel: str) -> str:
@@ -155,70 +267,114 @@ def checkpoint_label(checkpoint: Path) -> str:
     return checkpoint.stem
 
 
+def plot_object(
+    axis,
+    memory: dict,
+    object_name: str,
+    *,
+    channels: list[str],
+    markers: dict[str, str],
+    object_id_colors: dict[float, str],
+    show_morphology: bool,
+) -> None:
+    """Draw one object's channels, features, and optional morphology arrows."""
+    graphs = {
+        channel: graph
+        for channel in channels
+        if (graph := channel_graph(memory, object_name, channel)) is not None
+    }
+    if not graphs:
+        raise ValueError(f"{object_name!r} has none of {channels}")
+    points_by_channel = {
+        channel: graph_points(graph, object_name, channel)
+        for channel, graph in graphs.items()
+    }
+    radius = set_equal_limits(axis, np.concatenate(list(points_by_channel.values())))
+
+    for channel, graph in graphs.items():
+        points = points_by_channel[channel]
+        if not len(points):
+            continue
+        colors, is_object_id = point_colors(graph, object_id_colors)
+        axis.scatter(
+            *points.T,
+            c=colors,
+            marker=markers[channel],
+            s=OBJECT_ID_POINT_SIZE if is_object_id else PATCH_POINT_SIZE,
+            alpha=0.9 if is_object_id or len(graphs) == 1 else 0.45,
+            depthshade=False,
+            linewidths=0,
+        )
+        if show_morphology and not is_object_id:
+            vectors = morphology_vectors(graph)
+            if vectors is not None:
+                axis.quiver(
+                    *points.T,
+                    *vectors.T,
+                    length=0.15 * radius,
+                    normalize=True,
+                    pivot="middle" if is_2d_channel(graph) else "tail",
+                    color=MORPHOLOGY_COLOR,
+                    linewidth=0.5,
+                    alpha=0.6,
+                )
+
+    axis.view_init(elev=20, azim=20, vertical_axis="y")
+    axis.set_axis_off()
+    counts_line = " · ".join(
+        f"{short_channel(channel)} {len(points):,}"
+        for channel, points in points_by_channel.items()
+    )
+    total = sum(len(points) for points in points_by_channel.values())
+    axis.set_title(f"{object_name}\n{total:,} total\n{counts_line}", fontsize=9)
+
+
 def make_figure(
     memory: dict,
     objects: list[str],
-    channel_styles: dict[str, dict],
+    channels: list[str],
     *,
+    object_id_colors: dict[float, str],
+    id_names: dict[int, str],
     columns: int,
     checkpoint: Path,
     lm_id: int,
+    show_morphology: bool,
 ) -> plt.Figure:
-    """Create one overlaid channel plot per object."""
+    """Create one feature-colored plot per object, with channel/ID legends."""
+    markers = channel_markers(channels)
     columns = min(columns, len(objects))
     rows = math.ceil(len(objects) / columns)
-    header_inches = 1.4
+    header_inches = 2.3 if object_id_colors else 1.4
     height = 3.6 * rows + header_inches
-    figure = plt.figure(figsize=(3.4 * columns, height))
+    # Keep a minimum width so the title and legends fit even for one column.
+    width = max(3.4 * columns, 7.2)
+    figure = plt.figure(figsize=(width, height))
 
     for index, object_name in enumerate(objects):
         axis = figure.add_subplot(rows, columns, index + 1, projection="3d")
-        points_by_channel = {
-            channel: channel_points(memory, object_name, channel)
-            for channel in channel_styles
-        }
-        present = [points for points in points_by_channel.values() if len(points)]
-        if not present:
-            raise ValueError(f"{object_name!r} has none of {list(channel_styles)}")
-
-        for channel, style in channel_styles.items():
-            points = points_by_channel[channel]
-            if len(points):
-                axis.scatter(
-                    *points.T,
-                    c=style["color"],
-                    alpha=style["alpha"],
-                    s=POINT_SIZE,
-                    depthshade=False,
-                    linewidths=0,
-                )
-
-        set_equal_limits(axis, np.concatenate(present))
-        axis.view_init(elev=20, azim=20, vertical_axis="y")
-        axis.set_axis_off()
-        counts = {channel: len(points) for channel, points in points_by_channel.items()}
-        total = sum(counts.values())
-        counts_line = " · ".join(
-            f"{short_channel(channel)} {count:,}" for channel, count in counts.items()
-        )
-        axis.set_title(
-            f"{object_name}\n{total:,} total\n{counts_line}",
-            fontsize=9,
+        plot_object(
+            axis,
+            memory,
+            object_name,
+            channels=channels,
+            markers=markers,
+            object_id_colors=object_id_colors,
+            show_morphology=show_morphology,
         )
 
-    legend = [
+    channel_handles = [
         Line2D(
             [0],
             [0],
-            marker="o",
+            marker=marker,
             linestyle="none",
-            label=channel,
-            markerfacecolor=style["color"],
+            label=channel if marker == PATCH_MARKER else f"{channel} (object ID)",
+            markerfacecolor="#666666",
             markeredgewidth=0,
-            alpha=style["alpha"],
-            markersize=6,
+            markersize=6 if marker == PATCH_MARKER else 9,
         )
-        for channel, style in channel_styles.items()
+        for channel, marker in markers.items()
     ]
     # Place header elements at fixed distances (in inches) from the top so the
     # layout holds up for both small and large grids.
@@ -229,13 +385,35 @@ def make_figure(
         va="top",
     )
     figure.legend(
-        handles=legend,
+        handles=channel_handles,
         loc="upper center",
-        bbox_to_anchor=(0.5, 1 - 0.68 / height),
-        ncols=len(legend),
+        bbox_to_anchor=(0.5, 1 - 0.66 / height),
+        ncols=len(channel_handles),
+        fontsize=9,
     )
+    if object_id_colors:
+        id_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="none",
+                label=id_names.get(int(value), f"ID {value:g}"),
+                markerfacecolor=color,
+                markeredgewidth=0,
+                markersize=7,
+            )
+            for value, color in object_id_colors.items()
+        ]
+        figure.legend(
+            handles=id_handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1 - 1.0 / height),
+            ncols=len(id_handles),
+            fontsize=9,
+        )
     figure.subplots_adjust(
-        top=1 - 1.05 / height, bottom=0.01, wspace=0.05, hspace=0.12
+        top=1 - (header_inches - 0.35) / height, bottom=0.01, wspace=0.05, hspace=0.12
     )
     return figure
 
@@ -257,6 +435,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--objects", nargs="+", help="Object names to plot (default: all)."
     )
+    parser.add_argument(
+        "--morphology",
+        action="store_true",
+        help="Draw stored surface normals (3D channels) or oriented edges "
+        "(2D channels) as arrows at each point.",
+    )
     parser.add_argument("--columns", type=positive_int, default=5)
     parser.add_argument(
         "--output",
@@ -266,37 +450,44 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--show",
         action="store_true",
-        help="Show the plot interactively instead of saving it.",
+        help="Also open an interactive window (drag to rotate, scroll to zoom).",
     )
     parser.add_argument("--dpi", type=positive_int, default=150)
     return parser.parse_args()
 
 
 def main() -> None:
-    """Load an LM's graph memory and save or show its channel-colored grid."""
+    """Load an LM's graph memory, save its feature plot, and optionally show it."""
     args = parse_args()
     checkpoint = resolve_checkpoint(args.model_path)
-    memory = load_lm_memory(checkpoint, args.lm)
+    lm_dict = load_lm_dict(checkpoint)
+    memory = get_lm_memory(lm_dict, args.lm)
     objects = select_objects(memory, args.objects)
     channels = collect_channels(memory, objects)
-    channel_styles = build_channel_styles(channels)
+    id_names = decode_object_ids(lm_dict)
+    object_id_colors = collect_object_id_colors(memory, id_names)
 
     print(
         f"Loaded {len(objects)} objects from LM_{args.lm} in {checkpoint} "
         f"(channels: {channels})"
     )
+    if object_id_colors:
+        decoded = {
+            id_names.get(int(value), value): color
+            for value, color in object_id_colors.items()
+        }
+        print(f"Learned object IDs: {decoded}")
     figure = make_figure(
         memory,
         objects,
-        channel_styles,
+        channels,
+        object_id_colors=object_id_colors,
+        id_names=id_names,
         columns=args.columns,
         checkpoint=checkpoint,
         lm_id=args.lm,
+        show_morphology=args.morphology,
     )
-
-    if args.show:
-        plt.show()
-        return
 
     output = args.output
     if output is None:
@@ -304,8 +495,12 @@ def main() -> None:
     output = output.expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output, dpi=args.dpi)
-    plt.close(figure)
     print(f"Saved {output}")
+
+    if args.show:
+        plt.show()
+    else:
+        plt.close(figure)
 
 
 if __name__ == "__main__":
