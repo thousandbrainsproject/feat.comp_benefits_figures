@@ -2,7 +2,7 @@
 
 defaults:
   - /monty: evidencegraph_exp1000_e3_t3_tot2500
-  - /monty/motor_system_config: naive_scan_1
+  - /monty/motor_system_config: naive_scan_1  # TODO - remove/cleanup use of inhibition_flip etc. which won't get invoked since we do a naive scan
   - /monty/learning_module: evidence_3lm_heterarchy
   - /monty/sensor_module: 3sm_2d3d_dist_slic
   - /monty/connectivity: 3lm_3sm_heterarchy
