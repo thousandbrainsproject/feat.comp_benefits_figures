@@ -38,29 +38,38 @@ experiment:
     monty_config:
       motor_system_config:
         telemetry:
-          _target_: tbp.monty.frameworks.models.motor_system_telemetry.MotorSystemTelemetry
+          _target_: tbp.monty.frameworks.models.motor_system_telemetry.NoopMotorSystemTelemetry
       learning_modules:
         learning_module_0:
           region_proposers:
             - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
           telemetry:
-            _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
+            _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.NoopEvidenceGraphLMTelemetry
           gsg:
             min_post_goal_success_steps: 100
         learning_module_1:
           # Model-based inhibition of return may not actually be necessary, as LM0 will move us onto new objects
           # Only LM_0 generates goals; disable the goal generators of LM_1/LM_2.
           gsg: null
+          # Only report the sticker while its evidence is well above the ~1 it
+          # decays to once the sensor has left it (a real recognition runs >10).
+          output_min_evidence: 3.0
         learning_module_2:
           region_proposers:
             - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
           telemetry:
-            _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
+            _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.NoopEvidenceGraphLMTelemetry
           # Only LM_0 generates goals; disable the goal generators of LM_1/LM_2.
           gsg: null
       sensor_modules:
         sensor_module_3:
-          save_raw_obs: true
           segmentation_strategy:
             _target_: tbp.monty.frameworks.models.salience.segmentation.strategies.slic_merge.SlicMerge
+          # Nothing reads this telemetry during pretraining, and recording every
+          # step's frames, maps, and grids exhausts memory over a long run.
+          snapshot_telemetry:
+            _target_: tbp.monty.frameworks.models.salience.telemetry.NoopSalienceSMTelemetry
+      attention_system:
+        telemetry:
+          _target_: tbp.monty.attention.telemetry.NoopAttentionSystemTelemetry
 
