@@ -64,8 +64,6 @@ experiment:
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
           gsg:
-            # Require at least 50 steps to elapse before the GSG will consider
-            # outputting a hypothesis-testing goal.
             min_post_goal_success_steps: 20
         learning_module_1:
           # The sticker LM is the one that recognizes in this episode. It

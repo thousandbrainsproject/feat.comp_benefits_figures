@@ -46,8 +46,6 @@ experiment:
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.EvidenceGraphLMTelemetry
           gsg:
-            # Require at least 50 steps to elapse before the GSG will consider
-            # outputting a hypothesis-testing goal.
             min_post_goal_success_steps: 100
         learning_module_1:
           # Model-based inhibition of return may not actually be necessary, as LM0 will move us onto new objects
