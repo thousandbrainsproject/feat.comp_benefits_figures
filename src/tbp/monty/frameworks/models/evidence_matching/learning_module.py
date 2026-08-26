@@ -201,6 +201,14 @@ class EvidenceGraphLM(GraphLM):
             unique when checking for the terminal condition (in radians).
         required_symmetry_evidence: number of steps with unchanged possible poses
             to classify an object as symmetric and go into terminal condition.
+        output_max_model_distance: How far (in meters) the most likely hypothesis
+            may lie from the nearest stored point of its object for the LM to
+            still send its output to higher-level LMs. Keeps a recognized object
+            from being reported once the sensor has moved off the learned model.
+        output_min_evidence: The least evidence the most likely hypothesis needs
+            for the LM to send its output to higher-level LMs. A floor of 0
+            (the default) adds no condition; a positive floor stops a match
+            whose evidence has decayed toward nothing from being reported.
 
     Model Attributes:
         graph_delta_thresholds: Thresholds used to compare nodes in the graphs being
@@ -260,6 +268,8 @@ class EvidenceGraphLM(GraphLM):
         path_similarity_threshold=0.1,
         pose_similarity_threshold=0.35,
         required_symmetry_evidence=5,
+        output_max_model_distance=0.01,
+        output_min_evidence=0.0,
         graph_delta_thresholds=None,
         max_graph_size=0.3,  # 30cm
         max_nodes_per_graph=2000,
@@ -310,6 +320,9 @@ class EvidenceGraphLM(GraphLM):
         self.path_similarity_threshold = path_similarity_threshold
         self.pose_similarity_threshold = pose_similarity_threshold
         self.required_symmetry_evidence = required_symmetry_evidence
+        # --- Output Params ---
+        self.output_max_model_distance = output_max_model_distance
+        self.output_min_evidence = output_min_evidence
         # --- Model Params ---
         self.max_graph_size = max_graph_size
         # --- Debugging Params ---
@@ -588,13 +601,19 @@ class EvidenceGraphLM(GraphLM):
         output therefore has the same format to keep the messaging protocol
         consistent and make it easy to stack multiple LMs on top of each other.
 
-        If the LM has not reached a "match" terminal state, pass_message == False.
+        pass_message is False unless the LM has reached a "match" terminal state,
+        its sensor is on the object, the most likely hypothesis has at least
+        output_min_evidence, and it lies within output_max_model_distance of the
+        recognized object's stored points.
         """
         mlh = self._get_current_mlh()
         pose_features = self._object_pose_to_features(mlh["rotation"].inv())
         object_id_features = self._object_id_to_features(mlh["graph_id"])
         pass_message = bool(
-            self.buffer.get_currently_on_object() and self.terminal_state == "match"
+            self.buffer.get_currently_on_object()
+            and self.terminal_state == "match"
+            and mlh["evidence"] >= self.output_min_evidence
+            and self._mlh_on_model(mlh)
         )
         # TODO H: is this a good way to scale evidence to [0, 1]?
         confidence = (
@@ -1224,6 +1243,32 @@ class EvidenceGraphLM(GraphLM):
         # Equivalent to applying the pose rotation to the rf spanning unit vectors
         # -> pose.as_matrix().dot(pose_vectors.T).T
         return pose.as_matrix().T
+
+    def _mlh_on_model(self, mlh) -> bool:
+        """Whether the MLH location lies near the stored points of its object.
+
+        Args:
+            mlh: The most likely hypothesis, with ``graph_id`` and ``location``
+                in the object's reference frame.
+
+        Returns:
+            True if the location is within output_max_model_distance of the
+            nearest stored point in any of the object's input channels; False
+            when the object is unknown or the hypothesis has no location.
+        """
+        graph_id, location = mlh["graph_id"], mlh["location"]
+        if location is None or graph_id not in self.get_all_known_object_ids():
+            return False
+        query = np.asarray(location, dtype=float).reshape(1, 3)
+        distances = [
+            float(
+                self.graph_memory.get_graph(graph_id, channel).find_nearest_neighbors(
+                    query, num_neighbors=1, return_distance=True
+                )[0]
+            )
+            for channel in self.get_input_channels_in_graph(graph_id)
+        ]
+        return min(distances) <= self.output_max_model_distance
 
     def _object_id_to_features(self, object_id):
         """Turn object ID into features that express object similarity.
