@@ -71,6 +71,10 @@ analysis = [
     'ipython',
     'seaborn',
 ]
+viz = [
+    # Interactive 3D inspection of learned object models (analysis/scripts/inspect_models.py)
+    'vedo',
+]
 build = [
     'build'
 ]

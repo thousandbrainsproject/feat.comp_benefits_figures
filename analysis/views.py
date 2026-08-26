@@ -85,7 +85,11 @@ class Stream(Generic[T]):
     steps: np.ndarray
 
     def __len__(self) -> int:
-        """How many recorded values in the data that the stream pulls from."""
+        """How many recorded values in the data that the stream pulls from.
+
+        Returns:
+            The record count.
+        """
         return len(self.values)
 
     def __iter__(self) -> Iterator[T]:
