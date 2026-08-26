@@ -42,12 +42,15 @@ MODELS_DIR = (
     / "my_trained_models"
 )
 
-# The pretraining chain being trained now, first stage first; each stage's
-# model holds every earlier stage's objects (conf/experiment/comp/).
+# The pretraining chain being trained now, first stage first (see
+# conf/experiment/comp/). Each stage's model holds every earlier stage's
+# objects; the last two are alternative third stages, the single-object
+# cube_tbp one preferred when both exist.
 CURRENT_CHAIN = (
     "supervised_pre_training_cube_cylinder_3d_children_3lm_mujoco",
     "supervised_pre_training_cube_cylinder_2d_children_3lm_mujoco",
     "supervised_pre_training_cube_cylinder_comp_models_3lm_mujoco",
+    "supervised_pre_training_cube_tbp_comp_models_3lm_mujoco",
 )
 
 
@@ -114,6 +117,22 @@ class LearnedObject:
     def normals(self) -> np.ndarray:
         """The ``(N, 3)`` surface normal at each node."""
         return self.points["pose_vectors"][:, :3]
+
+    @property
+    def is_2d(self) -> bool:
+        """Whether the nodes came from a 2D (edge-based) sensor module."""
+        return "edge_strength" in self.points.features
+
+    @property
+    def morphology(self) -> np.ndarray:
+        """The ``(N, 3)`` unit vector that describes each node's local shape.
+
+        The surface normal (first pose vector) for 3D channels; for 2D
+        channels, whose first pose vector is just the out-of-plane normal,
+        the oriented edge direction stored as the second pose vector.
+        """
+        pose_vectors = self.points["pose_vectors"]
+        return pose_vectors[:, 3:6] if self.is_2d else pose_vectors[:, :3]
 
     @property
     def colors(self) -> np.ndarray:

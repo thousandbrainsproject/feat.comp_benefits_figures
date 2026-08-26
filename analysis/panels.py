@@ -28,10 +28,10 @@ from matplotlib.patches import Rectangle
 from analysis.views import Points
 
 if TYPE_CHECKING:
-
     from matplotlib.axes import Axes
     from matplotlib.cm import ScalarMappable
     from matplotlib.colorbar import Colorbar
+    from matplotlib.figure import Figure
     from matplotlib.image import AxesImage
     from matplotlib.lines import Line2D
     from matplotlib.table import Table
@@ -606,3 +606,34 @@ def add_invisible_colorbar(ax: Axes, pad: float = 0.04) -> Colorbar:
     bar.ax.set_visible(False)
     return bar
 
+
+def attach_scroll_zoom(fig: Figure, zoom_per_step: float = 1.15) -> None:
+    """Make the scroll wheel zoom the 3D axes under the cursor.
+
+    Matplotlib's 3D axes rotate on left-drag and zoom only on right-drag, so
+    scroll zoom is wired up by shrinking or growing the axis limits around
+    their center.
+
+    Args:
+        fig: The figure whose 3D axes should zoom.
+        zoom_per_step: Limit scale factor per scroll step; scrolling up
+            zooms in.
+    """
+
+    def on_scroll(event) -> None:
+        ax = event.inaxes
+        if ax is None or not hasattr(ax, "get_zlim3d"):
+            return
+        factor = zoom_per_step ** (-event.step)
+        for get_limits, set_limits in (
+            (ax.get_xlim3d, ax.set_xlim3d),
+            (ax.get_ylim3d, ax.set_ylim3d),
+            (ax.get_zlim3d, ax.set_zlim3d),
+        ):
+            low, high = get_limits()
+            center = (low + high) / 2.0
+            half_width = (high - low) / 2.0 * factor
+            set_limits(center - half_width, center + half_width)
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("scroll_event", on_scroll)

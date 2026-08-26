@@ -107,6 +107,21 @@ class DefaultModelTest(unittest.TestCase):
                 found, models_dir / CURRENT_CHAIN[1] / "pretrained" / "model.pt"
             )
 
+    def test_prefers_the_last_stage_when_every_stage_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            for run_name in CURRENT_CHAIN:
+                model = models_dir / run_name / "pretrained" / "model.pt"
+                model.parent.mkdir(parents=True)
+                model.touch()
+
+            with patch("analysis.models.MODELS_DIR", models_dir):
+                found = default_model()
+
+            self.assertEqual(
+                found, models_dir / CURRENT_CHAIN[-1] / "pretrained" / "model.pt"
+            )
+
     def test_raises_before_any_stage_is_trained(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch(
             "analysis.models.MODELS_DIR", Path(tmp)
@@ -165,6 +180,35 @@ class LoadLearnedObjectsTest(unittest.TestCase):
     def test_normals_are_the_first_pose_vector(self) -> None:
         obj = load_learned_objects(self.model)["LM_0"]["cube"]["patch_0"]
         nptest.assert_array_equal(obj.normals, obj.points["pose_vectors"][:, :3])
+
+
+class LearnedObjectMorphologyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        # Pose vectors: normal (0..2), then two tangent directions.
+        self.pose_vectors = np.array([[1.0, 0, 0, 0, 1, 0, 0, 0, 1]])
+
+    def test_is_the_normal_for_a_3d_channel(self) -> None:
+        obj = LearnedObject(
+            "LM_0",
+            "cube",
+            "patch_0",
+            Points(np.zeros((1, 3)), {"pose_vectors": self.pose_vectors}),
+        )
+        self.assertFalse(obj.is_2d)
+        nptest.assert_array_equal(obj.morphology, [[1.0, 0, 0]])
+
+    def test_is_the_edge_direction_for_a_2d_channel(self) -> None:
+        obj = LearnedObject(
+            "LM_1",
+            "logo",
+            "patch_1",
+            Points(
+                np.zeros((1, 3)),
+                {"pose_vectors": self.pose_vectors, "edge_strength": np.array([0.4])},
+            ),
+        )
+        self.assertTrue(obj.is_2d)
+        nptest.assert_array_equal(obj.morphology, [[0.0, 1, 0]])
 
 
 class LearnedObjectColorsTest(unittest.TestCase):
