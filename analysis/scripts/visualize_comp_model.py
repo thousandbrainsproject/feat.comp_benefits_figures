@@ -7,19 +7,38 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 # ruff: noqa: DOC201,DOC501
-"""Visualize the object models learned by a Monty learning module.
+r"""Visualize the object models learned by a Monty learning module.
+
+Usage:
+    python analysis/scripts/visualize_comp_model.py MODEL_PATH [options]
+
+MODEL_PATH points at a trained model: either model.pt itself, its pretrained
+directory, or the experiment directory containing it. For example:
+
+    python analysis/scripts/visualize_comp_model.py \
+        ~/tbp/results/monty/pretrained_models/my_trained_models/<experiment> \
+        --lm 2 --show
+
+Options:
+    --lm ID         Which learning module's models to plot (default: 0).
+    --objects ...   One or more object names to plot (default: all stored).
+    --morphology    Draw the stored surface normal (3D channels) or oriented
+                    edge direction (2D channels) as an arrow at each point.
+    --show          Also open an interactive window: click and drag to
+                    rotate a model, scroll to zoom the subplot under the
+                    cursor.
+    --output PATH   Where to save the figure
+                    (default: ~/Desktop/<model_name>_lm<id>.png).
+    --columns N     Max subplot columns (default: 5).
+    --dpi N         Resolution of the saved figure (default: 150).
 
 Each point is drawn with the features learned at that location:
 
 - Patch channels are colored with the learned (HSV) color at each point.
 - LM input channels (compositional models) are colored by the learned child
   object ID, using bold colors that do not occur on the objects themselves.
-- With --morphology, the stored surface normal (3D channels) or oriented edge
-  direction (2D channels) is drawn as a small arrow at each point.
 
-Channels are distinguished by marker shape. Figures are saved to the Desktop
-by default; pass --show to also open an interactive window where models can
-be rotated (click and drag) and zoomed (scroll).
+Channels are distinguished by marker shape.
 """
 
 from __future__ import annotations
@@ -448,7 +467,10 @@ def attach_scroll_zoom(figure: plt.Figure, zoom_per_step: float = 1.15) -> None:
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "model_path",
         type=Path,
