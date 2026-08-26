@@ -311,7 +311,7 @@ def plot_object(
                 axis.quiver(
                     *points.T,
                     *vectors.T,
-                    length=0.15 * radius,
+                    length=0.07 * radius,
                     normalize=True,
                     pivot="middle" if is_2d_channel(graph) else "tail",
                     color=MORPHOLOGY_COLOR,
@@ -418,6 +418,34 @@ def make_figure(
     return figure
 
 
+def attach_scroll_zoom(figure: plt.Figure, zoom_per_step: float = 1.15) -> None:
+    """Make the scroll wheel zoom the 3D axes under the cursor.
+
+    Matplotlib's 3D axes only support rotating (left-drag) and zooming via
+    right-click-drag out of the box, so scroll zoom is wired up manually by
+    shrinking or growing the axis limits around their center.
+    """
+
+    def on_scroll(event) -> None:
+        axis = event.inaxes
+        if axis is None or not hasattr(axis, "get_zlim3d"):
+            return
+        # event.step > 0 when scrolling up, which should zoom in.
+        factor = zoom_per_step ** (-event.step)
+        for get_limits, set_limits in (
+            (axis.get_xlim3d, axis.set_xlim3d),
+            (axis.get_ylim3d, axis.set_ylim3d),
+            (axis.get_zlim3d, axis.set_zlim3d),
+        ):
+            low, high = get_limits()
+            center = (low + high) / 2.0
+            half_width = (high - low) / 2.0 * factor
+            set_limits(center - half_width, center + half_width)
+        figure.canvas.draw_idle()
+
+    figure.canvas.mpl_connect("scroll_event", on_scroll)
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -498,6 +526,7 @@ def main() -> None:
     print(f"Saved {output}")
 
     if args.show:
+        attach_scroll_zoom(figure)
         plt.show()
     else:
         plt.close(figure)
