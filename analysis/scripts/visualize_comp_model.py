@@ -57,7 +57,7 @@ from matplotlib.lines import Line2D
 
 # Bold colors for learned object IDs; deliberately absent from the objects
 # themselves so they cannot be confused with learned patch colors.
-OBJECT_ID_COLORS = ["#FF2DAF", "#E8000B", "#00B140", "#FFC20A"]
+OBJECT_ID_COLORS = ["#FF2DAF", "#000000", "#00B140", "#FFC20A"]
 PATCH_MARKER = "o"
 LM_CHANNEL_MARKERS = ["*", "^", "s", "D", "v", "P"]
 PATCH_POINT_SIZE = 3
