@@ -60,11 +60,17 @@ from matplotlib.lines import Line2D
 
 # Bold colors for learned object IDs; deliberately absent from the objects
 # themselves so they cannot be confused with learned patch colors.
-OBJECT_ID_COLORS = ["#FF2DAF", "#000000", "#00B140", "#FFC20A"]
+# Bold, distinct colors for assigned object IDs, unused in object HSVs themselves:
+# "#00B140" ≈ bright green (ID 0), "#ffbe31" = gold (ID 1),
+# "#f737bd" ≈ vibrant magenta (ID 2), "#00a0df" ≈ blue (ID 3).
+OBJECT_ID_COLORS = ["#00B140", "#ffbe31", "#f737bd", "#00a0df"]
 PATCH_MARKER = "o"
 LM_CHANNEL_MARKERS = ["*", "^", "s", "D", "v", "P"]
 PATCH_POINT_SIZE = 3
-OBJECT_ID_POINT_SIZE = 28
+OBJECT_ID_POINT_SIZE = 14
+# Per-rank size multiplier for object-ID channels: each sparser channel in the
+# draw order is this fraction larger than the previous one.
+SPARSITY_SIZE_STEP = 4.0
 FALLBACK_COLOR = "#808080"
 MORPHOLOGY_COLOR = "#333333"
 
@@ -319,20 +325,52 @@ def plot_object(
     }
     radius = set_equal_limits(axis, np.concatenate(list(points_by_channel.values())))
 
+    # Build one draw unit per patch channel, but split object-ID channels
+    # into one unit per learned ID: a channel can store several IDs (e.g. an
+    # object that wrongly learned both logos), and the sparse contaminating
+    # ID should be ranked by its own point count, not its channel's.
+    units: list[tuple[str, Any, np.ndarray, Any, bool]] = []
     for channel, graph in graphs.items():
         points = points_by_channel[channel]
         if not len(points):
             continue
-        colors, is_object_id = point_colors(graph, object_id_colors)
+        ids = feature_values(graph, "object_id")
+        if ids is None:
+            colors, _ = point_colors(graph, object_id_colors)
+            units.append((channel, graph, points, colors, False))
+        else:
+            for value in np.unique(ids[:, 0]):
+                mask = ids[:, 0] == value
+                units.append(
+                    (channel, graph, points[mask], object_id_colors[value], True)
+                )
+
+    # Matplotlib normally orders whole collections by their average depth,
+    # which lets dense parent-object clouds hide sparse child clouds (e.g.
+    # logos). Disable that and draw patches first, then object-ID units from
+    # largest to smallest, so the sparsest points always end up on top and
+    # grow in size with their sparsity rank.
+    axis.computed_zorder = False
+    units.sort(key=lambda unit: (unit[4], -len(unit[2])))
+    lm_rank = 0
+    for zorder, (channel, graph, points, colors, is_object_id) in enumerate(
+        units, start=1
+    ):
+        if is_object_id:
+            size = OBJECT_ID_POINT_SIZE * (1.0 + SPARSITY_SIZE_STEP * lm_rank)
+            lm_rank += 1
+        else:
+            size = PATCH_POINT_SIZE
         axis.scatter(
             *points.T,
             c=colors,
             marker=markers[channel],
-            s=OBJECT_ID_POINT_SIZE if is_object_id else PATCH_POINT_SIZE,
-            alpha=0.6 if is_object_id or len(graphs) == 1 else 0.45,
+            s=size,
+            alpha=0.5 if is_object_id or len(graphs) == 1 else 0.45,
             depthshade=False,
             edgecolors="black" if ids_only else None,
             linewidths=0.5 if ids_only else 0,
+            zorder=zorder,
         )
         if show_morphology and not is_object_id:
             vectors = morphology_vectors(graph)
@@ -346,6 +384,7 @@ def plot_object(
                     color=MORPHOLOGY_COLOR,
                     linewidth=0.5,
                     alpha=0.6,
+                    zorder=zorder,
                 )
 
     axis.view_init(elev=20, azim=20, vertical_axis="y")
