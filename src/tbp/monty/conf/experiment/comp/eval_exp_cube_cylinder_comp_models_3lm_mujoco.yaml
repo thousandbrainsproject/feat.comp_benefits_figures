@@ -1,0 +1,71 @@
+# @package _global_
+
+defaults:
+  - /monty: evidencegraph_exp1000_emin_t3_tot2500
+  - /monty/motor_system_config: distant_5
+  - /monty/learning_module: evidence_3lm_heterarchy
+  - /monty/sensor_module: 3sm_2d3d_dist_slic
+  - /monty/connectivity: 3lm_3sm_heterarchy
+  - /monty/attention_system: default
+  - /environment: mujoco_dist_agent_sensors3_256
+  - /env_interface: eval_cube_cylinder_with_stickers_predefined
+  - /env_interface/positioning_procedures_eval: getgoodview_viewfinder_patch0
+  - /env_interface/transform: gaussianblur_missing_depthto3d_sensor4_256
+  - /logging: basic_warning_wandb_evidence_eval_runs
+
+experiment:
+  _target_: tbp.monty.frameworks.experiments.object_recognition_experiments.MontyObjectRecognitionExperiment
+  config:
+    show_sensor_output: false
+    max_train_steps: 250
+    max_eval_steps: 250
+    max_total_steps: 500
+    n_train_epochs: 3
+    n_eval_epochs: ${constants.rotations_all_count}
+    model_name_or_path: ${path.expanduser:${oc.env:MONTY_MODELS}/my_trained_models/supervised_pre_training_cube_cylinder_comp_models_3lm_mujoco/pretrained/}
+    match_criterion:
+      _target_: tbp.monty.experiment.match_criteria.NamedLMsMatch
+      ids:
+        - learning_module_2
+    seed: 42
+    supervised_lm_ids: []
+    logging:
+      run_name: eval_exp_cube_cylinder_comp_models_3lm_mujoco
+    monty_config:
+      motor_system_config:
+        telemetry:
+          _target_: tbp.monty.frameworks.models.motor_system_telemetry.NoopMotorSystemTelemetry
+      learning_modules:
+        learning_module_0:
+          region_proposers:
+            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
+          telemetry:
+            _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.NoopEvidenceGraphLMTelemetry
+          gsg:
+            min_post_goal_success_steps: 50
+        learning_module_1:
+          # Model-based inhibition of return may not actually be necessary, as LM0 will move us onto new objects
+          # Only LM_0 generates goals; disable the goal generators of LM_1/LM_2.
+          gsg: null
+          # Only report the sticker while its evidence is well above the ~1 it
+          # decays to once the sensor has left it (a real recognition runs >10).
+          output_min_evidence: 3.0
+        learning_module_2:
+          region_proposers:
+            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
+          telemetry:
+            _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.NoopEvidenceGraphLMTelemetry
+          # Only LM_0 generates goals; disable the goal generators of LM_1/LM_2.
+          gsg: null
+      sensor_modules:
+        sensor_module_3:
+          segmentation_strategy:
+            _target_: tbp.monty.frameworks.models.salience.segmentation.strategies.slic_merge.SlicMerge
+          # Nothing reads this telemetry during pretraining, and recording every
+          # step's frames, maps, and grids exhausts memory over a long run.
+          snapshot_telemetry:
+            _target_: tbp.monty.frameworks.models.salience.telemetry.NoopSalienceSMTelemetry
+      attention_system:
+        telemetry:
+          _target_: tbp.monty.attention.telemetry.NoopAttentionSystemTelemetry
+
