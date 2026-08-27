@@ -24,6 +24,9 @@ Options:
     --objects ...   One or more object names to plot (default: all stored).
     --morphology    Draw the stored surface normal (3D channels) or oriented
                     edge direction (2D channels) as an arrow at each point.
+    --ids_only      Skip sensory patch channels and draw every LM input
+                    channel with the same circular marker (with a thin black
+                    outline) instead of per-channel marker shapes.
     --show          Also open an interactive window: click and drag to
                     rotate a model, scroll to zoom the subplot under the
                     cursor.
@@ -215,8 +218,13 @@ def is_2d_channel(graph) -> bool:
     return "edge_strength" in mapping
 
 
-def channel_markers(channels: list[str]) -> dict[str, str]:
-    """Assign a marker shape to each channel; patches share circles."""
+def channel_markers(channels: list[str], ids_only: bool = False) -> dict[str, str]:
+    """Assign a marker shape to each channel; patches share circles.
+
+    With ids_only, every channel uses the same circular marker.
+    """
+    if ids_only:
+        return dict.fromkeys(channels, PATCH_MARKER)
     lm_markers = cycle(LM_CHANNEL_MARKERS)
     return {
         channel: PATCH_MARKER if channel.startswith("patch") else next(lm_markers)
@@ -295,6 +303,7 @@ def plot_object(
     markers: dict[str, str],
     object_id_colors: dict[float, str],
     show_morphology: bool,
+    ids_only: bool,
 ) -> None:
     """Draw one object's channels, features, and optional morphology arrows."""
     graphs = {
@@ -320,9 +329,10 @@ def plot_object(
             c=colors,
             marker=markers[channel],
             s=OBJECT_ID_POINT_SIZE if is_object_id else PATCH_POINT_SIZE,
-            alpha=0.9 if is_object_id or len(graphs) == 1 else 0.45,
+            alpha=0.6 if is_object_id or len(graphs) == 1 else 0.45,
             depthshade=False,
-            linewidths=0,
+            edgecolors="black" if ids_only else None,
+            linewidths=0.5 if ids_only else 0,
         )
         if show_morphology and not is_object_id:
             vectors = morphology_vectors(graph)
@@ -359,12 +369,16 @@ def make_figure(
     checkpoint: Path,
     lm_id: int,
     show_morphology: bool,
+    ids_only: bool,
 ) -> plt.Figure:
     """Create one feature-colored plot per object, with channel/ID legends."""
-    markers = channel_markers(channels)
+    markers = channel_markers(channels, ids_only)
     columns = min(columns, len(objects))
     rows = math.ceil(len(objects) / columns)
-    header_inches = 2.3 if object_id_colors else 1.4
+    if ids_only:
+        header_inches = 1.9
+    else:
+        header_inches = 2.3 if object_id_colors else 1.4
     height = 3.6 * rows + header_inches
     # Keep a minimum width so the title and legends fit even for one column.
     width = max(3.4 * columns, 7.2)
@@ -380,21 +394,9 @@ def make_figure(
             markers=markers,
             object_id_colors=object_id_colors,
             show_morphology=show_morphology,
+            ids_only=ids_only,
         )
 
-    channel_handles = [
-        Line2D(
-            [0],
-            [0],
-            marker=marker,
-            linestyle="none",
-            label=channel if marker == PATCH_MARKER else f"{channel} (object ID)",
-            markerfacecolor="#666666",
-            markeredgewidth=0,
-            markersize=6 if marker == PATCH_MARKER else 9,
-        )
-        for channel, marker in markers.items()
-    ]
     # Place header elements at fixed distances (in inches) from the top so the
     # layout holds up for both small and large grids.
     figure.suptitle(
@@ -403,13 +405,27 @@ def make_figure(
         y=1 - 0.08 / height,
         va="top",
     )
-    figure.legend(
-        handles=channel_handles,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 1 - 0.66 / height),
-        ncols=len(channel_handles),
-        fontsize=9,
-    )
+    if not ids_only:
+        channel_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker=marker,
+                linestyle="none",
+                label=channel if marker == PATCH_MARKER else f"{channel} (object ID)",
+                markerfacecolor="#666666",
+                markeredgewidth=0,
+                markersize=6 if marker == PATCH_MARKER else 9,
+            )
+            for channel, marker in markers.items()
+        ]
+        figure.legend(
+            handles=channel_handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1 - 0.66 / height),
+            ncols=len(channel_handles),
+            fontsize=9,
+        )
     if object_id_colors:
         id_handles = [
             Line2D(
@@ -427,7 +443,7 @@ def make_figure(
         figure.legend(
             handles=id_handles,
             loc="upper center",
-            bbox_to_anchor=(0.5, 1 - 1.0 / height),
+            bbox_to_anchor=(0.5, 1 - (0.66 if ids_only else 1.0) / height),
             ncols=len(id_handles),
             fontsize=9,
         )
@@ -491,6 +507,12 @@ def parse_args() -> argparse.Namespace:
         help="Draw stored surface normals (3D channels) or oriented edges "
         "(2D channels) as arrows at each point.",
     )
+    parser.add_argument(
+        "--ids_only",
+        action="store_true",
+        help="Skip sensory patch channels and draw all LM input channels as "
+        "circles with a thin black outline, without per-channel markers.",
+    )
     parser.add_argument("--columns", type=positive_int, default=5)
     parser.add_argument(
         "--output",
@@ -514,6 +536,15 @@ def main() -> None:
     memory = get_lm_memory(lm_dict, args.lm)
     objects = select_objects(memory, args.objects)
     channels = collect_channels(memory, objects)
+    if args.ids_only:
+        channels = [
+            channel for channel in channels if not channel.startswith("patch")
+        ]
+        if not channels:
+            raise ValueError(
+                "--ids_only requires LM input channels, but only patch "
+                "channels are stored for the selected objects."
+            )
     id_names = decode_object_ids(lm_dict)
     object_id_colors = collect_object_id_colors(memory, id_names)
 
@@ -537,6 +568,7 @@ def main() -> None:
         checkpoint=checkpoint,
         lm_id=args.lm,
         show_morphology=args.morphology,
+        ids_only=args.ids_only,
     )
 
     output = args.output
