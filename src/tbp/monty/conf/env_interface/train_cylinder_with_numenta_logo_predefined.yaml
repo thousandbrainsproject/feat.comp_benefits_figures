@@ -1,0 +1,11 @@
+# @package experiment.config
+
+do_train: true
+train_env_interface_args:
+  parent_to_child_mapping: null
+  object_names:
+  - 014_cylinder_numenta_horz
+  object_init_sampler:
+    _target_: tbp.monty.frameworks.environments.object_init_samplers.Predefined
+    rotations: ${constants.rotations_cube_faces}
+train_env_interface_class: ${monty.class:tbp.monty.experiment.environment.OneObjectPerEpisodeInterface}
