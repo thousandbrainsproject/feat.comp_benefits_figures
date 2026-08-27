@@ -27,6 +27,11 @@ Options:
     --ids_only      Skip sensory patch channels and draw every LM input
                     channel with the same circular marker (with a thin black
                     outline) instead of per-channel marker shapes.
+    --id_markers    NAME=MARKER pairs giving learned object IDs their own
+                    marker shape, e.g. ``--id_markers numenta=s tbp=^`` for
+                    square Numenta logos and triangular TBP logos. A NAME
+                    matches an object ID whose name equals or contains it.
+                    Unlisted IDs keep their channel's marker (the default).
     --show          Also open an interactive window: click and drag to
                     rotate a model, scroll to zoom the subplot under the
                     cursor.
@@ -259,6 +264,36 @@ def collect_object_id_colors(
     return {value: next(colors) for value in ordered}
 
 
+def id_marker_spec(spec: str) -> tuple[str, str]:
+    """Parse one NAME=MARKER command-line entry (an argparse ``type``)."""
+    name, separator, marker = spec.partition("=")
+    if not separator or not name or not marker:
+        raise argparse.ArgumentTypeError(
+            f"entries must look like NAME=MARKER, got {spec!r}"
+        )
+    return name, marker
+
+
+def collect_object_id_markers(
+    object_id_colors: dict[float, str],
+    id_names: dict[int, str],
+    name_markers: dict[str, str],
+) -> dict[float, str]:
+    """Assign the requested marker to every stored object ID whose name matches.
+
+    A requested name matches an ID whose decoded name equals or contains it;
+    IDs without a match are left out and keep their channel's marker.
+    """
+    markers: dict[float, str] = {}
+    for value in object_id_colors:
+        name = id_names.get(int(value), "")
+        for requested, marker in name_markers.items():
+            if requested == name or requested in name:
+                markers[value] = marker
+                break
+    return markers
+
+
 def point_colors(
     graph,
     object_id_colors: dict[float, str],
@@ -310,8 +345,14 @@ def plot_object(
     object_id_colors: dict[float, str],
     show_morphology: bool,
     ids_only: bool,
+    object_id_markers: dict[float, str] | None = None,
 ) -> None:
-    """Draw one object's channels, features, and optional morphology arrows."""
+    """Draw one object's channels, features, and optional morphology arrows.
+
+    Object-ID draw units take the marker in ``object_id_markers`` for their
+    ID when there is one, otherwise their channel's marker.
+    """
+    object_id_markers = object_id_markers or {}
     graphs = {
         channel: graph
         for channel in channels
@@ -329,7 +370,7 @@ def plot_object(
     # into one unit per learned ID: a channel can store several IDs (e.g. an
     # object that wrongly learned both logos), and the sparse contaminating
     # ID should be ranked by its own point count, not its channel's.
-    units: list[tuple[str, Any, np.ndarray, Any, bool]] = []
+    units: list[tuple[str, Any, np.ndarray, Any, bool, str]] = []
     for channel, graph in graphs.items():
         points = points_by_channel[channel]
         if not len(points):
@@ -337,13 +378,13 @@ def plot_object(
         ids = feature_values(graph, "object_id")
         if ids is None:
             colors, _ = point_colors(graph, object_id_colors)
-            units.append((channel, graph, points, colors, False))
+            units.append((channel, graph, points, colors, False, markers[channel]))
         else:
             for value in np.unique(ids[:, 0]):
                 mask = ids[:, 0] == value
-                units.append(
-                    (channel, graph, points[mask], object_id_colors[value], True)
-                )
+                marker = object_id_markers.get(value, markers[channel])
+                color = object_id_colors[value]
+                units.append((channel, graph, points[mask], color, True, marker))
 
     # Matplotlib normally orders whole collections by their average depth,
     # which lets dense parent-object clouds hide sparse child clouds (e.g.
@@ -353,7 +394,7 @@ def plot_object(
     axis.computed_zorder = False
     units.sort(key=lambda unit: (unit[4], -len(unit[2])))
     lm_rank = 0
-    for zorder, (channel, graph, points, colors, is_object_id) in enumerate(
+    for zorder, (_channel, graph, points, colors, is_object_id, marker) in enumerate(
         units, start=1
     ):
         if is_object_id:
@@ -364,7 +405,7 @@ def plot_object(
         axis.scatter(
             *points.T,
             c=colors,
-            marker=markers[channel],
+            marker=marker,
             s=size,
             alpha=0.5 if is_object_id or len(graphs) == 1 else 0.45,
             depthshade=False,
@@ -409,8 +450,10 @@ def make_figure(
     lm_id: int,
     show_morphology: bool,
     ids_only: bool,
+    object_id_markers: dict[float, str] | None = None,
 ) -> plt.Figure:
     """Create one feature-colored plot per object, with channel/ID legends."""
+    object_id_markers = object_id_markers or {}
     markers = channel_markers(channels, ids_only)
     columns = min(columns, len(objects))
     rows = math.ceil(len(objects) / columns)
@@ -434,6 +477,7 @@ def make_figure(
             object_id_colors=object_id_colors,
             show_morphology=show_morphology,
             ids_only=ids_only,
+            object_id_markers=object_id_markers,
         )
 
     # Place header elements at fixed distances (in inches) from the top so the
@@ -470,7 +514,7 @@ def make_figure(
             Line2D(
                 [0],
                 [0],
-                marker="o",
+                marker=object_id_markers.get(value, "o"),
                 linestyle="none",
                 label=id_names.get(int(value), f"ID {value:g}"),
                 markerfacecolor=color,
@@ -552,6 +596,15 @@ def parse_args() -> argparse.Namespace:
         help="Skip sensory patch channels and draw all LM input channels as "
         "circles with a thin black outline, without per-channel markers.",
     )
+    parser.add_argument(
+        "--id_markers",
+        nargs="+",
+        type=id_marker_spec,
+        metavar="NAME=MARKER",
+        help="Give learned object IDs their own marker shape, e.g. "
+        "'numenta=s tbp=^'. A NAME matches an ID whose name equals or contains "
+        "it; unlisted IDs keep their channel's marker.",
+    )
     parser.add_argument("--columns", type=positive_int, default=5)
     parser.add_argument(
         "--output",
@@ -586,6 +639,9 @@ def main() -> None:
             )
     id_names = decode_object_ids(lm_dict)
     object_id_colors = collect_object_id_colors(memory, id_names)
+    object_id_markers = collect_object_id_markers(
+        object_id_colors, id_names, dict(args.id_markers or [])
+    )
 
     print(
         f"Loaded {len(objects)} objects from LM_{args.lm} in {checkpoint} "
@@ -608,6 +664,7 @@ def main() -> None:
         lm_id=args.lm,
         show_morphology=args.morphology,
         ids_only=args.ids_only,
+        object_id_markers=object_id_markers,
     )
 
     output = args.output
