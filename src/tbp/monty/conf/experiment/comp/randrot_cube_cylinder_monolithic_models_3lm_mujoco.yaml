@@ -1,37 +1,36 @@
 # @package _global_
 
 defaults:
-  - /monty: evidencegraph_exp1000_e3_t3_tot2500
+  - /monty: evidencegraph_exp1000_emin_t3_tot2500
   - /monty/motor_system_config: distant_5
   - /monty/learning_module: evidence_3lm_heterarchy
   - /monty/sensor_module: 3sm_2d3d_dist_slic
-  - /monty/connectivity: 3lm_3sm_heterarchy
+  - /monty/connectivity: 3lm_3sm_monolithic
   - /monty/attention_system: default
   - /environment: mujoco_dist_agent_sensors3_256
-  - /env_interface: train_cube_with_tbp_logo_predefined
-  - /env_interface/positioning_procedures_train: getgoodview_viewfinder_patch0
+  - /env_interface: eval_cube_cylinder_with_stickers_random_rotation
+  - /env_interface/positioning_procedures_eval: getgoodview_viewfinder_patch0
   - /env_interface/transform: gaussianblur_missing_depthto3d_sensor4_256
-  - /logging: silent_info_train
+  - /logging: basic_warning_wandb_evidence_eval_runs
 
-# Stage 3 of training - just on the cube with the TBP logo
 experiment:
-  _target_: tbp.monty.frameworks.experiments.pretraining_experiments.MontySupervisedObjectPretrainingExperiment
+  _target_: tbp.monty.frameworks.experiments.object_recognition_experiments.MontyObjectRecognitionExperiment
   config:
     show_sensor_output: false
     max_train_steps: 250
-    max_eval_steps: 500
+    max_eval_steps: 250
     max_total_steps: 500
-    n_train_epochs: ${constants.rotations_cube_faces_count}
-    n_eval_epochs: 3
-    model_name_or_path: ${path.expanduser:${oc.env:MONTY_MODELS}/my_trained_models/supervised_pre_training_cube_cylinder_2d_children_3lm_mujoco/pretrained/}
+    n_train_epochs: 3
+    n_eval_epochs: ${constants.rotations_all_count}
+    model_name_or_path: ${path.expanduser:${oc.env:MONTY_MODELS}/my_trained_models/supervised_pre_training_cube_cylinder_monolithic_models_3lm_mujoco/pretrained/}
     match_criterion:
-      _target_: tbp.monty.experiment.match_criteria.AnyLMsMatch
-      count: 3
+      _target_: tbp.monty.experiment.match_criteria.NamedLMsMatch
+      ids:
+        - learning_module_2
     seed: 42
-    supervised_lm_ids:
-      - learning_module_2
+    supervised_lm_ids: []
     logging:
-      run_name: supervised_pre_training_cube_tbp_comp_models_3lm_mujoco
+      run_name: randrot_cube_cylinder_monolithic_models_3lm_mujoco
     monty_config:
       motor_system_config:
         telemetry:
@@ -43,7 +42,7 @@ experiment:
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.NoopEvidenceGraphLMTelemetry
           gsg:
-            min_post_goal_success_steps: 100
+            min_post_goal_success_steps: 50
         learning_module_1:
           # Model-based inhibition of return may not actually be necessary, as LM0 will move us onto new objects
           # Only LM_0 generates goals; disable the goal generators of LM_1/LM_2.

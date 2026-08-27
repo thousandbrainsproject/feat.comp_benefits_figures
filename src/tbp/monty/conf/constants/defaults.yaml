@@ -55,6 +55,11 @@ rotations_all:
   - [35, 225, 0]
   - [325, 225, 0]
 
+# One rotation.
+rotations_one_count: 1
+rotations_one:
+  - [0, 0, 0]
+
 rotations_3_count: 3 # Surprise!
 rotations_3:
   - [0, 0, 0]
