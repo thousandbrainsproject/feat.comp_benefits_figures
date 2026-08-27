@@ -8,7 +8,7 @@ defaults:
   - /monty/connectivity: 3lm_3sm_heterarchy
   - /monty/attention_system: default
   - /environment: mujoco_dist_agent_sensors3_256
-  - /env_interface: eval_cube_cylinder_with_stickers_predefined
+  - /env_interface: eval_cube_cylinder_with_stickers_random_rotation
   - /env_interface/positioning_procedures_eval: getgoodview_viewfinder_patch0
   - /env_interface/transform: gaussianblur_missing_depthto3d_sensor4_256
   - /logging: basic_warning_wandb_evidence_eval_runs
