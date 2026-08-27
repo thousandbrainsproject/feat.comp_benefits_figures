@@ -30,7 +30,7 @@ experiment:
     seed: 42
     supervised_lm_ids: []
     logging:
-      run_name: eval_exp_cube_cylinder_comp_models_3lm_mujoco
+      run_name: randrot_cube_cylinder_comp_models_3lm_mujoco
     monty_config:
       motor_system_config:
         telemetry:
