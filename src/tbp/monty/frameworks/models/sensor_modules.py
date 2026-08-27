@@ -144,6 +144,7 @@ class ObservationProcessor:
         "coords_for_TM",
         "edge_strength",
         "coherence",
+        "view_direction",
     ]
 
     def __init__(
@@ -313,6 +314,12 @@ class ObservationProcessor:
             rgba = rgba_feat[center_row_col, center_row_col]
             hsv = rgb2hsv(rgba[:3])
             features["hsv"] = hsv
+        if "view_direction" in self._features:
+            # The camera looks along its own -Z axis: in body coordinates that
+            # is the negated third column of cam_to_world. Lets a receiver
+            # tell how obliquely the patch views the surface.
+            optical_axis = cam_to_world[:3, 2]
+            features["view_direction"] = -optical_axis / np.linalg.norm(optical_axis)
 
         # Note we only determine curvature if we could determine a valid surface normal
         if any(feat in self.CURVATURE_FEATURES for feat in self._features) and valid_sn:
