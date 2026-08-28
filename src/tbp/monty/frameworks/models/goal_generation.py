@@ -687,10 +687,11 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         second_mlh_graph = self.parent_lm.get_graph(
             second_id, input_channel=sensor_channel_name
         )
-        radius_node_dists = second_mlh_graph.find_nearest_neighbors(
+        radius_node_dists, nearest_node_ids = second_mlh_graph.find_nearest_neighbors(
             top_mlh_graph,
             num_neighbors=1,
             return_distance=True,
+            return_everything=True,
         )
 
         target_loc_id = np.argmax(radius_node_dists)
