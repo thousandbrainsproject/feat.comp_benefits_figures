@@ -480,10 +480,15 @@ class EvidenceLMTest(BaseGraphTest):
         # Based on most recent observation, propose the most misaligned graph
         # sub-regions
         graph_lm.gsg.focus_on_pose = focus_on_pose
-        target_loc_id = graph_lm.gsg._compute_graph_mismatch()
+        target_channel, target_loc_id = graph_lm.gsg._compute_graph_mismatch(self.ctx)
 
         target_graph = graph_lm.get_graph(target_object)
         first_input_channel = graph_lm.get_input_channels_in_graph(target_object)[0]
+        self.assertEqual(
+            target_channel,
+            first_input_channel,
+            "Spatially-distinct graphs should propose a target on the sensory channel.",
+        )
         target_loc = target_graph[first_input_channel].pos[target_loc_id]
 
         assert np.all(np.isclose(target_loc, self.fake_obs_house[4].location)), (
