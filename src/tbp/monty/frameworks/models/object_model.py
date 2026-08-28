@@ -460,7 +460,6 @@ class GridObjectModel(GraphObjectModel):
         search_locations,
         num_neighbors,
         return_distance=False,
-        return_everything=False,
     ):
         """Find nearest neighbors in graph for list of search locations.
 
@@ -473,8 +472,7 @@ class GridObjectModel(GraphObjectModel):
 
         Returns:
             If return_distance is True, return distances. Otherwise, return indices of
-            nearest neighbors. If return_everything is True, return distances and indices of
-            all neighbors.
+            nearest neighbors.
         """
         # if self._location_tree is not None:
         # We are using the pretrained graphs and location trees for matching
@@ -493,9 +491,6 @@ class GridObjectModel(GraphObjectModel):
         #         search_radius=search_radius,
         #         max_neighbors=num_neighbors,
         #     )
-
-        if return_everything:
-            return distances, nearest_node_ids
 
         if return_distance:
             return distances

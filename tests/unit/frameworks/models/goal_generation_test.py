@@ -62,13 +62,10 @@ class FakeGraph:
         search_locations,
         num_neighbors,
         return_distance=False,
-        return_everything=False,
     ):
         distances, nearest_node_ids = self._tree.query(
             search_locations, k=num_neighbors
         )
-        if return_everything:
-            return distances, nearest_node_ids
         if return_distance:
             return distances
         return nearest_node_ids
