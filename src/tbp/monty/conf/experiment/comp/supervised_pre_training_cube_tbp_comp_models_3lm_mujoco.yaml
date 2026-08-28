@@ -48,9 +48,12 @@ experiment:
           # Model-based inhibition of return may not actually be necessary, as LM0 will move us onto new objects
           # Only LM_0 generates goals; disable the goal generators of LM_1/LM_2.
           gsg: null
-          # Only report the sticker while its evidence is well above the ~1 it
-          # decays to once the sensor has left it (a real recognition runs >10).
-          output_min_evidence: 3.0
+          # Only report the sticker once its evidence is well clear of the
+          # confusable regime. The wrong logo can build evidence on uniform
+          # patches of a shared color (the Numenta logo's blue dot matches the
+          # TBP logo's text) but peaked at ~15 doing so; a real recognition
+          # passes 20 within ~20 steps on the sticker and runs to 100+.
+          output_min_evidence: 20.0
         learning_module_2:
           region_proposers:
             - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
