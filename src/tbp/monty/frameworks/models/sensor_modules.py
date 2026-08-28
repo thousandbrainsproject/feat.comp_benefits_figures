@@ -17,7 +17,7 @@ import numpy as np
 import quaternion as qt
 from skimage.color import rgb2hsv
 
-from tbp.monty.cmp import Message
+from tbp.monty.cmp import AttentionRegion, Goal, Message
 from tbp.monty.context import RuntimeContext
 from tbp.monty.frameworks.models.abstract_monty_classes import (
     SensorModule,
@@ -26,6 +26,10 @@ from tbp.monty.frameworks.models.abstract_monty_classes import (
 from tbp.monty.frameworks.models.motor_system_state import (
     AgentState,
     SensorState,
+)
+from tbp.monty.frameworks.models.reorientation import (
+    NoopReorientation,
+    Reorientation,
 )
 from tbp.monty.frameworks.sensors import SensorID
 from tbp.monty.frameworks.utils.sensor_processing import (
@@ -556,6 +560,7 @@ class CameraSM(SensorModule):
         noise_params: dict[str, Any] | None = None,
         is_surface_sm: bool = False,
         delta_thresholds: dict[str, Any] | None = None,
+        reorientation: Reorientation | None = None,
     ) -> None:
         """Initialize Sensor Module.
 
@@ -576,6 +581,9 @@ class CameraSM(SensorModule):
                 check whether the current state's features are significantly different
                 from the previous with tolerances set according to `delta_thresholds`.
                 Defaults to None.
+            reorientation: Component that may ask the motor system to re-orient
+                the sensor (see ``FaceOnReorientation``); its goals and region
+                proposal are what this module proposes. Never asks by default.
 
         Note:
             When using feature-at-location matching with graphs, surface_normal and
@@ -607,6 +615,9 @@ class CameraSM(SensorModule):
         else:
             self._percept_filter = PassthroughPerceptFilter()
         self._snapshot_telemetry = SnapshotTelemetry()
+        self._reorientation: Reorientation = (
+            NoopReorientation() if reorientation is None else reorientation
+        )
         # Tests check sm.features, not sure if this should be exposed
         self.features = features
         self.is_exploring = False
@@ -618,6 +629,7 @@ class CameraSM(SensorModule):
     def reset(self) -> None:
         self._snapshot_telemetry.reset()
         self._percept_filter.reset()
+        self._reorientation.reset()
         self.is_exploring = False
         self.processed_obs = []
 
@@ -631,8 +643,17 @@ class CameraSM(SensorModule):
 
     def state_dict(self) -> Memento:
         state_dict = self._snapshot_telemetry.state_dict()
-        state_dict.update(processed_observations=self.processed_obs)
+        state_dict.update(
+            processed_observations=self.processed_obs,
+            reorientation=self._reorientation.state_dict(),
+        )
         return state_dict
+
+    def propose_goals(self) -> list[Goal]:
+        return self._reorientation.propose_goals()
+
+    def propose_region(self) -> AttentionRegion | None:
+        return self._reorientation.propose_region()
 
     def step(
         self,
@@ -658,6 +679,9 @@ class CameraSM(SensorModule):
 
         percept = self._observation_processor.process(observation)
         percept = self._message_noise(percept, rng=ctx.rng)
+        # Judged before the percept filter: an unchanged patch still has a
+        # valid normal to measure the view against.
+        self._reorientation.step(percept, self.state, motor_only_step)
 
         if motor_only_step:
             percept.pass_message = False

@@ -6,14 +6,15 @@
 # Use of this source code is governed by the MIT
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
-"""Plot how face-on a learning module's patch viewed the surface, and its goals.
+"""Plot how face-on a patch sensor module viewed the surface, and its goals.
 
-One figure per run. The top panel is the angle between the camera's viewing
-direction and the patch's surface normal on every step the module processed
-(from the motor telemetry's agent state and the module's stored normals),
-the module's smoothed view angle where a ``FaceOnGoalGenerator`` recorded
-one, the steps on which the agent was repositioned (jumps), the steps on
-which the module proposed a face-on goal, and the step it recognized its
+One figure per run, from the telemetry a ``CameraSM`` with a
+``FaceOnReorientation`` component records (its ``reorientation`` block; the
+module needs ``save_raw_obs`` on for the block to be logged). The top panel
+is the angle between the camera's viewing direction and the patch's surface
+normal on every step, the component's smoothed view angle, the steps on
+which the agent was repositioned (jumps), the steps on which the module
+proposed a face-on goal, and the step a learning module recognized its
 object.
 
 Below it, one row per face-on goal the module got executed: the view
@@ -25,8 +26,8 @@ geometry: the face's points, the camera before and after the jump, its
 view ray before, and the normal axis it aligned to.
 
 Run from the repo root, e.g. ``python -m analysis.scripts.visualize_view_angle
-debug_cube_face_on --learning-module LM_2``; the run is a directory or a
-name under ``RESULTS_DIR``. The figure goes to ``<run_dir>/visualizations/``.
+debug_cube_face_on --patch-module SM_0``; the run is a directory or a name
+under ``RESULTS_DIR``. The figure goes to ``<run_dir>/visualizations/``.
 """
 
 from __future__ import annotations
@@ -36,7 +37,6 @@ from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
-import quaternion as qt
 
 from analysis.telemetry import EpisodeTelemetry
 from tbp.monty.frameworks.loggers.npz_handler import materialize
@@ -60,34 +60,39 @@ CLOUD_COLOR = "#B0A090"
 
 def create_view_angle_figure(
     run_dir: os.PathLike,
+    patch_module: str = "SM_0",
     learning_module: str = "LM_2",
     sensor_module: str = "SM_3",
     episode: int = 0,
 ) -> Path:
-    """Plot the module's view angle over the episode and its face-on goals.
+    """Plot the patch module's view angle over the episode and its face-on goals.
 
     Args:
         run_dir: Experiment directory.
-        learning_module: The module whose patch normals and goals to read.
+        patch_module: The sensor module whose reorientation telemetry to read.
+        learning_module: The learning module whose recognition step to mark.
         sensor_module: The view finder module whose frames to draw into.
         episode: Episode number to visualize.
 
     Returns:
         Path to the saved figure,
-        ``<run_dir>/visualizations/view_angle_<module>_<episode>.png``.
+        ``<run_dir>/visualizations/view_angle_<patch module>_<episode>.png``.
     """
     run_dir = Path(run_dir)
     ep = EpisodeTelemetry.load(run_dir, episode)
-    steps, angles = view_angles(ep, learning_module)
+    reorientation = materialize(ep.blocks[patch_module]["reorientation"])
+    steps, angles = view_angles(reorientation)
     jumps = jump_steps(ep)
-    face_on = face_on_jumps(ep, learning_module, jumps)[:MAX_JUMPS_SHOWN]
+    face_on = face_on_jumps(reorientation, jumps)[:MAX_JUMPS_SHOWN]
 
     nrows = 1 + len(face_on)
     fig = plt.figure(figsize=(13, 4.5 + 4.2 * len(face_on)))
     grid = fig.add_gridspec(nrows, 3, height_ratios=[1.1] + [1] * len(face_on))
     ax = fig.add_subplot(grid[0, :])
-    draw_angle_trace(ax, ep, learning_module, steps, angles, jumps, face_on)
-    ax.set_title(f"{run_dir.name} -- {learning_module} view angle")
+    draw_angle_trace(
+        ax, ep, reorientation, learning_module, steps, angles, jumps, face_on
+    )
+    ax.set_title(f"{run_dir.name} -- {patch_module} view angle")
 
     raw = ep.blocks[sensor_module]["raw_observations"]
     for row, (jump, goal) in enumerate(face_on, start=1):
@@ -102,7 +107,7 @@ def create_view_angle_figure(
         gax = fig.add_subplot(grid[row, 2], projection="3d")
         draw_goal_geometry(gax, ep, jump, goal, materialize(raw[jump]))
     fig.tight_layout()
-    out = run_dir / "visualizations" / f"view_angle_{learning_module}_{episode}.png"
+    out = run_dir / "visualizations" / f"view_angle_{patch_module}_{episode}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=120, bbox_inches="tight")
     plt.close(fig)
@@ -113,6 +118,7 @@ def create_view_angle_figure(
 def draw_angle_trace(
     ax: Axes,
     ep: EpisodeTelemetry,
+    reorientation: dict,
     learning_module: str,
     steps: np.ndarray,
     angles: np.ndarray,
@@ -120,21 +126,17 @@ def draw_angle_trace(
     face_on: list[tuple[int, dict]],
 ) -> None:
     """Draw the view-angle trace with jumps, goals, and recognition marked."""
-    lm = ep.blocks[learning_module]
+    ax.plot(steps, angles, ".-", color="#4C72B0", label="view angle (per step)")
+    smoothed = np.asarray(reorientation["smoothed_view_angle"], dtype=float)
+    measured = np.isfinite(smoothed)
     ax.plot(
-        steps, angles, ".-", color="#4C72B0", label="view angle (per processed step)"
+        np.flatnonzero(measured),
+        smoothed[measured],
+        "-",
+        color="#DD8452",
+        linewidth=2,
+        label="smoothed",
     )
-    if "smoothed_view_angle" in lm:
-        smoothed = np.asarray(materialize(lm["smoothed_view_angle"]), dtype=float)
-        if len(smoothed) == len(steps):
-            ax.plot(
-                steps,
-                smoothed,
-                "-",
-                color="#DD8452",
-                linewidth=2,
-                label="smoothed (GSG)",
-            )
     face_on_steps = {jump for jump, _ in face_on}
     for j in jumps:
         color = GOAL_COLOR if j in face_on_steps else "black"
@@ -145,7 +147,7 @@ def draw_angle_trace(
             else None
         )
         ax.axvline(j, color=color, linestyle="--", linewidth=1.2, label=label)
-    recognized = lm["individual_ts_reached_at_step"]
+    recognized = ep.blocks[learning_module]["individual_ts_reached_at_step"]
     if recognized is not None:
         ax.axvline(
             int(recognized),
@@ -171,7 +173,7 @@ def draw_goal_in_frame(ax: Axes, obs: dict, goal: dict) -> None:
     ax.imshow(image)
     shape = image.shape[:2]
     cam_to_world = np.asarray(obs["cam_to_world"], dtype=float)
-    surface = np.asarray(goal["info"]["proposed_surface_loc"], dtype=float)
+    surface = np.asarray(goal["surface_location"], dtype=float)
     camera_goal = np.asarray(goal["location"], dtype=float)
     (su, sv), s_ok = project(surface, cam_to_world, shape)
     (gu, gv), g_ok = project(camera_goal, cam_to_world, shape)
@@ -229,7 +231,7 @@ def draw_goal_in_frame(ax: Axes, obs: dict, goal: dict) -> None:
     ax.text(
         4,
         shape[0] - 6,
-        f"view angle at goal: {goal['info'].get('view_angle', float('nan')):.0f}°",
+        f"view angle at goal: {goal['view_angle']:.0f}°",
         color="white",
         fontsize=8,
         va="bottom",
@@ -271,7 +273,7 @@ def draw_goal_geometry(
     before = np.asarray(actions[jump][1]["agent_id_0"]["position"], dtype=float)
     after_step = min(jump + 1, len(actions) - 1)
     after = np.asarray(actions[after_step][1]["agent_id_0"]["position"], dtype=float)
-    surface = np.asarray(goal["info"]["proposed_surface_loc"], dtype=float)
+    surface = np.asarray(goal["surface_location"], dtype=float)
     camera_goal = np.asarray(goal["location"], dtype=float)
     cloud = np.asarray(obs["semantic_3d"], dtype=float)
     cloud = cloud[cloud[:, 3] > 0][::40, :3]
@@ -353,68 +355,28 @@ def project(
     return ((u + 1) / 2 * (shape[1] - 1), (1 - v) / 2 * (shape[0] - 1)), True
 
 
-def face_on_jumps(
-    ep: EpisodeTelemetry, learning_module: str, jumps: list[int]
-) -> list[tuple[int, dict]]:
-    """Pair each jump the module's face-on goal caused with that goal.
+def face_on_jumps(reorientation: dict, jumps: list[int]) -> list[tuple[int, dict]]:
+    """Pair each jump a face-on goal caused with that goal.
 
-    A jump is the module's when its goal reached the motor system on that
-    step; the goal is the module's most recently logged one.
+    The goal is computed and executed on the step it is proposed, so a jump
+    is the goal's when it happened on that step.
 
     Returns:
         ``(jump step, goal record)`` pairs, ascending.
     """
-    lm = ep.blocks[learning_module]
-    if "goal_states" not in lm or not len(lm["goal_states"]):
-        return []
-    goals_in = materialize(ep.blocks["motor_system"]["goals_in"])
-    lm_id = f"learning_module_{learning_module.rsplit('_', maxsplit=1)[-1]}"
-    goals = materialize(lm["goal_states"])
-    lm_steps = np.flatnonzero(np.asarray(lm["lm_processed_steps"], dtype=bool))
-    logged = {}
-    for goal in goals:
-        k = goal["info"].get("matching_step_when_output_goal_set")
-        if k is not None and 0 <= int(k) < len(lm_steps):
-            logged[int(lm_steps[int(k)])] = goal
-    pairs = []
-    for jump in jumps:
-        senders = goals_in[jump].get("sender_ids", []) if jump < len(goals_in) else []
-        if lm_id not in [str(s) for s in senders]:
-            continue
-        earlier = [s for s in logged if s <= jump]
-        if earlier:
-            pairs.append((jump, logged[max(earlier)]))
-    return pairs
+    by_step = {int(goal["step"]): goal for goal in reorientation["goals"]}
+    return [(jump, by_step[jump]) for jump in jumps if jump in by_step]
 
 
-def view_angles(
-    ep: EpisodeTelemetry, learning_module: str
-) -> tuple[np.ndarray, np.ndarray]:
-    """Angle between the camera's viewing direction and the patch normal.
-
-    Read off the motor telemetry's agent state (agent and sensor rotations;
-    the camera looks along its -Z) and the module's stored pose vectors.
+def view_angles(reorientation: dict) -> tuple[np.ndarray, np.ndarray]:
+    """The view angle the component measured, on the steps it could.
 
     Returns:
-        The processed episode steps and the angle, in degrees, at each.
+        The episode steps with a measurement and the angle, in degrees, at each.
     """
-    actions = materialize(ep.blocks["motor_system"]["action_sequence"])
-    lm = ep.blocks[learning_module]
-    steps = np.flatnonzero(np.asarray(lm["lm_processed_steps"], dtype=bool))
-    channel = next(c for c in lm if c.startswith("patch"))
-    normals = np.asarray(materialize(lm[channel])["pose_vectors"], dtype=float)[:, :3]
-    angles = []
-    for row, step in enumerate(steps):
-        agent = actions[step][1]["agent_id_0"]
-        rotation = qt.quaternion(
-            *np.asarray(agent["rotation"], dtype=float)
-        ) * qt.quaternion(
-            *np.asarray(agent["sensors"][channel]["rotation"], dtype=float)
-        )
-        view = qt.rotate_vectors(rotation, np.array([0.0, 0.0, -1.0]))
-        cosine = -np.dot(view, normals[row]) / (np.linalg.norm(normals[row]) + 1e-12)
-        angles.append(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
-    return steps, np.asarray(angles)
+    angles = np.asarray(reorientation["view_angle"], dtype=float)
+    measured = np.isfinite(angles)
+    return np.flatnonzero(measured), angles[measured]
 
 
 def jump_steps(ep: EpisodeTelemetry) -> list[int]:
@@ -443,10 +405,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "run", type=run_directory, help="run directory or name under RESULTS_DIR"
     )
+    parser.add_argument("--patch-module", default="SM_0")
     parser.add_argument("--learning-module", default="LM_2")
     parser.add_argument("--sensor-module", default="SM_3")
     parser.add_argument("--episode", type=int, default=0)
     args = parser.parse_args()
     create_view_angle_figure(
-        args.run, args.learning_module, args.sensor_module, args.episode
+        args.run,
+        args.patch_module,
+        args.learning_module,
+        args.sensor_module,
+        args.episode,
     )

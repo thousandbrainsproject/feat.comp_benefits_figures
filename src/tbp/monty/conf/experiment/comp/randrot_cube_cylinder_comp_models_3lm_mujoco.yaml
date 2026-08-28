@@ -59,28 +59,22 @@ experiment:
             - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.NoopEvidenceGraphLMTelemetry
-          # Random rotations often leave the sticker at a steep angle, where the
-          # sticker LM stalls. Reorient to a face-on view when the smoothed view
-          # angle says the surface itself sits steeply to the camera; otherwise
-          # explore as usual.
-          gsg:
-            _target_: tbp.monty.frameworks.models.face_on_goal_generation.FaceOnGoalGenerator
-            max_view_angle: 45.0
-            window: 5
-            min_steps_between_goals: 20
+          # Only LM_0 generates goals; disable the goal generators of LM_1/LM_2.
+          gsg: null
       sensor_modules:
-        sensor_module_2:
-          # The face-on GSG needs to know where the camera looks and how far
-          # the surface is.
-          features:
-            - pose_vectors
-            - pose_fully_defined
-            - on_object
-            - object_coverage
-            - hsv
-            - principal_curvatures_log
-            - mean_depth
-            - view_direction
+        sensor_module_0:
+          # Random rotations often leave the sticker at a steep angle, where the
+          # sticker LM stalls. The patch SM asks for a face-on view when the
+          # smoothed view angle says the surface sits steeply to the camera
+          # (and excites the goal so the attention system lets it through);
+          # otherwise exploration carries on as usual. The window and refractory
+          # period are in sensor steps (every step): short ones re-fire every
+          # ~25 steps on the cylinders as the patch scans their curvature.
+          reorientation:
+            _target_: tbp.monty.frameworks.models.reorientation.FaceOnReorientation
+            max_view_angle: 45.0
+            window: 10
+            min_steps_between_goals: 60
         sensor_module_3:
           segmentation_strategy:
             _target_: tbp.monty.frameworks.models.salience.segmentation.strategies.slic_merge.SlicMerge

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock
 
 import numpy as np
 import numpy.typing as npt
@@ -17,6 +18,7 @@ from hypothesis import strategies as st
 
 from tbp.monty.cmp import Message
 from tbp.monty.frameworks.models.sensor_modules import (
+    CameraSM,
     FeatureChangeFilter,
 )
 
@@ -87,3 +89,34 @@ class FeatureChangeFilterTest(unittest.TestCase):
             )
         )
         self.assertEqual(result.process_features_in_lm, valid and feature_changed)
+
+
+class CameraSMReorientationTest(unittest.TestCase):
+    """CameraSM proposes whatever its reorientation component proposes."""
+
+    def setUp(self) -> None:
+        self.reorientation = Mock()
+        self.sm = CameraSM(
+            sensor_module_id="patch_0",
+            features=["pose_vectors", "on_object"],
+            reorientation=self.reorientation,
+        )
+
+    def test_proposes_the_components_goals_and_region(self) -> None:
+        self.assertIs(self.sm.propose_goals(), self.reorientation.propose_goals())
+        self.assertIs(self.sm.propose_region(), self.reorientation.propose_region())
+
+    def test_reset_resets_the_component(self) -> None:
+        self.sm.reset()
+        self.reorientation.reset.assert_called_once_with()
+
+    def test_state_dict_carries_the_components_telemetry(self) -> None:
+        self.reorientation.state_dict.return_value = {"view_angle": [1.0]}
+        self.assertEqual(self.sm.state_dict()["reorientation"], {"view_angle": [1.0]})
+
+    def test_proposes_nothing_by_default(self) -> None:
+        sm = CameraSM(
+            sensor_module_id="patch_0", features=["pose_vectors", "on_object"]
+        )
+        self.assertEqual(sm.propose_goals(), [])
+        self.assertIsNone(sm.propose_region())
