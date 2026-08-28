@@ -199,7 +199,7 @@ class FaceOnGoalGenerator(GraphGoalGenerator):
         """
         return False
 
-    def _generate_goal(self, observations) -> Goal:
+    def _generate_goal(self, _ctx: RuntimeContext, observations) -> Goal:
         """An agent pose on the patch's surface normal, looking back at the patch.
 
         Returns:

@@ -64,10 +64,7 @@ experiment:
           # angle says the surface itself sits steeply to the camera; otherwise
           # explore as usual.
           gsg:
-            _target_: tbp.monty.frameworks.models.face_on_goal_generation.FaceOnGoalGenerator
-            max_view_angle: 45.0
-            window: 5
-            min_steps_between_goals: 20
+            min_post_goal_success_steps: 20
       sensor_modules:
         sensor_module_2:
           # The face-on GSG needs to know where the camera looks and how far
