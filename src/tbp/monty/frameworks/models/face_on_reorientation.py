@@ -9,17 +9,13 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import quaternion as qt
 
-from tbp.monty.cmp import MAX_ATTENTION_WEIGHT, AttentionRegion, Goal
-from tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations import (  # noqa: E501
-    DEFAULT_LATTICE_STEPS,
-    DEFAULT_RADIUS,
-    sample_ball,
-)
+from tbp.monty.cmp import Goal
+from tbp.monty.frameworks.models.sm_goal_generation import SMGoalGenerator
 
 if TYPE_CHECKING:
     from tbp.monty.cmp import Message
@@ -32,25 +28,25 @@ logger = logging.getLogger(__name__)
 VIEW_AXIS = np.array([0.0, 0.0, -1.0])
 
 
-def view_direction(sensor: SensorState) -> np.ndarray:
+def view_direction(sensor_state: SensorState) -> np.ndarray:
     """The unit vector a sensor looks along, in body coordinates.
 
     Args:
-        sensor: The sensor's proprioceptive state.
+        sensor_state: The sensor's proprioceptive state.
 
     Returns:
         The (3,) viewing direction.
     """
-    return qt.rotate_vectors(sensor.rotation, VIEW_AXIS)
+    return qt.rotate_vectors(sensor_state.rotation, VIEW_AXIS)
 
 
-def view_angle(percept: Message, sensor: SensorState) -> float | None:
+def view_angle(percept: Message, sensor_state: SensorState) -> float | None:
     """The angle, in degrees, between the viewing direction and the surface normal.
 
     Args:
         percept: The sensor module's percept; its first pose vector is the
             surface normal at the patch.
-        sensor: The sensor's proprioceptive state.
+        sensor_state: The sensor's proprioceptive state.
 
     Returns:
         The angle, or None when the percept carries no usable normal (off
@@ -62,7 +58,7 @@ def view_angle(percept: Message, sensor: SensorState) -> float | None:
     if pose_vectors is None:
         return None
     normal = np.asarray(pose_vectors, dtype=float)[0]
-    view = view_direction(sensor)
+    view = view_direction(sensor_state)
     norms = np.linalg.norm(view) * np.linalg.norm(normal)
     if norms == 0 or not np.isfinite(norms):
         return None
@@ -70,57 +66,11 @@ def view_angle(percept: Message, sensor: SensorState) -> float | None:
     return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
 
 
-class Reorientation(Protocol):
-    """A sensor module component that occasionally asks to re-orient the sensor.
-
-    Stepped by its sensor module with each percept and the sensor's pose, it
-    may answer with a goal for the motor system and a region proposal that
-    draws attention to that goal, both read back by the sensor module's
-    ``propose_goals`` and ``propose_region``.
-    """
-
-    def step(
-        self, percept: Message, sensor: SensorState, motor_only_step: bool = False
-    ) -> None: ...
-
-    def propose_goals(self) -> list[Goal]: ...
-
-    def propose_region(self) -> AttentionRegion | None: ...
-
-    def reset(self) -> None: ...
-
-    def state_dict(self) -> Memento: ...
-
-
-class NoopReorientation(Reorientation):
-    """Never asks to re-orient."""
-
-    def step(
-        self,
-        percept: Message,
-        sensor: SensorState,
-        motor_only_step: bool = False,
-    ) -> None:
-        pass
-
-    def propose_goals(self) -> list[Goal]:
-        return []
-
-    def propose_region(self) -> AttentionRegion | None:
-        return None
-
-    def reset(self) -> None:
-        pass
-
-    def state_dict(self) -> Memento:
-        return {}
-
-
-class FaceOnReorientation(Reorientation):
-    """Re-orient the agent to view the sensor patch's surface face-on.
+class FaceOnReorientation(SMGoalGenerator):
+    """A sensor module goal generator that asks for a face-on view of its patch.
 
     Meant for the case where an object's pose leaves the surface under the
-    patch at a steep angle to the camera. Each step, the component measures
+    patch at a steep angle to the camera. Each step, the generator measures
     the angle between the direction the sensor looks along and the surface
     normal at the patch (the percept's first pose vector), smoothed over the
     last ``window`` measured steps so a single saccade does not count. When
@@ -128,9 +78,10 @@ class FaceOnReorientation(Reorientation):
     ``max_view_angle``, it proposes a goal placing the agent on the surface
     normal, at the patch's current distance, looking back at the patch --
     a pose, so the motor system's jump policy re-orients the view; exploration
-    then carries on as usual from the new vantage. Alongside the goal it
-    proposes an excited ball around the goal location, so the attention
-    system, which otherwise only attends to the surface, lets the goal through.
+    then carries on as usual from the new vantage. The goal sits off the
+    surface, so pair this with a region proposer that excites it (see
+    ``sm_region_proposal.ExciteGoalLocations``), or the attention system
+    filters it out.
 
     Nothing is proposed until ``window`` views have been measured. Goals are
     one-off (proposed on a single step), count as achieved when the first
@@ -146,11 +97,8 @@ class FaceOnReorientation(Reorientation):
         min_steps_between_goals: int = 20,
         standoff: float | None = None,
         confidence: float = 1.0,
-        region_radius: float = DEFAULT_RADIUS,
-        region_lattice_steps: int = DEFAULT_LATTICE_STEPS,
-        region_weight: float = MAX_ATTENTION_WEIGHT,
     ) -> None:
-        """Initialize the component.
+        """Initialize the generator.
 
         Args:
             max_view_angle: The largest smoothed angle, in degrees, between the
@@ -166,20 +114,12 @@ class FaceOnReorientation(Reorientation):
                 keeping the viewing distance.
             confidence: The confidence of the goals; the motor system executes
                 the highest-confidence goal when several modules propose one.
-            region_radius: Radius, in meters, of the excited ball proposed
-                around the goal location.
-            region_lattice_steps: Lattice steps per radius used to fill the
-                ball (see ``ExciteGoalLocations``).
-            region_weight: The attention weight given to the ball.
         """
         self.max_view_angle = max_view_angle
         self.window = window
         self.min_steps_between_goals = min_steps_between_goals
         self.standoff = standoff
         self.confidence = confidence
-        self.region_radius = region_radius
-        self.region_lattice_steps = region_lattice_steps
-        self.region_weight = region_weight
         self._init_episode()
 
     @property
@@ -194,23 +134,29 @@ class FaceOnReorientation(Reorientation):
             return None
         return float(np.mean(self._recent_angles))
 
-    def step(
-        self, percept: Message, sensor: SensorState, motor_only_step: bool = False
-    ) -> None:
+    def __call__(
+        self,
+        percept: Message,
+        sensor_state: SensorState,
+        motor_only_step: bool = False,
+    ) -> list[Goal]:
         """Measure this step's view angle and decide whether to re-orient.
 
         Args:
             percept: The sensor module's percept this step.
-            sensor: The sensor's proprioceptive state this step.
+            sensor_state: The sensor's proprioceptive state this step.
             motor_only_step: Whether the current step is a motor-only step;
                 nothing is measured or proposed on those.
+
+        Returns:
+            The face-on goal, when the view is persistently steep; else nothing.
         """
-        self._goals = []
-        self._region = None
         self._step += 1
         if self._steps_since_goal is not None:
             self._steps_since_goal += 1
-        self._view_angle = None if motor_only_step else view_angle(percept, sensor)
+        self._view_angle = (
+            None if motor_only_step else view_angle(percept, sensor_state)
+        )
         if self._view_angle is not None:
             self._recent_angles = (self._recent_angles + [self._view_angle])[
                 -self.window :
@@ -224,25 +170,13 @@ class FaceOnReorientation(Reorientation):
             self._pending["achieved"] = bool(self._view_angle <= self.max_view_angle)
             self._pending = None
 
-        if self._should_reorient(smoothed):
-            goal, record = self._face_on_goal(percept, sensor)
-            self._goals = [goal]
-            self._region = AttentionRegion.uniform(
-                sample_ball(
-                    goal.location, self.region_radius, self.region_lattice_steps
-                ),
-                self.region_weight,
-                sender_id=percept.sender_id,
-            )
-            self._pending = record
-            self._goal_records.append(record)
-            self._steps_since_goal = 0
-
-    def propose_goals(self) -> list[Goal]:
-        return self._goals
-
-    def propose_region(self) -> AttentionRegion | None:
-        return self._region
+        if not self._should_reorient(smoothed):
+            return []
+        goal, record = self._face_on_goal(percept, sensor_state)
+        self._pending = record
+        self._goal_records.append(record)
+        self._steps_since_goal = 0
+        return [goal]
 
     def reset(self) -> None:
         self._init_episode()
@@ -266,8 +200,6 @@ class FaceOnReorientation(Reorientation):
         )
 
     def _init_episode(self) -> None:
-        self._goals: list[Goal] = []
-        self._region: AttentionRegion | None = None
         self._view_angle: float | None = None
         self._recent_angles: list[float] = []
         # Sensor steps so far, and since the last goal (None before any).
@@ -303,7 +235,7 @@ class FaceOnReorientation(Reorientation):
         )
 
     def _face_on_goal(
-        self, percept: Message, sensor: SensorState
+        self, percept: Message, sensor_state: SensorState
     ) -> tuple[Goal, dict[str, Any]]:
         """An agent pose on the patch's surface normal, looking back at the patch.
 
@@ -316,7 +248,9 @@ class FaceOnReorientation(Reorientation):
         standoff = self.standoff
         if standoff is None:
             standoff = float(
-                np.linalg.norm(surface_loc - np.asarray(sensor.position, dtype=float))
+                np.linalg.norm(
+                    surface_loc - np.asarray(sensor_state.position, dtype=float)
+                )
             )
         location = surface_loc + normal * standoff
         logger.debug(

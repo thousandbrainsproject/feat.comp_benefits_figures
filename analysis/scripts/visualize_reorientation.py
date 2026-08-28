@@ -9,15 +9,15 @@
 """Animate a patch sensor module's face-on re-orientation over an episode.
 
 Two panels per step, from the telemetry a ``CameraSM`` with a
-``FaceOnReorientation`` component records (its ``reorientation`` block;
-the module needs ``save_raw_obs`` on) and the view finder's frames:
+``FaceOnReorientation`` goal generator records (its ``gsg`` block; the
+module needs ``save_raw_obs`` on) and the view finder's frames:
 
 1. The view finder's frame. On the step a face-on goal fires, the goal is
    drawn into it -- the sensed surface point and the normal axis it wants
    to look along (an arrow toward where the camera should go, clipped to
    the frame) -- and the frames right after the jump are tagged.
 2. The view angle between the camera's viewing direction and the patch's
-   surface normal, revealed as steps pass, with the component's smoothed
+   surface normal, revealed as steps pass, with the generator's smoothed
    angle, its threshold, the steps on which the agent was repositioned
    (face-on jumps in pink, other jumps in black), and a cursor.
 
@@ -79,7 +79,7 @@ class GoalInFrame(Panel):
 
         Args:
             ax: The axes the frame is drawn on.
-            goals: The component's goal records (``step``,
+            goals: The generator's goal records (``step``,
                 ``surface_location``, ``location``, ``view_angle``).
             cam_to_world: The view finder's camera-to-world transforms, one
                 per frame.
@@ -154,10 +154,10 @@ class ViewAngleTrace(Panel):
         Args:
             ax: The 2D axes to draw on.
             angles: The measured view angle per step (NaN where none).
-            smoothed: The component's smoothed angle per step (NaN where none).
+            smoothed: The generator's smoothed angle per step (NaN where none).
             jumps: Steps on which the agent was repositioned.
             face_on_steps: The steps on which face-on goals fired.
-            max_view_angle: The component's threshold, drawn as a line.
+            max_view_angle: The generator's threshold, drawn as a line.
             title: Base title; ``update`` appends the step counter.
         """
         self._ax = ax
@@ -218,16 +218,16 @@ def build_reorientation_figure(
 
     Args:
         ep: The episode's telemetry.
-        patch_module: The sensor module whose reorientation telemetry to read.
+        patch_module: The sensor module whose goal generator telemetry to read.
         sensor_module: The view finder module whose frames to show.
-        max_view_angle: The component's threshold, drawn on the trace.
+        max_view_angle: The generator's threshold, drawn on the trace.
         title: The figure's title.
 
     Returns:
         The figure, the function that redraws it for a step, and the step
         count.
     """
-    reorientation = materialize(ep.blocks[patch_module]["reorientation"])
+    reorientation = materialize(ep.blocks[patch_module]["gsg"])
     goals = list(reorientation["goals"])
     angles = np.asarray(reorientation["view_angle"], dtype=float)
     smoothed = np.asarray(reorientation["smoothed_view_angle"], dtype=float)
@@ -278,10 +278,10 @@ def create_reorientation_animation(
 
     Args:
         run_dir: Experiment directory.
-        patch_module: The sensor module whose reorientation telemetry to read.
+        patch_module: The sensor module whose goal generator telemetry to read.
         sensor_module: The view finder module whose frames to show.
         episode: Episode number to visualize.
-        max_view_angle: The component's threshold, drawn on the trace.
+        max_view_angle: The generator's threshold, drawn on the trace.
         fps: Frames per second of the saved animation.
         fmt: Output format, "gif" (PillowWriter) or "mp4" (FFMpegWriter,
             needs ffmpeg on the PATH).

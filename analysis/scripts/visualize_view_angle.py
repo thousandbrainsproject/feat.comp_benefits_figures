@@ -9,10 +9,10 @@
 """Plot how face-on a patch sensor module viewed the surface, and its goals.
 
 One figure per run, from the telemetry a ``CameraSM`` with a
-``FaceOnReorientation`` component records (its ``reorientation`` block; the
+``FaceOnReorientation`` goal generator records (its ``gsg`` block; the
 module needs ``save_raw_obs`` on for the block to be logged). The top panel
 is the angle between the camera's viewing direction and the patch's surface
-normal on every step, the component's smoothed view angle, the steps on
+normal on every step, the generator's smoothed view angle, the steps on
 which the agent was repositioned (jumps), the steps on which the module
 proposed a face-on goal, and the step a learning module recognized its
 object.
@@ -69,7 +69,7 @@ def create_view_angle_figure(
 
     Args:
         run_dir: Experiment directory.
-        patch_module: The sensor module whose reorientation telemetry to read.
+        patch_module: The sensor module whose goal generator telemetry to read.
         learning_module: The learning module whose recognition step to mark.
         sensor_module: The view finder module whose frames to draw into.
         episode: Episode number to visualize.
@@ -80,7 +80,7 @@ def create_view_angle_figure(
     """
     run_dir = Path(run_dir)
     ep = EpisodeTelemetry.load(run_dir, episode)
-    reorientation = materialize(ep.blocks[patch_module]["reorientation"])
+    reorientation = materialize(ep.blocks[patch_module]["gsg"])
     steps, angles = view_angles(reorientation)
     jumps = jump_steps(ep)
     face_on = face_on_jumps(reorientation, jumps)[:MAX_JUMPS_SHOWN]
@@ -369,7 +369,7 @@ def face_on_jumps(reorientation: dict, jumps: list[int]) -> list[tuple[int, dict
 
 
 def view_angles(reorientation: dict) -> tuple[np.ndarray, np.ndarray]:
-    """The view angle the component measured, on the steps it could.
+    """The view angle the generator measured, on the steps it could.
 
     Returns:
         The episode steps with a measurement and the angle, in degrees, at each.
