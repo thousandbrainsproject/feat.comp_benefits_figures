@@ -47,14 +47,9 @@ experiment:
           gsg:
             min_post_goal_success_steps: 100
         learning_module_1:
-          # Model-based inhibition of return may not actually be necessary, as LM0 will move us onto new objects
-          # Only LM_0 generates goals; disable the goal generators of LM_1/LM_2.
           gsg: null
           # Only report the sticker once its evidence is well clear of the
-          # confusable regime. The wrong logo can build evidence on uniform
-          # patches of a shared color (the Numenta logo's blue dot matches the
-          # TBP logo's text) but peaked at ~15 doing so; a real recognition
-          # passes 20 within ~20 steps on the sticker and runs to 100+.
+          # confusable regime. 
           output_min_evidence: 20.0
         learning_module_2:
           region_proposers:
@@ -64,6 +59,17 @@ experiment:
           # Only LM_0 generates goals; disable the goal generators of LM_1/LM_2.
           gsg: null
       sensor_modules:
+        sensor_module_0:
+          # Random rotations often leave the sticker at a steep angle, where the
+          # sticker LM stalls. The patch SM asks for a face-on view when the
+          # smoothed view angle says the surface sits steeply to the camera
+          gsg:
+            _target_: tbp.monty.frameworks.models.face_on_reorientation.FaceOnReorientation
+            max_view_angle: 45.0
+            window: 2
+            min_steps_between_goals: 25
+          region_proposers:
+            - _target_: tbp.monty.frameworks.models.sm_region_proposal.excite_goal_locations.ExciteGoalLocations
         sensor_module_3:
           segmentation_strategy:
             _target_: tbp.monty.frameworks.models.salience.segmentation.strategies.slic_merge.SlicMerge
