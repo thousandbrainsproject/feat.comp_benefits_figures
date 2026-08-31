@@ -22,7 +22,8 @@ experiment:
     max_total_steps: 500
     n_train_epochs: ${constants.rotations_cube_faces_count}
     n_eval_epochs: 3
-    model_name_or_path: ${path.expanduser:${oc.env:MONTY_MODELS}/my_trained_models/supervised_pre_training_objects_with_stickers_2d_children_3lm_mujoco/pretrained/}
+    # To save time on training, we use the pretrained models trained on Habitat versions of the 2D and 3D objects
+    model_name_or_path: ${path.expanduser:${oc.env:MONTY_MODELS}/my_trained_models/supervised_pre_training_objects_with_stickers_2d_children/pretrained/}
     match_criterion:
       _target_: tbp.monty.experiment.match_criteria.AnyLMsMatch
       count: 3
@@ -62,7 +63,7 @@ experiment:
           # smoothed view angle says the surface sits steeply to the camera
           gsg:
             _target_: tbp.monty.frameworks.models.face_on_reorientation.FaceOnReorientation
-            max_view_angle: 45.0
+            max_view_angle: 60.0
             window: 2
             min_steps_between_goals: 25
           region_proposers:
