@@ -27,6 +27,9 @@ Options:
     --ids_only      Skip sensory patch channels and draw every LM input
                     channel with the same circular marker (with a thin black
                     outline) instead of per-channel marker shapes.
+    --sm_only       Skip LM input channels and only draw the sensory patch
+                    (sensor module) channels of each model. Cannot be
+                    combined with --ids_only.
     --id_markers    NAME=MARKER pairs giving learned object IDs their own
                     marker shape, e.g. ``--id_markers numenta=s tbp=^`` for
                     square Numenta logos and triangular TBP logos. A NAME
@@ -598,11 +601,18 @@ def parse_args() -> argparse.Namespace:
         help="Draw stored surface normals (3D channels) or oriented edges "
         "(2D channels) as arrows at each point.",
     )
-    parser.add_argument(
+    channel_filter = parser.add_mutually_exclusive_group()
+    channel_filter.add_argument(
         "--ids_only",
         action="store_true",
         help="Skip sensory patch channels and draw all LM input channels as "
         "circles with a thin black outline, without per-channel markers.",
+    )
+    channel_filter.add_argument(
+        "--sm_only",
+        action="store_true",
+        help="Skip LM input channels and only draw the sensory patch "
+        "(sensor module) channels of each model.",
     )
     parser.add_argument(
         "--id_markers",
@@ -645,8 +655,18 @@ def main() -> None:
                 "--ids_only requires LM input channels, but only patch "
                 "channels are stored for the selected objects."
             )
+    if args.sm_only:
+        channels = [channel for channel in channels if channel.startswith("patch")]
+        if not channels:
+            raise ValueError(
+                "--sm_only requires patch channels, but only LM input "
+                "channels are stored for the selected objects."
+            )
     id_names = decode_object_ids(lm_dict)
-    object_id_colors = collect_object_id_colors(memory, id_names)
+    # With --sm_only no object-ID channels are drawn, so skip the ID legend.
+    object_id_colors = (
+        {} if args.sm_only else collect_object_id_colors(memory, id_names)
+    )
     object_id_markers = collect_object_id_markers(
         object_id_colors, id_names, dict(args.id_markers or [])
     )
