@@ -65,8 +65,8 @@ experiment:
           gsg:
             _target_: tbp.monty.frameworks.models.face_on_reorientation.FaceOnReorientation
             max_view_angle: 45.0
-            window: 10
-            min_steps_between_goals: 60
+            window: 2
+            min_steps_between_goals: 25
           region_proposers:
             - _target_: tbp.monty.frameworks.models.sm_region_proposal.excite_goal_locations.ExciteGoalLocations
         sensor_module_3:
