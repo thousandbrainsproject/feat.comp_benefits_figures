@@ -68,7 +68,15 @@ from matplotlib.lines import Line2D
 # Bold, distinct colors for assigned object IDs, unused in object HSVs themselves:
 # "#00B140" ≈ bright green (ID 0), "#ffbe31" = gold (ID 1),
 # "#f737bd" ≈ vibrant magenta (ID 2), "#00a0df" ≈ blue (ID 3).
-OBJECT_ID_COLORS = ["#00B140", "#ffbe31", "#f737bd", "#00a0df"]
+OBJECT_ID_COLORS = [
+    "#00B140",
+    "#ffbe31",
+    "#f737bd",
+    "#00a0df",
+    "#5d11bf",
+    "#ff0000",
+    "#000000",
+]
 PATCH_MARKER = "o"
 LM_CHANNEL_MARKERS = ["*", "^", "s", "D", "v", "P"]
 PATCH_POINT_SIZE = 3
