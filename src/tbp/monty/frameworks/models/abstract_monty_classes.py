@@ -364,6 +364,20 @@ class RuntimeLearningModule(Protocol):
         """
         ...
 
+    def receive_goal_attempt(self, goal: Goal) -> None:
+        """Receive an efferent copy of a goal of this LM the motor system attempted.
+
+        Called when the motor system began executing a goal-driven movement
+        (e.g. a hypothesis-testing jump) toward a goal proposed by this LM's
+        GSG. The signal carries no information about the movement's outcome;
+        the LM can combine it with its subsequent sensory input to judge
+        whether the attempt succeeded.
+
+        Args:
+            goal: The goal the motor system attempted.
+        """
+        ...
+
     def get_output(self) -> Message | None:
         """Return learning module output (same format as input)."""
         ...
@@ -427,6 +441,19 @@ class LearningModule(
     @abc.abstractmethod
     def propose_goals(self) -> list[Goal]:
         pass
+
+    def receive_goal_attempt(self, goal: Goal) -> None:
+        """Receive an efferent copy of a goal of this LM the motor system attempted.
+
+        By default this signal is ignored. LMs that use goal-driven movements
+        (e.g. hypothesis-testing jumps) can override this to combine the
+        efferent copy with subsequent sensory input, e.g. to detect failed
+        jumps and accumulate negative evidence for the hypothesis that
+        proposed the goal.
+
+        Args:
+            goal: The goal the motor system attempted.
+        """
 
     @abc.abstractmethod
     def get_output(self) -> Message | None:

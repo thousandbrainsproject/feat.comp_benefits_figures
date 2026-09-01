@@ -79,6 +79,7 @@ def identity_mlh(graph_id):
     """
     return {
         "graph_id": graph_id,
+        "mlh_id": 0,
         "location": np.zeros(3),
         "rotation": Rotation.identity(),
     }
@@ -401,6 +402,46 @@ class TargetLocInfoTest(unittest.TestCase):
 
         nptest.assert_allclose(target_info["target_loc"], BASE_POINTS[3])
         nptest.assert_allclose(target_info["target_surface_normal"], normals[3])
+
+
+class GeneratedGoalInfoTest(unittest.TestCase):
+    def test_goal_info_carries_hypothesis_identity_and_predicted_displacement(
+        self,
+    ) -> None:
+        # The top graph has an extra point 10cm away (like a mug handle) that
+        # the spatial mismatch path will propose as the target location.
+        extra_point = np.array([0.025, 0.1, 0.0])
+        top_points = np.vstack([BASE_POINTS, extra_point])
+        pose_vectors = np.column_stack(
+            [np.tile([0.0, 0.0, 1.0], (len(top_points), 1)), np.zeros((5, 6))]
+        )
+        graphs = {
+            TOP_ID: {
+                SENSOR_CHANNEL: FakeGraph(
+                    top_points, {"pose_vectors": pose_vectors}
+                )
+            },
+            SECOND_ID: {SENSOR_CHANNEL: sensor_graph()},
+        }
+        gsg = gsg_with_graphs(graphs)
+        gsg.parent_lm.get_output.return_value = MagicMock(confidence=1.0)
+        sensed_location = np.array([0.01, 0.0, 0.0])
+        sensory_input = MagicMock(sender_id=SENSOR_CHANNEL, location=sensed_location)
+
+        goal = gsg._generate_goal(make_ctx(), observations=[sensory_input])
+
+        # The identity of the hypothesis behind the goal is snapshotted so the
+        # LM can attribute a failed jump to it later.
+        self.assertEqual(goal.info["hypothesis_to_test_graph_id"], TOP_ID)
+        self.assertEqual(goal.info["hypothesis_to_test_mlh_id"], 0)
+        # The MLH is at the model origin with identity rotation, so a
+        # successful jump displaces the sensor by the model-frame vector from
+        # the MLH location to the target point.
+        nptest.assert_allclose(goal.info["predicted_displacement"], extra_point)
+        nptest.assert_allclose(
+            goal.info["proposed_surface_loc"],
+            sensed_location + goal.info["predicted_displacement"],
+        )
 
 
 if __name__ == "__main__":

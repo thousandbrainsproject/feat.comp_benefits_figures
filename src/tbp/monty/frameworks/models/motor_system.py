@@ -121,10 +121,24 @@ class MotorSystem(RuntimeMotorSystem, ExperimentMotorSystem):
     def action_sequence(self) -> list[tuple[list[Action], dict[AgentID, Any] | None]]:
         return self._action_sequence
 
+    @property
+    def attempted_goal(self) -> Goal | None:
+        """Efferent copy of a goal the motor system began executing this step.
+
+        Set when the selected motor policy initiated a goal-driven movement
+        (e.g. a hypothesis-testing jump). It carries no information about the
+        movement's outcome; the sender of the goal can combine this signal with
+        its subsequent sensory input to judge whether the attempt succeeded.
+        `None` when no goal-driven movement was initiated this step.
+        """
+        return self._attempted_goal
+
     def _init_MotorSystem(self) -> None:  # noqa: N802
         # For each step, we store the actions produced by the policy and the current
         # motor system state as a (actions, state) tuple.
         self._action_sequence = []
+
+        self._attempted_goal: Goal | None = None
 
         # TODO: Get rid of this once we have another path for telemetry.
         self._telemetry_surface_action_details = SurfacePolicyActionDetailsTelemetry(
@@ -161,6 +175,7 @@ class MotorSystem(RuntimeMotorSystem, ExperimentMotorSystem):
         )
 
         self.motor_only_step = policy_result.motor_only_step
+        self._attempted_goal = policy_result.attempted_goal
 
         self._action_sequence.append((policy_result.actions, motor_system_state))
 

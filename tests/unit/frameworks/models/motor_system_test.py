@@ -68,3 +68,29 @@ class MotorSystemTest(unittest.TestCase):
         motor_system.reset()
 
         telemetry.reset.assert_called_once_with()
+
+    def test_attempted_goal_is_none_before_any_step(self):
+        self.assertIsNone(self.motor_system.attempted_goal)
+
+    def test_exposes_attempted_goal_from_the_policy_result(self):
+        goal = Mock()
+        self.policy_selector.return_value = Mock(
+            actions=[], telemetry=None, attempted_goal=goal
+        )
+
+        self.motor_system(Mock(), Mock(), {}, Mock(), [])
+
+        self.assertIs(self.motor_system.attempted_goal, goal)
+
+    def test_attempted_goal_is_cleared_on_the_next_step(self):
+        self.policy_selector.return_value = Mock(
+            actions=[], telemetry=None, attempted_goal=Mock()
+        )
+        self.motor_system(Mock(), Mock(), {}, Mock(), [])
+
+        self.policy_selector.return_value = Mock(
+            actions=[], telemetry=None, attempted_goal=None
+        )
+        self.motor_system(Mock(), Mock(), {}, Mock(), [])
+
+        self.assertIsNone(self.motor_system.attempted_goal)
