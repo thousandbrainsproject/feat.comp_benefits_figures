@@ -46,11 +46,11 @@ if TYPE_CHECKING:
     from matplotlib.axes import Axes
 
 # wandb's run colors, as in compare_comp_monolithic.py.
-COLORS = {"Compositional": "#f737bd", "Monolithic": "#00a0df"}
+COLORS = {"Monolithic": "#f737bd", "Compositional": "#00a0df"}
 DEFAULT_FIGURE_DIR = Path("~/tbp/projects/comp_benefits_figures/figures").expanduser()
 DEFAULT_RUNS = {
-    "Compositional": "base_infer_objects_with_stickers_comp_models_mujoco",
     "Monolithic": "base_infer_objects_with_stickers_monolithic_models_mujoco",
+    "Compositional": "base_infer_objects_with_stickers_comp_models_mujoco",
 }
 
 
@@ -152,7 +152,7 @@ def draw_accuracy(ax: Axes, summaries: dict[str, RunSummary]) -> None:
             ),
         ],
         fontsize=8,
-        loc="lower right",
+        loc="upper right",
     )
     ax.set_xticks(x, summaries.keys())
     ax.set_ylabel("Accuracy (%)")
