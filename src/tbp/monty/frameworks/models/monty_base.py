@@ -375,6 +375,25 @@ class MontyBase(Monty):
             self.sensor_module_outputs[0],
             self._goals,
         )
+        self._route_attempted_goal()
+
+    def _route_attempted_goal(self) -> None:
+        """Route the motor system's efferent goal copy back to the proposing LM.
+
+        If the motor system began executing a goal-driven movement this step
+        (e.g. a hypothesis-testing jump), notify the LM whose GSG proposed the
+        goal that its goal was attempted. The LM can combine this efferent
+        copy with its subsequent sensory input to judge whether the attempt
+        succeeded (e.g. to accumulate negative evidence for the hypothesis
+        behind a failed jump). Goals not sent by an LM's GSG are ignored.
+        """
+        attempted_goal = self.motor_system.attempted_goal
+        if attempted_goal is None or attempted_goal.sender_type != "GSG":
+            return
+        for lm in self.learning_modules:
+            if lm.learning_module_id == attempted_goal.sender_id:
+                lm.receive_goal_attempt(attempted_goal)
+                return
 
     def _set_step_type_and_check_if_done(self):
         """Check terminal conditions and decide if we change the step type.

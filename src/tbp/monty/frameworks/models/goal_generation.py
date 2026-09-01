@@ -1116,11 +1116,23 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         # world-frame goal is not stored) and `hypothesis_to_test` is a live dict
         # whose graph_id may change after the goal is created; visualizers use them
         # to mark the goal on the hypothesized object model.
+        # The hypothesis identity ('hypothesis_to_test_graph_id' / '..._mlh_id') is
+        # snapshotted for the same reason: if the motor system attempts this goal,
+        # the parent LM uses these to decrement the evidence of the hypothesis that
+        # proposed the jump when the jump is judged to have failed.
+        # 'predicted_displacement' is the sensory displacement the parent LM should
+        # experience if the jump succeeds; the LM compares it against the actually
+        # sensed displacement to judge success.
         info = {
             "proposed_surface_loc": proposed_surface_loc,
             "model_frame_target_loc": np.array(target_info["target_loc"]),
             "model_frame_graph_id": target_info["hypothesis_to_test"]["graph_id"],
             "hypothesis_to_test": target_info["hypothesis_to_test"],
+            "hypothesis_to_test_graph_id": target_info["hypothesis_to_test"][
+                "graph_id"
+            ],
+            "hypothesis_to_test_mlh_id": target_info["hypothesis_to_test"]["mlh_id"],
+            "predicted_displacement": np.array(rotated_disp),
             "achieved": None,
             "matching_step_when_output_goal_set": None,
         }

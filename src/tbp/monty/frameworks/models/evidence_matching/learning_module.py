@@ -19,7 +19,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy.spatial import KDTree
 
-from tbp.monty.cmp import AttentionRegion, Message, location_mean
+from tbp.monty.cmp import AttentionRegion, Goal, Message, location_mean
 from tbp.monty.context import RuntimeContext
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
 from tbp.monty.frameworks.models.evidence_matching.graph_memory import (
@@ -176,6 +176,20 @@ class EvidenceGraphLM(GraphLM):
             when being added to the overall evidence of a hypothesis. If past_weight
             and present_weight add up to 1, it is used as a weight in np.average to
             keep the evidence in a fixed range.
+        failed_goal_evidence_penalty: How strongly to penalize the hypothesis
+            behind a hypothesis-testing jump that the LM judges to have failed
+            (i.e. the agent landed in empty space or inside the object and was
+            moved back to its previous position). The penalty subtracted from
+            the hypothesis's evidence is present_weight *
+            failed_goal_evidence_penalty. Set to 0 to disable judging goal
+            attempts altogether.
+        failed_goal_displacement_eta: Displacement threshold (in meters, "eta")
+            used to judge whether an attempted hypothesis-testing jump
+            succeeded. A jump that fails returns the agent to its previous
+            position, so the LM senses a displacement close to 0; a sensed
+            displacement below eta is therefore judged a failure. Goals whose
+            predicted displacement is itself below eta are not judged at all,
+            since success and failure cannot be distinguished for them.
 
     Terminal Condition Attributes:
         object_evidence_threshold: Minimum required evidence for an object to be
@@ -263,6 +277,8 @@ class EvidenceGraphLM(GraphLM):
         past_weight=1,
         present_weight=1,
         vote_weight=1,
+        failed_goal_evidence_penalty=1,
+        failed_goal_displacement_eta=0.01,
         object_evidence_threshold=1,
         x_percent_threshold=10,
         path_similarity_threshold=0.1,
@@ -314,6 +330,8 @@ class EvidenceGraphLM(GraphLM):
         self.past_weight = past_weight
         self.present_weight = present_weight
         self.vote_weight = vote_weight
+        self.failed_goal_evidence_penalty = failed_goal_evidence_penalty
+        self.failed_goal_displacement_eta = failed_goal_displacement_eta
         # --- Terminal Condition Params ---
         self.object_evidence_threshold = object_evidence_threshold
         self.x_percent_threshold = x_percent_threshold
@@ -362,6 +380,10 @@ class EvidenceGraphLM(GraphLM):
     def _init_EvidenceGraphLM(self) -> None:  # noqa: N802
         self.symmetry_evidence = 0
         self._hypotheses = {}
+
+        # Efferent copy of a goal of this LM the motor system attempted but
+        # whose outcome the LM has not yet judged from its sensory input.
+        self._pending_goal_attempt: Goal | None = None
 
         self.hypotheses_updater.reset()  # FIXME: move reset() logic to __init__()
 
@@ -431,6 +453,11 @@ class EvidenceGraphLM(GraphLM):
         percepts: Sequence[Message],
     ) -> None:
         """Update the possible matches given an observation."""
+        # Judge a pending goal attempt before this step's percepts update the
+        # buffer, so the sensed displacement is measured from the location at
+        # which the goal was generated.
+        self._evaluate_pending_goal_attempt(percepts)
+
         if is_location_only_step(percepts):
             self._displace_hypotheses(percepts)
             return
@@ -473,6 +500,104 @@ class EvidenceGraphLM(GraphLM):
         buffer_data = self._add_displacements(percepts)
         self.buffer.append(buffer_data)
         self.buffer.append_input_percepts(percepts)
+
+    def receive_goal_attempt(self, goal: Goal) -> None:
+        """Register that the motor system attempted a goal proposed by this LM.
+
+        The efferent copy carries no information about the movement's outcome.
+        Instead, the LM judges success itself on its next sensed location by
+        comparing the displacement it senses against the displacement the goal
+        predicted (see `_evaluate_pending_goal_attempt`).
+
+        Goals whose predicted displacement is smaller than
+        `failed_goal_displacement_eta` are ignored, since a successful jump
+        would then be indistinguishable from a failed one (which produces a
+        near-zero displacement).
+
+        Args:
+            goal: The goal the motor system attempted.
+        """
+        if self.failed_goal_evidence_penalty == 0:
+            return
+        info = goal.info if goal.info is not None else {}
+        predicted_displacement = info.get("predicted_displacement")
+        if (
+            predicted_displacement is None
+            or info.get("hypothesis_to_test_graph_id") is None
+            or info.get("hypothesis_to_test_mlh_id") is None
+        ):
+            # Without a predicted displacement and the identity of the
+            # hypothesis that proposed the goal, the outcome can neither be
+            # judged nor attributed.
+            return
+        if (
+            np.linalg.norm(predicted_displacement)
+            < self.failed_goal_displacement_eta
+        ):
+            return
+        self._pending_goal_attempt = goal
+
+    def _evaluate_pending_goal_attempt(self, percepts: Sequence[Message]) -> None:
+        """Judge the outcome of a pending goal attempt from sensory input.
+
+        Called at the start of a matching step, before the buffer is updated
+        with this step's percepts. If a goal attempt (hypothesis-testing jump)
+        is pending, the sensed displacement since the goal was generated is
+        the distance between the currently sensed location and the last
+        location stored in the buffer. A successful jump displaces the sensor
+        by approximately the goal's predicted displacement, whereas a failed
+        jump returns the agent to its previous position, yielding a sensed
+        displacement close to 0. A sensed displacement below
+        `failed_goal_displacement_eta` is therefore judged a failure, and the
+        evidence of the hypothesis that proposed the jump is decremented by
+        present_weight * failed_goal_evidence_penalty. On success nothing
+        extra happens; evidence matching proceeds in the normal way.
+
+        Args:
+            percepts: The percepts of this matching step.
+        """
+        goal = self._pending_goal_attempt
+        if goal is None:
+            return
+        if self.buffer.last_location is None:
+            # No reference location to measure the displacement from.
+            self._pending_goal_attempt = None
+            return
+        sm_percepts = [p for p in percepts if p.is_from_sm()]
+        current_location = location_mean(sm_percepts)
+        if current_location is None:
+            # No location sensed this step; keep waiting for one.
+            return
+        self._pending_goal_attempt = None
+
+        sensed_displacement = np.linalg.norm(
+            current_location - self.buffer.last_location
+        )
+        if sensed_displacement >= self.failed_goal_displacement_eta:
+            # The sensor was displaced, so the jump succeeded; the new
+            # observation is matched against the models in the normal way.
+            return
+
+        # The agent is (approximately) back where it was, so the jump failed
+        # (it landed in empty space or inside the object): accumulate negative
+        # evidence for the hypothesis that proposed it.
+        graph_id = goal.info["hypothesis_to_test_graph_id"]
+        mlh_id = goal.info["hypothesis_to_test_mlh_id"]
+        graph_hypotheses = self._hypotheses.get(graph_id)
+        if graph_hypotheses is None or mlh_id >= len(graph_hypotheses.evidence):
+            return
+        penalty = self.present_weight * self.failed_goal_evidence_penalty
+        graph_hypotheses.evidence[mlh_id] -= penalty
+        logger.debug(
+            f"Hypothesis-testing jump for hypothesis {mlh_id} of {graph_id} "
+            f"failed (sensed displacement {sensed_displacement} < eta "
+            f"{self.failed_goal_displacement_eta}); decremented its evidence "
+            f"by {penalty}."
+        )
+        # Refresh the recognition state so the decrement is reflected even on
+        # steps that do not run a full evidence update (location-only steps).
+        self.possible_matches = self._threshold_possible_matches()
+        self.current_mlh = self._calculate_most_likely_hypothesis()
 
     def receive_votes(self, vote_data):
         """Get evidence count votes and use to update own evidence counts.
