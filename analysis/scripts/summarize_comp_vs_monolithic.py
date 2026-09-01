@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from matplotlib.axes import Axes
 
 # wandb's run colors, as in compare_comp_monolithic.py.
-COLORS = {"Compositional": "#7EC3DC", "Monolithic": "#E08BDC"}
+COLORS = {"Compositional": "#f737bd", "Monolithic": "#00a0df"}
 DEFAULT_FIGURE_DIR = Path("~/tbp/projects/comp_benefits_figures/figures").expanduser()
 DEFAULT_RUNS = {
     "Compositional": "base_infer_objects_with_stickers_comp_models_mujoco",
@@ -189,9 +189,9 @@ def draw_violin(
             )
             for body in violin["bodies"]:
                 body.set_facecolor(_lighten(color, 0.35))
-                body.set_alpha(1.0)
+                body.set_alpha(0.5)
         jitter = rng.uniform(-0.08, 0.08, size=len(episode_values))
-        ax.scatter(xi + jitter, episode_values, s=12, color=color, zorder=3)
+        ax.scatter(xi + jitter, episode_values, s=12, color=color, zorder=3, alpha=0.5)
     ax.set_xticks(x, values.keys())
     ax.set_xlim(-0.6, len(values) - 0.4)
     ax.set_ylim(bottom=0)
