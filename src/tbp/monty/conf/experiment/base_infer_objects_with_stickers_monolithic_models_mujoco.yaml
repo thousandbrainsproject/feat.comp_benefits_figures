@@ -32,7 +32,7 @@ experiment:
     supervised_lm_ids: []
     python_log_level: DEBUG
     logging:
-      run_name: base_infer_objects_with_stickers_monolithic_models_3lm_mujoco
+      run_name: base_infer_objects_with_stickers_monolithic_models_mujoco
       output_dir: ${path.expanduser:'~/tbp/results/comp_benefits_figures'}
     monty_config:
       motor_system_config:
