@@ -30,19 +30,16 @@ from tbp.monty.experiment.environment import (
     SaccadeOnImageInterface,
 )
 from tbp.monty.experiment.match_criteria import MatchCriterion
+from tbp.monty.experiment.recognition_policy import (
+    RecognitionPolicy,
+)
 from tbp.monty.frameworks.actions.actions import Action
 from tbp.monty.frameworks.experiments.hooks import NoOpStepHook, StepHook
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
 from tbp.monty.frameworks.experiments.seed import episode_seed
-from tbp.monty.frameworks.loggers.exp_logger import (
-    BaseMontyLogger,
-    LoggingCallbackHandler,
-)
+from tbp.monty.frameworks.loggers.exp_logger import LoggingCallbackHandler
 from tbp.monty.frameworks.loggers.wandb_handlers import WandbWrapper
 from tbp.monty.frameworks.models.monty_base import MontyBase
-from tbp.monty.frameworks.utils.dataclass_utils import (
-    get_subset_of_args,
-)
 from tbp.monty.frameworks.utils.live_plotter import LivePlotter
 from tbp.monty.memento import Memento
 
@@ -67,6 +64,7 @@ class MontyExperiment:
     _monty_cfg: DictConfig | None  # dehydrated Monty config
     _monty_memo: Memento
     _step_hook: StepHook
+    _recognition_policy: RecognitionPolicy | None
 
     def __init__(self, config: DictConfig) -> None:
         """Initialize the experiment based on the provided configuration.
@@ -113,6 +111,7 @@ class MontyExperiment:
         self._rng_seed_history: list[int] = []
 
         self._step_hook = config.pop("step_hook", NoOpStepHook())
+        self._recognition_policy = config.pop("recognition_policy", None)
 
     def reset_episode_rng(self):
         """Resets the random number generator using episode-specific seed."""
@@ -251,10 +250,6 @@ class MontyExperiment:
         # FIXME: 'target' attribute is specific to `OneObjectPerEpisodeInterface`
         if isinstance(self.env_interface, OneObjectPerEpisodeInterface):
             target = self.env_interface.primary_target
-            if target is not None:
-                target.update(
-                    consistent_child_objects=self.env_interface.consistent_child_objects
-                )
             args.update(target=target)
         return args
 
@@ -321,46 +316,18 @@ class MontyExperiment:
         Args:
             logging_config: Logging configuration.
         """
-        self.monty_log_level = logging_config["monty_log_level"]
-        self.monty_handlers = logging_config["monty_handlers"]
-        self.wandb_handlers = logging_config["wandb_handlers"]
-
-        # Configure Monty logging
-        monty_handlers = []
+        self.monty_logger = logging_config["monty_data_logger"]
+        self.logs_to_wandb = False
         has_detailed_logger = False
-        for handler in self.monty_handlers:
-            if handler.log_level() == "DETAILED":
+        for handler in self.monty_logger.handlers:
+            if isinstance(handler, WandbWrapper):
+                self.logs_to_wandb = True
+                handler.wandb_init(run_name=self.run_name, config=self.config)
+                for wandb_handler in handler.wandb_handlers:
+                    if wandb_handler.log_level() == "DETAILED":
+                        has_detailed_logger = True
+            elif handler.log_level() == "DETAILED":
                 has_detailed_logger = True
-            handler_args = get_subset_of_args(logging_config, handler.__init__)
-            monty_handler = handler(**handler_args)
-            monty_handlers.append(monty_handler)
-
-        # Configure wandb logging
-        if len(self.wandb_handlers) > 0:
-            wandb_args = get_subset_of_args(logging_config, WandbWrapper.__init__)
-            wandb_args.update(
-                config=dict(self.config),
-                run_name=wandb_args["run_name"] + "_" + wandb_args["wandb_id"],
-            )
-            monty_handlers.append(WandbWrapper(**wandb_args))
-            for handler in self.wandb_handlers:
-                if handler.log_level() == "DETAILED":
-                    has_detailed_logger = True
-
-        if has_detailed_logger and self.monty_log_level != "DETAILED":
-            logger.warning(
-                f"Log level is set to {self.monty_log_level} but you "
-                "specified a detailed logging handler. Setting log level "
-                "to detailed."
-            )
-            self.monty_log_level = "DETAILED"
-
-        if self.monty_log_level == "DETAILED" and not has_detailed_logger:
-            logger.warning(
-                "You are setting the monty logging level to DETAILED, but all your "
-                "handlers are BASIC. Consider setting the level to BASIC, or adding a "
-                "DETAILED handler"
-            )
 
         for lm in self.model.learning_modules:
             lm.has_detailed_logger = has_detailed_logger
@@ -374,20 +341,6 @@ class MontyExperiment:
                         "Consider setting 'save_raw_obs' to True to log and visualize "
                         "the SM RGB raw values."
                     )
-
-        # monty_log_level determines if we used Basic or Detailed logger
-        # TODO: only defined for MontyForGraphMatching right now, need to add TM later
-        # NOTE: later, more levels that Basic or Detailed could be added
-
-        if self.monty_log_level in self.model.LOGGING_REGISTRY:
-            logger_class = self.model.LOGGING_REGISTRY[self.monty_log_level]
-            self.monty_logger = logger_class(handlers=monty_handlers)
-        else:
-            logger.warning(
-                "Unable to match monty logger to log level. "
-                "An empty logger will be used as a placeholder"
-            )
-            self.monty_logger = BaseMontyLogger(handlers=[])
 
         if "log_parallel_wandb" in logging_config:
             self.monty_logger.use_parallel_wandb_logging = logging_config[
@@ -484,24 +437,16 @@ class MontyExperiment:
             self.model.reset()
         self.model.set_experiment_mode(self.experiment_mode)
 
-    def pre_step(self, _step, _observation) -> None:
-        """Hook for anything you want to do before a step."""
-        self.logger_handler.pre_step(self.logger_args)
-
-    def post_step(self, _step, _observation) -> None:
-        """Hook for anything you want to do after a step."""
-        self.logger_handler.post_step(self.logger_args)
-
     def run_episode(self) -> None:
         """Run one episode until model.is_done."""
         self.pre_episode()
         step = 0
         ctx = RuntimeContext(rng=self.rng)
         actions: list[Action] = []
+        stop_requested: bool = False
         while True:
             observations, proprioceptive_state = self.env_interface.step(actions)
 
-            self.pre_step(step, observations)
             try:
                 actions = self.model.step(ctx, observations, proprioceptive_state)
                 actions = self._step_hook(
@@ -521,14 +466,30 @@ class MontyExperiment:
                 #       fully. For example, we know how many steps the policy will take,
                 #       so the experiment can set max steps based on that knowledge
                 #       alone.
-                break
-            finally:
-                self.post_step(step, observations)
-            if self.model.is_done or step >= self.max_steps:
+                stop_requested = True
+
+            if step >= self.max_steps:
+                stop_requested = True
+
+            stop_requested = stop_requested or self._recognition_complete(step)
+
+            if stop_requested:
+                self.model.set_done()  # TODO: remove `is_done` from Monty
                 break
             step += 1
 
         self.post_episode(step)
+
+    def _recognition_complete(self, step: int) -> bool:
+        legacy_result = self.model.is_done
+
+        if self._recognition_policy is not None:
+            rr = self._recognition_policy(model=self.model, step=step)
+            assert rr.is_done == legacy_result, (
+                f"wrong recognition result: expected {legacy_result}, got {rr.is_done}"
+            )
+
+        return legacy_result
 
     def pre_episode(self) -> None:
         """Call pre_episode on elements in experiment and set mode."""

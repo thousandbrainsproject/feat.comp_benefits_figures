@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, ClassVar, Collection, Sequence
+from typing import Any, Collection, Sequence
 
 import numpy as np
 import torch
@@ -18,14 +18,12 @@ import torch
 from tbp.monty.cmp import Goal, Message, location_mean
 from tbp.monty.context import RuntimeContext
 from tbp.monty.experiment.match_criteria import MatchCriterion
+from tbp.monty.experiment.recognition_status import (
+    RecognitionConclusion,
+    RecognitionStatus,
+)
 from tbp.monty.frameworks.environments.environment import SemanticID
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
-from tbp.monty.frameworks.loggers.exp_logger import BaseMontyLogger
-from tbp.monty.frameworks.loggers.graph_matching_loggers import (
-    BasicGraphMatchingLogger,
-    DetailedGraphMatchingLogger,
-    SelectiveEvidenceLogger,
-)
 from tbp.monty.frameworks.models.abstract_monty_classes import (
     LearningModule,
     LMMemory,
@@ -47,17 +45,6 @@ class MontyForGraphMatching(MontyBase):
     """General Monty model for recognizing objects using graphs."""
 
     _match_criterion: MatchCriterion
-
-    LOGGING_REGISTRY: ClassVar[dict[str, type[BaseMontyLogger]]] = {
-        # Don't do any formal logging, just save models. Used for pretraining.
-        "SILENT": BaseMontyLogger,
-        # Log things like basic stats.csv files, data to reproduce experiments
-        "BASIC": BasicGraphMatchingLogger,
-        # Utter deforestation
-        "DETAILED": DetailedGraphMatchingLogger,
-        # Save specific stats necessary for object similarity analysis.
-        "SELECTIVE": SelectiveEvidenceLogger,
-    }
 
     def __init__(self, *args, **kwargs):
         """Initialize and reset LM."""
@@ -174,16 +161,6 @@ class MontyForGraphMatching(MontyBase):
             return True
 
         return False
-
-    # ------------------ Getters & Setters ---------------------
-
-    def set_is_done(self):
-        """Set the model's `is_done` flag.
-
-        Method that e.g. experiment classes can use to set the model's flag if
-        e.g. the total number of episode steps possible has been exceeded.
-        """
-        self._is_done = True
 
     # ------------------ Logging & Saving ----------------------
     def load_state_dict_from_parallel(self, parallel_dirs, save=False):
@@ -747,6 +724,15 @@ class GraphLM(LearningModule):
                 self.set_individual_ts(None)
             logger.info(f"{self.learning_module_id} did not recognize an object yet.")
         return self.terminal_state
+
+    @property
+    def recognition_status(self) -> RecognitionStatus:
+        conclusion = (
+            RecognitionConclusion(self.terminal_state)
+            if self.terminal_state is not None
+            else None
+        )
+        return RecognitionStatus(conclusion=conclusion)
 
     # ------------------ Getters & Setters ---------------------
 

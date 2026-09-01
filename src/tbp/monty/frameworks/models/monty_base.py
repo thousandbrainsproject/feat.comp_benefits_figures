@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import Any, ClassVar, Sequence
+from typing import Any, Sequence
 
 from tbp.monty.attention.attention_system import (
     AttentionSystemProtocol,
@@ -21,7 +21,6 @@ from tbp.monty.cmp import AttentionRegion, Goal, Message
 from tbp.monty.frameworks.actions.actions import Action
 from tbp.monty.frameworks.environments.environment import SemanticID
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
-from tbp.monty.frameworks.loggers.exp_logger import BaseMontyLogger, TestLogger
 from tbp.monty.frameworks.models.abstract_monty_classes import (
     LearningModule,
     Monty,
@@ -39,8 +38,6 @@ logger = logging.getLogger(__name__)
 
 
 class MontyBase(Monty):
-    LOGGING_REGISTRY: ClassVar[dict[str, type[BaseMontyLogger]]] = {"TEST": TestLogger}
-
     _is_done: bool
 
     def __init__(
@@ -113,7 +110,6 @@ class MontyBase(Monty):
 
         # Counters, logging, default step_type
         self.step_type = "matching_step"
-        self.is_seeking_match = True  # for consistency with custom monty experiments
         self.experiment_mode: ExperimentMode | None = (
             None  # initialize to neither training nor testing
         )
@@ -240,7 +236,7 @@ class MontyBase(Monty):
             True if max_steps was reached, False otherwise.
         """
         if (
-            self.is_seeking_match and self.matching_steps >= max_steps
+            (not self.is_exploring) and (self.matching_steps >= max_steps)
             # Since we increment matching steps from 0 (i.e. the first matching
             # step is the "0th" step, this is set to >=, not >)
         ):
@@ -399,9 +395,6 @@ class MontyBase(Monty):
                         f"finished evaluating after {self.matching_steps} steps"
                     )
 
-    def _post_step(self):
-        pass
-
     ###
     # Methods (other than step) that interact with the experiment
     ###
@@ -538,6 +531,10 @@ class MontyBase(Monty):
         return self.motor_system.motor_only_step
 
     @property
+    def is_exploring(self) -> bool:
+        return self.step_type == "exploratory_step"
+
+    @property
     def is_done(self) -> bool:
         return self._is_done
 
@@ -584,10 +581,8 @@ class MontyBase(Monty):
 
     def switch_to_matching_step(self):
         self.step_type = "matching_step"
-        self.is_seeking_match = True
         logger.debug(f"Going into matching mode after {self.episode_steps} steps")
 
     def switch_to_exploratory_step(self):
         self.step_type = "exploratory_step"
-        self.is_seeking_match = False
         logger.info(f"Going into exploratory mode after {self.matching_steps} steps")
