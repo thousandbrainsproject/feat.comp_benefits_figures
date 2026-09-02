@@ -29,4 +29,4 @@ experiment:
     supervised_lm_ids:
       - learning_module_1
     logging:
-      run_name: supervised_pre_training_objects_with_stickers_2d_children_3lm
+      run_name: supervised_pre_training_objects_with_stickers_2d_children
