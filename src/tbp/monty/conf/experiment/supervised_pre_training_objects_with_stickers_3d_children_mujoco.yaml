@@ -9,7 +9,7 @@ defaults:
   - /environment: mujoco_dist_agent_sensors3_256
   - /env_interface: train_objects_with_stickers_3d_children_predefined
   - /env_interface/positioning_procedures_train: getgoodview_viewfinder_patch0
-  - /env_interface/transform: gaussianblur_missing_depthto3d_sensor4
+  - /env_interface/transform: gaussianblur_missing_depthto3d_sensor4_256
   - /logging: silent_info_train
 
 experiment:
