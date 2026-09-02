@@ -174,6 +174,7 @@ def draw_violin(
     values: dict[str, np.ndarray],
     ylabel: str,
     seed: int = 42,
+    plot_mean: bool = True,
 ) -> None:
     """One panel: a violin per run with the episode values scattered on top.
 
@@ -183,6 +184,7 @@ def draw_violin(
         values: The episodes' values per run name, left to right.
         ylabel: The y axis label.
         seed: Seed for the horizontal jitter of the scatter.
+        plot_mean: Whether to plot the mean of the episodes as a horizontal line.
     """
     rng = np.random.default_rng(seed)
     x = np.arange(len(values))
@@ -200,6 +202,18 @@ def draw_violin(
                 body.set_alpha(0.5)
         jitter = rng.uniform(-0.08, 0.08, size=len(episode_values))
         ax.scatter(xi + jitter, episode_values, s=12, color=color, zorder=3, alpha=0.5)
+        # Plot mean if requested
+        mean_value = np.mean(episode_values)
+        ax.hlines(
+            mean_value,
+            xi - 0.32,
+            xi + 0.32,
+            colors=color,
+            linewidth=2,
+            linestyles="dashed" if not plot_mean else "solid",
+            alpha=0.8 if plot_mean else 0.5,
+            zorder=4,
+        ) if plot_mean else None
     ax.set_xticks(x, values.keys())
     ax.set_xlim(-0.6, len(values) - 0.4)
     ax.set_ylim(bottom=0)
@@ -250,6 +264,7 @@ def create_summary_figure(
         "Rotation Error",
         {n: s.rotation_errors for n, s in summaries.items()},
         ylabel="Rotation Error (degrees)",
+        plot_mean=True,
     )
     episodes = ", ".join(f"{n}: {s.n_episodes} episodes" for n, s in summaries.items())
     fig.suptitle(
