@@ -22,7 +22,7 @@ experiment:
     max_total_steps: 500
     n_train_epochs: ${constants.rotations_cube_faces_count}
     n_eval_epochs: 3
-    # To save time on training, we use the pretrained models trained on Habitat versions of the 2D and 3D objects
+    # To save time on training, we use the pretrained models trained on Habitat versions of the 2D and 3D objects - TODO change
     model_name_or_path: ${path.expanduser:${oc.env:MONTY_MODELS}/my_trained_models/supervised_pre_training_objects_with_stickers_2d_children/pretrained/}
     match_criterion:
       _target_: tbp.monty.experiment.match_criteria.AnyLMsMatch
@@ -31,7 +31,7 @@ experiment:
     supervised_lm_ids:
       - learning_module_2
     logging:
-      run_name: supervised_pre_training_objects_with_stickers_comp_models
+      run_name: supervised_pre_training_objects_with_stickers_comp_models_mujoco
     monty_config:
       motor_system_config:
         telemetry:
