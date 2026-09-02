@@ -22,6 +22,7 @@ experiment:
     n_train_epochs: 7
     n_eval_epochs: 7
     model_name_or_path: ${path.expanduser:${oc.env:MONTY_MODELS}/my_trained_models/supervised_pre_training_objects_with_stickers_3d_children/pretrained/}
+    model_name_or_path: ${path.expanduser:${oc.env:MONTY_MODELS}/my_trained_models/supervised_pre_training_objects_with_stickers_3d_children_3lm_mujoco/pretrained/}
     match_criterion:
       _target_: tbp.monty.experiment.match_criteria.AnyLMsMatch
       count: 1
@@ -29,4 +30,4 @@ experiment:
     supervised_lm_ids:
       - learning_module_1
     logging:
-      run_name: supervised_pre_training_objects_with_stickers_2d_children
+      run_name: supervised_pre_training_objects_with_stickers_2d_children_mujoco

@@ -36,11 +36,7 @@ from tbp.monty.frameworks.experiments.pretraining_experiments import (
     MontySupervisedObjectPretrainingExperiment,
 )
 from tbp.monty.frameworks.experiments.profile import ProfileExperimentMixin
-from tbp.monty.frameworks.loggers.monty_handlers import (
-    BasicCSVStatsHandler,
-    DetailedJSONHandler,
-)
-from tbp.monty.frameworks.loggers.npz_handler import EXPERIMENT_SUBDIRECTORY, NpzHandler
+from tbp.monty.frameworks.loggers.npz_handler import EXPERIMENT_SUBDIRECTORY
 from tbp.monty.frameworks.run import output_dir_from_run_name, save_config_yaml
 from tbp.monty.frameworks.utils.logging_utils import (
     maybe_rename_existing_dir,
@@ -237,6 +233,35 @@ def filter_episode_configs(configs: list[dict], episode_spec: str | None) -> lis
     return [cfg for i, cfg in enumerate(configs) if i in idxs]
 
 
+def has_wandb_wrapper(config: DictConfig) -> bool:
+    return any(
+        handler["_target_"]
+        == "tbp.monty.frameworks.loggers.wandb_handlers.WandbWrapper"
+        for handler in config["logging"]
+        .get("monty_data_logger", {})
+        .get("handlers", [])
+    )
+
+
+def remove_wandb_wrapper(config: DictConfig) -> None:
+    config["logging"]["monty_data_logger"]["handlers"] = [
+        handler
+        for handler in config["logging"]["monty_data_logger"]["handlers"]
+        if handler["_target_"]
+        != "tbp.monty.frameworks.loggers.wandb_handlers.WandbWrapper"
+    ]
+
+
+def wandb_group(config: DictConfig) -> str | None:
+    for handler in config["logging"]["monty_data_logger"]["handlers"]:
+        if (
+            handler["_target_"]
+            == "tbp.monty.frameworks.loggers.wandb_handlers.WandbWrapper"
+        ):
+            return handler["wandb_group"]
+    return None
+
+
 def generate_parallel_eval_configs(
     experiment: DictConfig,
     name: str,
@@ -293,8 +318,8 @@ def generate_parallel_eval_configs(
             new_experiment["config"]["logging"]["output_dir"] = (
                 output_dir / name / run_name
             )
-            if len(new_experiment["config"]["logging"]["wandb_handlers"]) > 0:
-                new_experiment["config"]["logging"]["wandb_handlers"] = []
+            if has_wandb_wrapper(new_experiment["config"]):
+                remove_wandb_wrapper(new_experiment["config"])
                 new_experiment["config"]["logging"]["log_parallel_wandb"] = True
                 new_experiment["config"]["logging"]["experiment_name"] = name
             else:
@@ -357,7 +382,8 @@ def generate_parallel_train_configs(experiment: DictConfig, name: str) -> list[M
         run_name = f"{name}-parallel_train_episode_{obj}"
         new_experiment["config"]["logging"]["run_name"] = run_name
         new_experiment["config"]["logging"]["output_dir"] = output_dir / name / run_name
-        new_experiment["config"]["logging"]["wandb_handlers"] = []
+        if has_wandb_wrapper(new_experiment["config"]):
+            remove_wandb_wrapper(new_experiment["config"])
         new_experiment["config"]["logging"]["log_parallel_wandb"] = False
 
         # Object id, pose parameters for single episode
@@ -428,12 +454,6 @@ def get_overall_stats(stats):
     overall_stats["overall/percent_used_mlh_after_timeout"] = (
         np.mean(stats["episode/used_mlh_after_time_out"]) * 100
     )
-    overall_stats["overall/percent_correct_child_or_parent"] = (
-        np.mean(stats["episode/consistent_child_or_parent"]) * 100
-    )
-    overall_stats["overall/percent_consistent_child_obj"] = (
-        np.mean(stats["episode/consistent_child_obj"]) * 100
-    )
     overall_stats["overall/avg_prediction_error"] = np.mean(
         stats["episode/avg_prediction_error"]
     )
@@ -474,7 +494,6 @@ def per_lm_stats(eval_stats):
 def print_benchmark_stats(overall_stats: dict) -> None:
     benchmark_keys = [
         "overall/percent_correct",
-        "overall/percent_correct_child_or_parent",
         "overall/avg_rotation_error",
         "overall/avg_num_monty_matching_steps",
         "overall/run_time",
@@ -521,15 +540,9 @@ def post_parallel_eval(experiments: list[Mapping], base_dir: Path) -> None:
     save_per_episode = logging_config.get("detailed_save_per_episode")
 
     # Loop over types of loggers, figure out how to clean up each one
-    for handler in logging_config["monty_handlers"]:
-        if issubclass(handler, NpzHandler):
-            filenames = collect_telemetry_episode_names(parallel_dirs)
-            outdir = base_dir / EXPERIMENT_SUBDIRECTORY
-            maybe_rename_existing_dir(outdir)
-            post_parallel_log_cleanup(filenames, outdir, cat_fn=mv_files)
-            continue
-
-        if issubclass(handler, DetailedJSONHandler):
+    for handler in logging_config["monty_data_logger"]["handlers"]:
+        target = handler["_target_"]
+        if target == "tbp.monty.frameworks.loggers.monty_handlers.DetailedJSONHandler":
             if save_per_episode:
                 filenames = collect_detailed_episodes_names(parallel_dirs)
                 outdir = base_dir / "detailed_run_stats"
@@ -543,7 +556,7 @@ def post_parallel_eval(experiments: list[Mapping], base_dir: Path) -> None:
                 post_parallel_log_cleanup(filenames, outfile, cat_fn=cat_files)
             continue
 
-        if issubclass(handler, BasicCSVStatsHandler):
+        if target == "tbp.monty.frameworks.loggers.monty_handlers.BasicCSVStatsHandler":
             filename = "eval_stats.csv"
             filenames = [pdir / filename for pdir in parallel_dirs]
             outfile = base_dir / filename
@@ -588,15 +601,9 @@ def post_parallel_train(experiments: list[Mapping], base_dir: Path) -> None:
     logging_config = experiments[0]["config"]["logging"]
     save_per_episode = logging_config.get("detailed_save_per_episode")
 
-    for handler in logging_config["monty_handlers"]:
-        if issubclass(handler, NpzHandler):
-            filenames = collect_telemetry_episode_names(parallel_dirs)
-            outdir = base_dir / EXPERIMENT_SUBDIRECTORY
-            maybe_rename_existing_dir(outdir)
-            post_parallel_log_cleanup(filenames, outdir, cat_fn=mv_files)
-            continue
-
-        if issubclass(handler, DetailedJSONHandler):
+    for handler in logging_config["monty_data_logger"]["handlers"]:
+        target = handler["_target_"]
+        if target == "tbp.monty.frameworks.loggers.monty_handlers.DetailedJSONHandler":
             if save_per_episode:
                 filenames = collect_detailed_episodes_names(parallel_dirs)
                 outdir = base_dir / "detailed_run_stats"
@@ -610,7 +617,7 @@ def post_parallel_train(experiments: list[Mapping], base_dir: Path) -> None:
                 post_parallel_log_cleanup(filenames, outfile, cat_fn=cat_files)
             continue
 
-        if issubclass(handler, BasicCSVStatsHandler):
+        if target == "tbp.monty.frameworks.loggers.monty_handlers.BasicCSVStatsHandler":
             filename = "train_stats.csv"
             filenames = [pdir / filename for pdir in parallel_dirs]
             outfile = base_dir / filename
@@ -675,10 +682,10 @@ def run_episodes_parallel(
     if log_parallel_wandb:
         wandb_run = wandb.init(
             name=experiment_name,
-            group=experiments[0]["config"]["logging"]["wandb_group"],
+            group=wandb_group(experiments[0]["config"]),
             project="Monty",
             config=experiments[0],
-            id=hydra.utils.instantiate(experiments[0]["config"]["logging"]["wandb_id"]),
+            id=wandb.util.generate_id(),
         )
         print(f"Wandb setup took {time.time() - start_time} seconds")
     start_time = time.time()
