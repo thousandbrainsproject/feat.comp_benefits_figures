@@ -17,7 +17,7 @@ right. All three are read from each run's ``eval_stats.csv`` the way
 ``run_parallel``'s overall stats compute them.
 
 Run from the repo root, e.g. ``python -m analysis.scripts.compare_comp_monolithic
-one_rot_cylinder_comp_models_3lm_mujoco one_rot_cylinder_monolithic_models_3lm_mujoco``;
+one_rot_cylinder_comp_models_mujoco one_rot_cylinder_monolithic_models_mujoco``;
 runs are directories or names under ``RESULTS_DIR``. The figure goes to
 ``~/tbp/projects/comp_benefits_figures/figures/`` unless ``--output`` says
 otherwise.

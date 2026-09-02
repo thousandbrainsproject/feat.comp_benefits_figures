@@ -47,10 +47,10 @@ MODELS_DIR = (
 # objects; the last two are alternative third stages, the single-object
 # cube_tbp one preferred when both exist.
 CURRENT_CHAIN = (
-    "supervised_pre_training_cube_cylinder_3d_children_3lm_mujoco",
-    "supervised_pre_training_cube_cylinder_2d_children_3lm_mujoco",
-    "supervised_pre_training_cube_cylinder_comp_models_3lm_mujoco",
-    "supervised_pre_training_cube_tbp_comp_models_3lm_mujoco",
+    "supervised_pre_training_cube_cylinder_3d_children_mujoco",
+    "supervised_pre_training_cube_cylinder_2d_children_mujoco",
+    "supervised_pre_training_cube_cylinder_comp_models_mujoco",
+    "supervised_pre_training_cube_tbp_comp_models_mujoco",
 )
 
 

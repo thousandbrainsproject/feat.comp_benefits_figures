@@ -22,7 +22,7 @@ Usage:
 
 MODEL_PATH points at a trained model: either model.pt itself, its pretrained
 directory, or the experiment directory containing it. Defaults to the
-supervised_pre_training_cube_cylinder_comp_models_3lm_mujoco experiment in
+supervised_pre_training_cube_cylinder_comp_models_mujoco experiment in
 ~/tbp/results/monty/pretrained_models/my_trained_models.
 
 Options:
@@ -48,7 +48,7 @@ from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
 
 DEFAULT_MODEL_PATH = (
     "~/tbp/results/monty/pretrained_models/my_trained_models/"
-    "supervised_pre_training_cube_cylinder_comp_models_3lm_mujoco"
+    "supervised_pre_training_cube_cylinder_comp_models_mujoco"
 )
 
 # Pairs of parent objects that only differ in the logo placed on them.

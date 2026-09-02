@@ -31,7 +31,7 @@ experiment:
     supervised_lm_ids:
       - learning_module_2
     logging:
-      run_name: supervised_pre_training_objects_with_stickers_comp_models_3lm_mujoco
+      run_name: supervised_pre_training_objects_with_stickers_comp_models
     monty_config:
       motor_system_config:
         telemetry:
