@@ -12,11 +12,7 @@ from __future__ import annotations
 import logging
 
 from tbp.monty.context import RuntimeContext
-from tbp.monty.experiment.environment import (
-    SaccadeOnImageInterface,
-)
 from tbp.monty.frameworks.actions.actions import Action
-from tbp.monty.frameworks.experiments.mode import ExperimentMode
 from tbp.monty.frameworks.experiments.monty_experiment import (
     MontyExperiment,
 )
@@ -38,37 +34,11 @@ class MontyObjectRecognitionExperiment(MontyExperiment):
     RGBA sensor and an up-close "patch" depth sensor.
     """
 
-    def run_episode(self):
-        """Episode that checks the terminal states of an object recognition episode."""
-        self.pre_episode()
-        last_step = self.run_episode_steps()
-        self.post_episode(last_step)
-
     def pre_episode(self) -> None:
-        """Pre-episode hook.
+        super().pre_episode()
 
-        Passes the primary target object and the mapping from semantic IDs to labels
-        to the Monty model for logging and reporting evaluation results.
-        """
-        if self.experiment_mode is ExperimentMode.TRAIN:
-            logger.info(
-                f"running train epoch {self.train_epochs} "
-                f"train episode {self.train_episodes}"
-            )
-        else:
-            logger.info(
-                f"running eval epoch {self.eval_epochs} "
-                f"eval episode {self.eval_episodes}"
-            )
-
-        self.reset_episode_rng()
-
-        self._restore_monty()
-
-        # TODO, eventually it would be better to pass
-        # self.env_interface.semantic_id_to_label via an "Observation" object when this
-        # is eventually implemented, such that we can ensure this information is never
-        # inappropriately accessed and used
+        # Pass the primary target object and the mapping from semantic IDs to labels
+        # to the Monty model for logging and reporting evaluation results.
         if hasattr(self.env_interface, "semantic_id_to_label"):
             self.model.fixme_set_ground_truth(
                 self.env_interface.primary_target,
@@ -77,27 +47,7 @@ class MontyObjectRecognitionExperiment(MontyExperiment):
         else:
             self.model.fixme_set_ground_truth(self.env_interface.primary_target)
 
-        self.env_interface.pre_episode(self.rng)
-
-        self.max_steps = self.max_train_steps
-        if self.experiment_mode is not ExperimentMode.TRAIN:
-            self.max_steps = self.max_eval_steps
-
-        self.logger_handler.pre_episode(self.logger_args)
-
-        if self.show_sensor_output:
-            self.live_plotter.initialize_online_plotting()
-
     def run_episode_steps(self) -> int:
-        """Runs one episode of the experiment.
-
-        At each step, observations are collected from the env_interface and either
-        passed to the model or sent directly to the motor system. We also check if a
-        terminal condition was reached at each step and increment step counters.
-
-        Returns:
-            The number of total steps taken in the episode.
-        """
         step = 0
         ctx = RuntimeContext(rng=self.rng)
         actions: list[Action] = []
@@ -105,15 +55,7 @@ class MontyObjectRecognitionExperiment(MontyExperiment):
         while True:
             observations, proprioceptive_state = self.env_interface.step(actions)
 
-            if self.show_sensor_output:
-                is_saccade_on_image_data_loader = isinstance(
-                    self.env_interface, SaccadeOnImageInterface
-                )
-                self.live_plotter.show_observations(
-                    *self.live_plotter.hardcoded_assumptions(observations, self.model),
-                    step,
-                    is_saccade_on_image_data_loader,
-                )
+            self._fixme_generate_live_plot_frame(observations, step)
 
             if self.model.check_reached_max_matching_steps(self.max_steps):
                 logger.info(

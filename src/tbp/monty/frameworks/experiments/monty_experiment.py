@@ -39,6 +39,7 @@ from tbp.monty.frameworks.experiments.mode import ExperimentMode
 from tbp.monty.frameworks.experiments.seed import episode_seed
 from tbp.monty.frameworks.loggers.exp_logger import LoggingCallbackHandler
 from tbp.monty.frameworks.loggers.wandb_handlers import WandbWrapper
+from tbp.monty.frameworks.models.abstract_monty_classes import Observations
 from tbp.monty.frameworks.models.monty_base import MontyBase
 from tbp.monty.frameworks.utils.live_plotter import LivePlotter
 from tbp.monty.memento import Memento
@@ -58,6 +59,8 @@ class MontyExperiment:
 
     model: MontyBase
     env_interface: Interface | None
+    show_sensor_output: bool
+    live_plotter: LivePlotter
 
     _match_criterion: MatchCriterion
     _recreation_mode: bool
@@ -437,15 +440,58 @@ class MontyExperiment:
             self.model.reset()
         self.model.set_experiment_mode(self.experiment_mode)
 
-    def run_episode(self) -> None:
-        """Run one episode until model.is_done."""
+    def run_episode(self):
+        """Runs an episode with `pre_episode` and `post_episode` hooks."""
         self.pre_episode()
+        last_step = self.run_episode_steps()
+        self.post_episode(last_step)
+
+    def pre_episode(self) -> None:
+        """Call pre_episode on elements in experiment and set mode."""
+        if self.experiment_mode is ExperimentMode.TRAIN:
+            logger.info(
+                f"running train epoch {self.train_epochs} "
+                f"train episode {self.train_episodes}"
+            )
+        else:
+            logger.info(
+                f"running eval epoch {self.eval_epochs} "
+                f"eval episode {self.eval_episodes}"
+            )
+
+        self.reset_episode_rng()
+
+        self._restore_monty()
+
+        self.env_interface.pre_episode(self.rng)
+
+        self.max_steps = self.max_train_steps
+        if self.experiment_mode is not ExperimentMode.TRAIN:
+            self.max_steps = self.max_eval_steps
+
+        self.logger_handler.pre_episode(self.logger_args)
+
+        if self.show_sensor_output:
+            self.live_plotter.initialize_online_plotting()
+
+    def run_episode_steps(self) -> int:
+        """Runs the steps of an episode.
+
+        At each step, observations are collected from the env_interface and either
+        passed to the model or sent directly to the motor system. We also check if a
+        terminal condition was reached at each step and increment step counters.
+
+        Returns:
+            The number of total steps taken in the episode.
+        """
         step = 0
         ctx = RuntimeContext(rng=self.rng)
         actions: list[Action] = []
         stop_requested: bool = False
         while True:
             observations, proprioceptive_state = self.env_interface.step(actions)
+
+            self._fixme_generate_live_plot_frame(observations, step)
 
             try:
                 actions = self.model.step(ctx, observations, proprioceptive_state)
@@ -478,7 +524,7 @@ class MontyExperiment:
                 break
             step += 1
 
-        self.post_episode(step)
+        return step
 
     def _recognition_complete(self, step: int) -> bool:
         legacy_result = self.model.is_done
@@ -491,33 +537,20 @@ class MontyExperiment:
 
         return legacy_result
 
-    def pre_episode(self) -> None:
-        """Call pre_episode on elements in experiment and set mode."""
-        if self.experiment_mode is ExperimentMode.TRAIN:
-            logger.info(
-                f"running train epoch {self.train_epochs} "
-                f"train episode {self.train_episodes}"
-            )
-        else:
-            logger.info(
-                f"running eval epoch {self.eval_epochs} "
-                f"eval episode {self.eval_episodes}"
-            )
+    def _fixme_generate_live_plot_frame(
+        self, observations: Observations, step: int
+    ) -> None:
+        if not self.show_sensor_output:
+            return
 
-        self.reset_episode_rng()
-
-        self._restore_monty()
-
-        self.env_interface.pre_episode(self.rng)
-
-        self.max_steps = self.max_train_steps
-        if self.experiment_mode is not ExperimentMode.TRAIN:
-            self.max_steps = self.max_eval_steps
-
-        self.logger_handler.pre_episode(self.logger_args)
-
-        if self.show_sensor_output:
-            self.live_plotter.initialize_online_plotting()
+        is_saccade_on_image_data_loader = isinstance(
+            self.env_interface, SaccadeOnImageInterface
+        )
+        self.live_plotter.show_observations(
+            *self.live_plotter.hardcoded_assumptions(observations, self.model),
+            step,
+            is_saccade_on_image_data_loader,
+        )
 
     def post_episode(self, steps) -> None:
         """Call post_episode on elements in experiment and increment counters.
