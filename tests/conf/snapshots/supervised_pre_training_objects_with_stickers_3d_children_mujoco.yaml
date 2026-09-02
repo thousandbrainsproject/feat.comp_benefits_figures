@@ -268,8 +268,8 @@ experiment:
           - 64
         - - 64
           - 64
-        - - 64
-          - 64
+        - - 256
+          - 256
         world_coord: true
         zooms:
         - 10.0
