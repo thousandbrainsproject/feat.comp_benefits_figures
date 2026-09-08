@@ -8,7 +8,6 @@ experiment:
         num_exploratory_steps: 1000
         min_eval_steps: ${constants.min_eval_steps}
         min_train_steps: 3
-        max_total_steps: 2500
       motor_system_config:
         _target_: tbp.monty.frameworks.models.motor_system.MotorSystem
         policy_selector:
@@ -216,8 +215,8 @@ experiment:
       _target_: tbp.monty.experiment.match_criteria.AnyLMsMatch
       count: 1
     recognition_policy:
-      _target_: tbp.monty.experiment.recognition_policy.MontyIsDone
-      max_steps: 500
+      _target_: tbp.monty.experiment.recognition_policy.MinimumLMs
+      min_lms: 1
     seed: 42
     supervised_lm_ids: []
     python_log_level: DEBUG

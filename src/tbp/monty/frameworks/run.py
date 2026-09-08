@@ -16,7 +16,7 @@ from pathlib import Path
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from tbp.monty.hydra import instantiate_experiment, register_resolvers
+from tbp.monty.hydra import instantiate_experiment
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,6 @@ def main(cfg: DictConfig):
         os.environ["HABITAT_SIM_LOG"] = "quiet"
 
     print_config(cfg)
-    register_resolvers()
 
     output_dir = output_dir_from_run_name(cfg)
     save_config_yaml(cfg, output_dir)
