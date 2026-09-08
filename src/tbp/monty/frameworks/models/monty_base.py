@@ -52,7 +52,6 @@ class MontyBase(Monty):
         min_eval_steps,
         min_train_steps,
         num_exploratory_steps,
-        max_total_steps,
         attention_system: AttentionSystemProtocol | None = None,
     ) -> None:
         """Initialize the base class.
@@ -82,7 +81,6 @@ class MontyBase(Monty):
             min_eval_steps: Minimum number of steps required for evaluations.
             min_train_steps: Minimum number of steps required for training.
             num_exploratory_steps: Number of steps required by the exploratory phase.
-            max_total_steps: Maximum number of steps to run the experiment.
             attention_system: The attention system to use. Defaults to a
                 NoopAttentionSystem, which filters nothing; configure an
                 AttentionSystem (e.g. the /monty/attention_system config
@@ -106,7 +104,6 @@ class MontyBase(Monty):
         self.min_eval_steps = min_eval_steps
         self.min_train_steps = min_train_steps
         self.num_exploratory_steps = num_exploratory_steps
-        self.max_total_steps = max_total_steps
 
         # Counters, logging, default step_type
         self.step_type = "matching_step"
