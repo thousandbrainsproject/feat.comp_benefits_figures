@@ -14,6 +14,7 @@ from tbp.monty.frameworks.models.graph_matching import GraphMemory
 from tbp.monty.frameworks.models.object_model import (
     GridObjectModel,
     GridTooSmallError,
+    TooFewObservationsError,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class EvidenceGraphMemory(GraphMemory):
         max_nodes_per_graph,
         max_graph_size,
         num_model_voxels_per_dim,
+        min_observations_per_voxel=2,
         *args,
         **kwargs,
     ):
@@ -35,6 +37,7 @@ class EvidenceGraphMemory(GraphMemory):
         self.max_nodes_per_graph = max_nodes_per_graph
         self.max_graph_size = max_graph_size
         self.num_model_voxels_per_dim = num_model_voxels_per_dim
+        self.min_observations_per_voxel = min_observations_per_voxel
 
     # =============== Public Interface Functions ===============
 
@@ -99,6 +102,12 @@ class EvidenceGraphMemory(GraphMemory):
                         channel_model._location_grid = (
                             channel_model._location_grid.coalesce()
                         )
+                    # Models saved before min_observations_per_voxel existed don't
+                    # carry it. Use this memory's setting so they can be updated.
+                    if not hasattr(channel_model, "_min_observations_per_voxel"):
+                        channel_model._min_observations_per_voxel = (
+                            self.min_observations_per_voxel
+                        )
 
                 logger.info(f"Loaded {model} for {input_channel}")
                 self.models_in_memory[graph_id][input_channel] = channel_model
@@ -111,6 +120,7 @@ class EvidenceGraphMemory(GraphMemory):
             max_nodes=self.max_nodes_per_graph,
             max_size=self.max_graph_size,
             num_voxels_per_dim=self.num_model_voxels_per_dim,
+            min_observations_per_voxel=self.min_observations_per_voxel,
         )
         # Keep benchmark results constant by still using original graph for
         # matching when loading pretrained models.
@@ -136,6 +146,7 @@ class EvidenceGraphMemory(GraphMemory):
             max_nodes=self.max_nodes_per_graph,
             max_size=self.max_graph_size,
             num_voxels_per_dim=self.num_model_voxels_per_dim,
+            min_observations_per_voxel=self.min_observations_per_voxel,
         )
         try:
             model.build_model(locations=locations, features=features)
@@ -150,6 +161,12 @@ class EvidenceGraphMemory(GraphMemory):
             logger.info(
                 "Grid too small for given locations. Not building a model "
                 f"for {graph_id}"
+            )
+        except TooFewObservationsError:
+            logger.info(
+                "No voxel has at least "
+                f"{self.min_observations_per_voxel} observations. Not building a "
+                f"model for {graph_id} ({input_channel})."
             )
 
     def _extend_graph(

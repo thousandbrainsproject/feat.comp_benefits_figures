@@ -354,6 +354,16 @@ class GridTooSmallError(Exception):
     pass
 
 
+class TooFewObservationsError(Exception):
+    """Exception raised when no voxel has enough observations to enter the graph.
+
+    Raised by GridObjectModel when, after applying min_observations_per_voxel, no
+    voxel is left to build a graph from.
+    """
+
+    pass
+
+
 class GridObjectModel(GraphObjectModel):
     """Model of an object and all its functions.
 
@@ -367,7 +377,14 @@ class GridObjectModel(GraphObjectModel):
         - remove .norm as attribute and store as feature instead?
     """
 
-    def __init__(self, object_id, max_nodes, max_size, num_voxels_per_dim):
+    def __init__(
+        self,
+        object_id,
+        max_nodes,
+        max_size,
+        num_voxels_per_dim,
+        min_observations_per_voxel=2,
+    ):
         """Initialize a grid object model.
 
         Args:
@@ -378,13 +395,28 @@ class GridObjectModel(GraphObjectModel):
                 that can be represented and how locations are mapped into voxels.
             num_voxels_per_dim: number of voxels per dimension in the model's grids.
                 Defines the resolution of the model.
+            min_observations_per_voxel: minimum number of observations a voxel needs
+                to have accumulated before it is included as a node in the graph.
+                Voxels below this count stay in the grids (and keep accumulating
+                observations) but are not used for matching. Defaults to 2, so that
+                a voxel observed only once is filtered out. Set to 1 to include every
+                observed voxel.
+
+        Raises:
+            ValueError: If min_observations_per_voxel is smaller than 1.
         """
         logger.info(f"init object model with id {object_id}")
+        if min_observations_per_voxel < 1:
+            raise ValueError(
+                "min_observations_per_voxel must be at least 1, got "
+                f"{min_observations_per_voxel}"
+            )
         self.object_id = object_id
         self._graph = None
         self._max_nodes = max_nodes
         self._max_size = max_size  # 1=1meter
         self._num_voxels_per_dim = num_voxels_per_dim
+        self._min_observations_per_voxel = min_observations_per_voxel
         # Sparse, 4d torch tensors that store content in the voxels of the model grid.
         # number of observations in each voxel
         self._observation_count = None
@@ -879,21 +911,39 @@ class GridObjectModel(GraphObjectModel):
     def _get_top_k_voxel_indices(self):
         """Get voxel indices with k highest observation counts.
 
+        Only voxels with at least self._min_observations_per_voxel observations are
+        considered. Of those, the k (self._max_nodes) with the highest counts are
+        returned.
+
         Note:
             May return less than k (self._max_nodes) voxels if there are
-            less than k voxels with content.
+            less than k voxels with enough observations.
 
         Returns:
-            Indices of the top k voxels with content.
+            Indices of the top k voxels with enough observations.
+
+        Raises:
+            TooFewObservationsError: If no voxel has at least
+                self._min_observations_per_voxel observations.
         """
-        num_non_zero_voxels = len(self._observation_count.values())
-        if num_non_zero_voxels < self._max_nodes:
+        counts = self._observation_count.values()
+        eligible_ids = torch.nonzero(
+            counts >= self._min_observations_per_voxel, as_tuple=True
+        )[0]
+        num_eligible_voxels = len(eligible_ids)
+        if num_eligible_voxels == 0:
+            logger.info(
+                f"None of the {len(counts)} voxels with content has at least "
+                f"{self._min_observations_per_voxel} observations."
+            )
+            raise TooFewObservationsError
+        if num_eligible_voxels < self._max_nodes:
             print("There are less than max_nodes voxels with content.")
-            k = num_non_zero_voxels
+            k = num_eligible_voxels
         else:
             k = self._max_nodes
-        _counts, top_k_indices = self._observation_count.values().topk(k)
-        return self._observation_count.indices()[:3, top_k_indices]
+        _counts, top_k_indices = counts[eligible_ids].topk(k)
+        return self._observation_count.indices()[:3, eligible_ids[top_k_indices]]
 
     def _locations_to_grid_ids(self, locations):
         """Convert locations to grid ids using scale_factor and location_offset.

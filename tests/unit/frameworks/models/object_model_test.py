@@ -17,6 +17,7 @@ from tbp.monty.frameworks.models.object_model import (
     GraphObjectModel,
     GridObjectModel,
     GridTooSmallError,
+    TooFewObservationsError,
 )
 from tbp.monty.frameworks.utils.spatial_arithmetics import check_orthonormal
 from tbp.monty.geometry import Rotation
@@ -79,7 +80,14 @@ class ObjectModelTest(unittest.TestCase):
 
     def test_can_build_grid_object_model(self):
         max_nodes, max_size, num_voxels_per_dim = 10, 10, 10
-        model = GridObjectModel("test_model", max_nodes, max_size, num_voxels_per_dim)
+        # Each dummy location lands in its own voxel, so allow single observations.
+        model = GridObjectModel(
+            "test_model",
+            max_nodes,
+            max_size,
+            num_voxels_per_dim,
+            min_observations_per_voxel=1,
+        )
         model.build_model(
             self.dummy_locs,
             self.dummy_features,
@@ -297,13 +305,95 @@ class ObjectModelTest(unittest.TestCase):
 
     def test_max_nodes_applied_correctly(self):
         model = GridObjectModel(
-            "test_model", max_nodes=3, max_size=10, num_voxels_per_dim=10
+            "test_model",
+            max_nodes=3,
+            max_size=10,
+            num_voxels_per_dim=10,
+            min_observations_per_voxel=1,
         )
         model.build_model(
             self.dummy_locs,
             self.dummy_features,
         )
         self.assertEqual(model.num_nodes, 3, "Max nodes not applied correctly.")
+
+    def test_min_observations_per_voxel_filters_single_observations(self):
+        """Voxels with fewer than min_observations_per_voxel obs are not nodes."""
+        # Observe location [0, 0, 0] twice and the other three locations once each.
+        locs = np.vstack([self.dummy_locs, self.dummy_locs[0]])
+        features = {
+            key: np.concatenate([value, value[:1]], axis=0)
+            for key, value in self.dummy_features.items()
+        }
+        # Default (min_observations_per_voxel=2): only the twice-observed voxel.
+        model = GridObjectModel(
+            "test_model", max_nodes=10, max_size=10, num_voxels_per_dim=10
+        )
+        model.build_model(locs, features)
+        self.assertEqual(
+            model.num_nodes,
+            1,
+            "Only the voxel observed twice should be in the graph but model has "
+            f"{model.num_nodes} nodes.",
+        )
+        self.assertListEqual(
+            list(model.pos[0]),
+            [0, 0, 0],
+            f"Node should be at the twice-observed location, not {model.pos[0]}.",
+        )
+        # Single observations remain in the grids and count towards the threshold
+        # when the same voxel is observed again later.
+        model.update_model(
+            locations=self.dummy_locs[1:2],
+            features={key: value[1:2] for key, value in self.dummy_features.items()},
+            location_rel_model=np.zeros(3),
+            object_location_rel_body=np.zeros(3),
+            object_rotation=Rotation.identity(),
+        )
+        self.assertEqual(
+            model.num_nodes,
+            2,
+            "Voxel at [0, 1, 0] should be added once it has 2 observations but "
+            f"model has {model.num_nodes} nodes.",
+        )
+        # Higher thresholds filter more strictly.
+        model = GridObjectModel(
+            "test_model",
+            max_nodes=10,
+            max_size=10,
+            num_voxels_per_dim=10,
+            min_observations_per_voxel=3,
+        )
+        with self.assertRaises(TooFewObservationsError):
+            model.build_model(locs, features)
+        # min_observations_per_voxel=1 keeps every observed voxel.
+        model = GridObjectModel(
+            "test_model",
+            max_nodes=10,
+            max_size=10,
+            num_voxels_per_dim=10,
+            min_observations_per_voxel=1,
+        )
+        model.build_model(locs, features)
+        self.assertEqual(model.num_nodes, 4)
+
+    def test_min_observations_per_voxel_raises_when_no_voxel_qualifies(self):
+        """Building a model from single observations only raises an error."""
+        model = GridObjectModel(
+            "test_model", max_nodes=10, max_size=10, num_voxels_per_dim=10
+        )
+        with self.assertRaises(TooFewObservationsError):
+            model.build_model(self.dummy_locs, self.dummy_features)
+
+    def test_min_observations_per_voxel_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            GridObjectModel(
+                "test_model",
+                max_nodes=10,
+                max_size=10,
+                num_voxels_per_dim=10,
+                min_observations_per_voxel=0,
+            )
 
     def test_max_size_applied_correctly(self):
         """Test that GridTooSmallError is raised if locations are outside of grid."""

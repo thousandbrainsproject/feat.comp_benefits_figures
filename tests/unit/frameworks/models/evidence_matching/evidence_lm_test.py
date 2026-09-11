@@ -51,6 +51,9 @@ class EvidenceLMTest(BaseGraphTest):
             },
             # set graph size larger since fake obs displacements are meters
             max_graph_size=10,
+            # each fake observation lands in its own voxel, so keep single
+            # observations instead of filtering them out
+            min_observations_per_voxel=1,
             gsg=gsg,
             hypotheses_updater_args=dict(
                 initial_possible_poses=initial_possible_poses,

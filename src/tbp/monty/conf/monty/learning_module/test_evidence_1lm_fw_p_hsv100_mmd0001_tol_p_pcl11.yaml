@@ -2,6 +2,7 @@
 
 learning_module_0:
   _target_: tbp.monty.frameworks.models.evidence_matching.learning_module.EvidenceGraphLM
+  min_observations_per_voxel: 1
   max_match_distance: 0.001
   tolerances:
     patch:

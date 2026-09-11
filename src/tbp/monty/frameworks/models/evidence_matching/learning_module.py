@@ -244,6 +244,13 @@ class EvidenceGraphLM(GraphLM):
             voxel. All locations that fall into the same voxel will be averaged and
             represented as one value. num_model_voxels_per_dim should not be too large
             since the memory requirements grow cubically with this number.
+        min_observations_per_voxel: Minimum number of observations a voxel needs to
+            have accumulated before it becomes a node in the graph used for matching.
+            Voxels with fewer observations are kept in the model's grids (and keep
+            accumulating counts across episodes) but are not used for matching. This
+            filters out spurious, one-off observations, e.g. an object ID that a
+            lower-level LM reported once at a location where it does not belong.
+            Defaults to 2. Set to 1 to include every observed voxel.
         gsg: The goal generator to associate with the LM.
         hypotheses_updater_class: The type of hypotheses updater to associate with the
             LM.
@@ -290,6 +297,7 @@ class EvidenceGraphLM(GraphLM):
         max_graph_size=0.3,  # 30cm
         max_nodes_per_graph=2000,
         num_model_voxels_per_dim=50,  # -> voxel size = 6mm3 (0.006)
+        min_observations_per_voxel=2,
         use_multithreading=True,
         gsg: EvidenceGoalGenerator | None = None,
         hypotheses_updater_class: type[HypothesesUpdater] = DefaultHypothesesUpdater,
@@ -314,6 +322,7 @@ class EvidenceGraphLM(GraphLM):
             max_nodes_per_graph=max_nodes_per_graph,
             max_graph_size=max_graph_size,
             num_model_voxels_per_dim=num_model_voxels_per_dim,
+            min_observations_per_voxel=min_observations_per_voxel,
         )
         self.gsg = gsg
         if self.gsg:
