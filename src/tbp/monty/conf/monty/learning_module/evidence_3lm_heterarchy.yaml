@@ -66,7 +66,7 @@ learning_module_2:
       object_id: 1
   max_graph_size: 0.4
   num_model_voxels_per_dim: 100
-  max_nodes_per_graph: 250
+  max_nodes_per_graph: 100
   gsg:
     _target_: tbp.monty.frameworks.models.goal_generation.EvidenceGoalGenerator
     goal_tolerances:
