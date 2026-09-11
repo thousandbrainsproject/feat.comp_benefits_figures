@@ -50,7 +50,7 @@ learning_module_1:
 
 learning_module_2:
   _target_: tbp.monty.frameworks.models.evidence_matching.learning_module.EvidenceGraphLM
-  max_match_distance: 0.01
+  max_match_distance: 0.02
   tolerances:
     patch_2:
       hsv: ${np.array:[0.1, 1, 1]}
@@ -66,7 +66,7 @@ learning_module_2:
       object_id: 1
   max_graph_size: 0.4
   num_model_voxels_per_dim: 100
-  max_nodes_per_graph: 2000
+  max_nodes_per_graph: 250
   gsg:
     _target_: tbp.monty.frameworks.models.goal_generation.EvidenceGoalGenerator
     goal_tolerances:
