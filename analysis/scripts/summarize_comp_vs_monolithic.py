@@ -154,13 +154,11 @@ def draw_accuracy(ax: Axes, summaries: dict[str, RunSummary]) -> None:
     # the converged/MLH split.
     ax.legend(
         handles=[
-            plt.matplotlib.patches.Patch(color="dimgray", label="Converged (correct)"),
-            plt.matplotlib.patches.Patch(
-                color="lightgray", label="MLH only (correct_mlh)"
-            ),
+            plt.matplotlib.patches.Patch(color="dimgray", label="Converged"),
+            plt.matplotlib.patches.Patch(color="lightgray", label="Non-Converged"),
         ],
         fontsize=8,
-        loc="upper right",
+        loc="upper left",
     )
     ax.set_xticks(x, summaries.keys())
     ax.set_ylabel("Accuracy (%)")
@@ -221,6 +219,22 @@ def draw_violin(
     ax.set_title(title, fontweight="bold")
 
 
+def _compositional_last(runs: dict[str, os.PathLike]) -> dict[str, os.PathLike]:
+    """Reorder the runs so ``"Compositional"`` is plotted last (rightmost).
+
+    Args:
+        runs: Run directory per display name, in any order.
+
+    Returns:
+        The same mapping with ``"Compositional"`` moved to the end; other
+        runs keep their relative order.
+    """
+    ordered = {name: path for name, path in runs.items() if name != "Compositional"}
+    if "Compositional" in runs:
+        ordered["Compositional"] = runs["Compositional"]
+    return ordered
+
+
 def create_summary_figure(
     runs: dict[str, os.PathLike],
     learning_module: str = "LM_2",
@@ -228,16 +242,24 @@ def create_summary_figure(
 ) -> Path:
     """Plot the three summary panels for the runs side by side.
 
+    The ``"Compositional"`` run is always plotted rightmost, whatever order
+    ``runs`` lists it in.
+
     Args:
         runs: Run directory per display name (``"Compositional"``,
             ``"Monolithic"``).
         learning_module: The higher-level module the panels describe.
         output: Where to save the figure; defaults to
-            ``DEFAULT_FIGURE_DIR / summary_<first run name>.png``.
+            ``DEFAULT_FIGURE_DIR / summary_<first run name>.png``, where the
+            first run is the first entry of ``runs`` as passed in.
 
     Returns:
         Path to the saved figure.
     """
+    if output is None:
+        first = Path(next(iter(runs.values()))).name
+        output = DEFAULT_FIGURE_DIR / f"summary_{first}.png"
+    runs = _compositional_last(runs)
     summaries = {
         name: summarize_run(path, learning_module) for name, path in runs.items()
     }
@@ -273,9 +295,6 @@ def create_summary_figure(
         fontsize=9,
     )
     fig.tight_layout()
-    if output is None:
-        first = Path(next(iter(runs.values()))).name
-        output = DEFAULT_FIGURE_DIR / f"summary_{first}.png"
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=150, bbox_inches="tight")
