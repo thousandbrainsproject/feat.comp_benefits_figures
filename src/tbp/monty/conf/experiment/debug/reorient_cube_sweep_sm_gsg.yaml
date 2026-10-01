@@ -1,0 +1,21 @@
+# @package _global_
+
+# The no_gsg sweep with the patch SM's face-on re-orientation at the settings
+# the main randrot stickers configs use.
+defaults:
+  - /experiment/debug/reorient_cube_sweep_no_gsg
+
+experiment:
+  config:
+    logging:
+      run_name: reorient_cube_sweep_sm_gsg
+    monty_config:
+      sensor_modules:
+        sensor_module_0:
+          gsg:
+            _target_: tbp.monty.frameworks.models.face_on_reorientation.FaceOnReorientation
+            max_view_angle: 60.0
+            window: 2
+            min_steps_between_goals: 25
+          region_proposers:
+            - _target_: tbp.monty.frameworks.models.sm_region_proposal.excite_goal_locations.ExciteGoalLocations

@@ -48,6 +48,7 @@ def as_dict(grid: VoxelGrid) -> dict[tuple[int, int, int], float]:
     return dict(zip(voxels, data["weight"].to_numpy().tolist()))
 
 
+
 class UnionTest(unittest.TestCase):
     def setUp(self) -> None:
         self.merge = Union()

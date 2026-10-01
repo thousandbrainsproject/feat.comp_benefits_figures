@@ -1,0 +1,21 @@
+# @package _global_
+
+# The no_gsg sweep with face-on re-orientation at the slower settings of the
+# August ablation (lower threshold, longer window, rarer goals).
+defaults:
+  - /experiment/debug/reorient_cube_sweep_no_gsg
+
+experiment:
+  config:
+    logging:
+      run_name: reorient_cube_sweep_sm_gsg_slow
+    monty_config:
+      sensor_modules:
+        sensor_module_0:
+          gsg:
+            _target_: tbp.monty.frameworks.models.face_on_reorientation.FaceOnReorientation
+            max_view_angle: 45.0
+            window: 10
+            min_steps_between_goals: 60
+          region_proposers:
+            - _target_: tbp.monty.frameworks.models.sm_region_proposal.excite_goal_locations.ExciteGoalLocations

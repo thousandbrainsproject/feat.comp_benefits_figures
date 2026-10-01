@@ -1,0 +1,103 @@
+# @package _global_
+
+# Control condition of the face-on re-orientation sweep: two cubes that differ
+# only by their sticker, shown at a sweep of tilts about Y then X, with the
+# patch SM's goal generator off. The *_sm_gsg variants layer the generator on
+# top of this config; everything else is the randrot stickers comp config.
+defaults:
+  - /monty: evidencegraph_exp1000_emin_t3
+  - /monty/motor_system_config: distant_5
+  - /monty/learning_module: evidence_3lm_heterarchy
+  - /monty/sensor_module: 3sm_2d3d_dist_slic
+  - /monty/connectivity: 3lm_3sm_heterarchy
+  - /monty/attention_system: default
+  - /environment: mujoco_dist_agent_sensors3_256
+  - /env_interface: eval_objects_with_stickers_randrot
+  - /env_interface/positioning_procedures_eval: getgoodview_viewfinder_patch0
+  - /env_interface/transform: gaussianblur_missing_depthto3d_sensor4_256
+  - /logging: telemetry_detailed
+
+experiment:
+  _target_: tbp.monty.frameworks.experiments.object_recognition_experiments.MontyObjectRecognitionExperiment
+  config:
+    show_sensor_output: false
+    max_train_steps: 1000
+    max_eval_steps: 100
+    max_total_steps: 500
+    n_train_epochs: 3
+    # One epoch per rotation in the sweep below.
+    n_eval_epochs: 10
+    model_name_or_path: ${path.expanduser:${oc.env:MONTY_MODELS}/my_trained_models/supervised_pre_training_cube_cylinder_comp_models_3lm_mujoco/pretrained/}
+    match_criterion:
+      _target_: tbp.monty.experiment.match_criteria.NamedLMsMatch
+      ids:
+        - learning_module_2
+    seed: 42
+    supervised_lm_ids: []
+    python_log_level: DEBUG
+    eval_env_interface_args:
+      object_names:
+        - 002_cube_tbp
+        - 004_cube_numenta
+      object_init_sampler:
+        _target_: tbp.monty.frameworks.environments.object_init_samplers.Predefined
+        # Tilt the sticker face away from the camera: about Y, then about X.
+        rotations:
+          - [0, 0, 0]
+          - [0, 20, 0]
+          - [0, 40, 0]
+          - [0, 60, 0]
+          - [0, 75, 0]
+          - [20, 0, 0]
+          - [40, 0, 0]
+          - [60, 0, 0]
+          - [75, 0, 0]
+          - [45, 45, 0]
+    logging:
+      run_name: reorient_cube_sweep_no_gsg
+      output_dir: ${path.expanduser:'~/tbp/results/comp_benefits_figures'}
+      exclude:
+        - SM_*/raw_observations/*/sensor_frame_data
+        # The view finder keeps cam_to_world: the reorientation figures
+        # project goals into its frames with it.
+        - SM_[012]/raw_observations/*/cam_to_world
+        # Only the view finder's frames are needed for the visualizations.
+        - SM_[012]/raw_observations/*/rgba
+        - SM_[012]/raw_observations/*/depth
+        - SM_[012]/raw_observations/*/semantic
+        - SM_[012]/raw_observations/*/world_camera
+        - SM_3/raw_observations/*/depth
+        - SM_3/raw_observations/*/semantic
+        - SM_3/raw_observations/*/world_camera
+        - SM_3/salience_maps
+        - SM_3/segmentation_maps
+    monty_config:
+      motor_system_config:
+        telemetry:
+          _target_: tbp.monty.frameworks.models.motor_system_telemetry.NoopMotorSystemTelemetry
+      learning_modules:
+        learning_module_0:
+          gsg: null
+        learning_module_1:
+          gsg: null
+          output_min_evidence: 5.0
+        learning_module_2:
+          region_proposers:
+            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
+          gsg:
+            min_post_goal_success_steps: 20
+      sensor_modules:
+        sensor_module_0:
+          # The gsg telemetry block (view angles, goals) is logged with raw obs.
+          save_raw_obs: true
+          gsg: null
+          region_proposers: []
+        sensor_module_3:
+          # The view finder's frames feed the reorientation visualizations;
+          # its salience and segmentation maps are excluded below.
+          save_raw_obs: true
+          segmentation_strategy:
+            _target_: tbp.monty.frameworks.models.salience.segmentation.strategies.slic_merge.SlicMerge
+      attention_system:
+        telemetry:
+          _target_: tbp.monty.attention.telemetry.NoopAttentionSystemTelemetry
