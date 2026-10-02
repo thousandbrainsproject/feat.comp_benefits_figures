@@ -112,11 +112,14 @@ class FakeParentLM:
     frames they were learned in).
     """
 
-    def __init__(self, memory: dict, top_id: str, second_id: str):
+    def __init__(
+        self, memory: dict, top_id: str, second_id: str, id_names: dict[int, str]
+    ):
         self.memory = memory
         self.top_id = top_id
         self.second_id = second_id
         self.learning_module_id = "demo_lm"
+        self.object_id_feature_names = id_names
         sensor_channels = [
             channel for channel in memory[top_id] if channel.startswith("patch")
         ]
@@ -163,7 +166,7 @@ def run_pair(memory: dict, top_id: str, second_id: str, id_names: dict[int, str]
         min_post_goal_success_steps=5,
         feature_mismatch_distance_threshold=0.02,
     )
-    gsg.parent_lm = FakeParentLM(memory, top_id, second_id)
+    gsg.parent_lm = FakeParentLM(memory, top_id, second_id, id_names)
     gsg.focus_on_pose = False
     ctx = RuntimeContext(rng=np.random.RandomState(0))
 

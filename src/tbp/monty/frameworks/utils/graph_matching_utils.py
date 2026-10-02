@@ -22,6 +22,35 @@ from tbp.monty.geometry import Rotation
 logger = logging.getLogger(__name__)
 
 
+def object_id_to_features(object_id: str) -> int:
+    """Turn an object ID into the "object_id" feature an LM outputs for it.
+
+    Returns:
+        The object ID feature.
+    """
+    # TODO H: Make this based on object similarity
+    # For now just taking sum of character ids in object name
+    return sum(ord(i) for i in object_id)
+
+
+def get_object_id_feature_names(object_ids) -> dict[int, str]:
+    """Map "object_id" feature values back to the object IDs they encode.
+
+    As the encoding is not unique (e.g. anagrams share a feature value), object
+    IDs sharing a feature value are joined with "/".
+
+    Args:
+        object_ids: The object IDs that may be encoded.
+
+    Returns:
+        Dictionary of object ID feature value -> object ID(s).
+    """
+    names: dict[int, set[str]] = {}
+    for object_id in object_ids:
+        names.setdefault(object_id_to_features(object_id), set()).add(object_id)
+    return {feature: "/".join(sorted(ids)) for feature, ids in names.items()}
+
+
 def get_correct_k_n(k_n: int, num_datapoints: int) -> int | None:
     """Determine k_n given the number of datapoints.
 

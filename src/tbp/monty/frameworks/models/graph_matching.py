@@ -32,6 +32,9 @@ from tbp.monty.frameworks.models.buffer import FeatureAtLocationBuffer
 from tbp.monty.frameworks.models.goal_generation import GraphGoalGenerator
 from tbp.monty.frameworks.models.monty_base import MontyBase
 from tbp.monty.frameworks.models.object_model import GraphObjectModel
+from tbp.monty.frameworks.utils.graph_matching_utils import (
+    get_object_id_feature_names,
+)
 from tbp.monty.frameworks.utils.spatial_arithmetics import (
     apply_rf_transform_to_points,
 )
@@ -165,7 +168,31 @@ class MontyForGraphMatching(MontyBase):
 
         return False
 
+    def update_ltm(self) -> None:
+        super().update_ltm()
+        self._share_object_id_feature_names()
+
+    def _share_object_id_feature_names(self) -> None:
+        """Give each LM the names of the objects that object ID features encode.
+
+        LMs receive the objects recognized by other LMs as "object_id" feature
+        values, while the objects' names are only stored in the memory of the LMs
+        that learned them. Sharing a mapping from the former to the latter makes
+        the object ID features interpretable, e.g. for logging.
+        """
+        object_id_feature_names = get_object_id_feature_names(
+            object_id
+            for lm in self.learning_modules
+            for object_id in lm.get_all_known_object_ids()
+        )
+        for lm in self.learning_modules:
+            lm.object_id_feature_names = object_id_feature_names
+
     # ------------------ Logging & Saving ----------------------
+    def load_state_dict(self, memento: Memento) -> None:
+        super().load_state_dict(memento)
+        self._share_object_id_feature_names()
+
     def load_state_dict_from_parallel(self, parallel_dirs, save=False):
         lm_dict = {}
         for pdir in parallel_dirs:
@@ -528,6 +555,9 @@ class GraphLM(LearningModule):
         # and which graphs correspond to each target object
         self.target_to_graph_id = {}
         self.graph_id_to_target = {}
+        # Names of the objects that "object_id" feature values received from other
+        # LMs encode; set by Monty, which has access to the memory of all LMs
+        self.object_id_feature_names: dict[int, str] = {}
         self.primary_target = None
         self.possible_matches = {}
         self.possible_paths = {}
