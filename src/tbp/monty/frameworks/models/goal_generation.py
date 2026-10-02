@@ -826,9 +826,18 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         best_target_loc_id = None
         best_object_ids = None
 
+        top_graph_name, second_graph_name = self._get_graph_id_names(
+            [top_id, second_id]
+        )
+
         for channel in shared_channels:
             top_graph = self.parent_lm.get_graph(top_id, input_channel=channel)
             second_graph = self.parent_lm.get_graph(second_id, input_channel=channel)
+
+            print(
+                f"Comparing object-ID channel {channel} between top and second graphs"
+            )
+            print(f"Top ID: {top_graph_name}, Second ID: {second_graph_name}")
 
             if (
                 "object_id" not in top_graph.feature_mapping
@@ -849,6 +858,16 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 second_graph, "object_id"
             )[nearest_node_ids].flatten()
             too_far = nearest_node_dists > self.parent_lm.max_match_distance
+
+            print(
+                "Unique top object IDs: "
+                f"{self._get_feature_object_id_names(np.unique(top_object_ids))}"
+            )
+            print(
+                "Unique second object IDs: "
+                f"{self._get_feature_object_id_names(np.unique(second_object_ids))}"
+            )
+            print(f"Minimum nearest node distance: {np.min(nearest_node_dists)}")
 
             mismatching_nodes = np.nonzero(
                 (top_object_ids != second_object_ids) | too_far
@@ -882,10 +901,12 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 )
                 best_target_too_far = too_far[best_target_loc_id]
 
+        assert False, "Stop here"
+
         if best_channel is None:
             return None
 
-        top_name, second_name = self._get_object_id_names(best_object_ids)
+        top_name, second_name = self._get_feature_object_id_names(best_object_ids)
         if best_target_too_far:
             second_stores = (
                 f"nothing within max_match_distance (nearest: {second_name})"
@@ -966,7 +987,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         novel_graph = self.parent_lm.get_graph(
             best_graph_id, input_channel=best_channel
         )
-        (novel_name,) = self._get_object_id_names(
+        (novel_name,) = self._get_feature_object_id_names(
             self._get_feature_values(novel_graph, "object_id")[best_target_loc_id]
         )
         hypothesis = "top" if best_graph_id == top_id else "second"
@@ -1010,7 +1031,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             novel_channels.append(channel)
         return novel_channels
 
-    def _get_object_id_names(self, object_id_features) -> list:
+    def _get_feature_object_id_names(self, object_id_features) -> list:
         """Get the names of the objects encoded by "object_id" feature values.
 
         Returns:
@@ -1019,6 +1040,22 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         """
         names = self.parent_lm.object_id_feature_names
         return [names.get(int(feature), int(feature)) for feature in object_id_features]
+
+    def _get_graph_id_names(self, graph_ids) -> list:
+        """Get the names of the objects modeled by the parent LM's graphs.
+
+        As a graph may have been built from several target objects, their names
+        are joined with "/".
+
+        Returns:
+            The name of the object(s) each graph was built from, or the graph ID
+            itself if the parent LM has no record of its target objects.
+        """
+        targets = self.parent_lm.graph_id_to_target
+        return [
+            "/".join(sorted(targets[graph_id])) if graph_id in targets else graph_id
+            for graph_id in graph_ids
+        ]
 
     @staticmethod
     def _closest_to_center(points) -> int:
