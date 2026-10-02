@@ -683,6 +683,13 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             _, second_mlh = self.parent_lm.get_top_two_pose_hypotheses_for_graph_id(
                 top_id
             )
+            print("Focusing on pose mismatch")
+            print(
+                f"Pose of first MLH object: {top_mlh['rotation']}, {top_mlh['location']}"
+            )
+            print(
+                f"Pose of second MLH object: {second_mlh['rotation']}, {second_mlh['location']}"
+            )
 
         else:
             second_mlh = second_mlh_object
@@ -900,8 +907,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                     second_object_ids[best_target_loc_id],
                 )
                 best_target_too_far = too_far[best_target_loc_id]
-
-        assert False, "Stop here"
 
         if best_channel is None:
             return None
@@ -1139,6 +1144,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             f"Hue mismatch found on channel {best_channel} "
             f"(circular hue distance {best_hue_dist:.3f})"
         )
+        assert False, "Stop here"
         return best_channel, best_target_loc_id
 
     def _nearest_second_graph_nodes(self, top_pos, second_graph, top_mlh, second_mlh):
