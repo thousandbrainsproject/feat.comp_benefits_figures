@@ -474,7 +474,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         wait_growth_multiplier=1,
         *,
         feature_mismatch_distance_threshold=0.02,
-        cluster_distance_threshold=0.01,
+        cluster_distance_threshold=0.005,
         min_hue_mismatch=0.1,
         **kwargs,
     ) -> None:
@@ -530,7 +530,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             cluster_distance_threshold: Distance (in meters) used when spatially
                 clustering nodes with mismatching discrete features; any node farther
                 than this from all other members of a cluster is treated as an
-                outlier. Defaults to 0.01 (1cm).
+                outlier. Defaults to 0.005 (0.5cm).
             min_hue_mismatch: Minimum circular distance in hue space (hue is in the
                 range [0, 1]) between two nearest-neighbor nodes for a color-based
                 mismatch to be considered meaningful. Defaults to 0.1.
@@ -804,9 +804,12 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         For every input channel (present in both graphs) that stores an "object_id"
         feature (i.e. input from another LM), compare the object ID stored at each
         node of the top MLH graph to the object ID stored at its nearest neighbor in
-        the second MLH graph. Nodes with differing object IDs are spatially clustered
-        (nodes more than `cluster_distance_threshold` from all other members are
-        outliers), and the largest cluster is retained for each channel.
+        the second MLH graph. A node mismatches if the object IDs differ, or if its
+        nearest neighbor is further than the parent LM's `max_match_distance` away
+        (i.e. the second MLH graph stores no object ID at that location, even if
+        the nearest one it does store is the same). Mismatching nodes are spatially
+        clustered (nodes more than `cluster_distance_threshold` from all other
+        members are outliers), and the largest cluster is retained for each channel.
 
         When several channels contain mismatching nodes, the channel whose largest
         cluster contains the most points wins, as object IDs are discrete (same or
@@ -834,7 +837,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 continue
 
             top_pos = np.asarray(top_graph.pos)
-            nearest_node_ids = self._nearest_second_graph_nodes(
+            nearest_node_ids, nearest_node_dists = self._nearest_second_graph_nodes(
                 top_pos, second_graph, top_mlh, second_mlh
             )
 
@@ -842,8 +845,11 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             second_object_ids = self._get_feature_values(
                 second_graph, "object_id"
             )[nearest_node_ids].flatten()
+            too_far = nearest_node_dists > self.parent_lm.max_match_distance
 
-            mismatching_nodes = np.nonzero(top_object_ids != second_object_ids)[0]
+            mismatching_nodes = np.nonzero(
+                (top_object_ids != second_object_ids) | too_far
+            )[0]
 
             if len(mismatching_nodes) == 0:
                 continue
@@ -862,16 +868,23 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                     top_object_ids[best_target_loc_id],
                     second_object_ids[best_target_loc_id],
                 )
+                best_target_too_far = too_far[best_target_loc_id]
 
         if best_channel is None:
             return None
 
         top_name, second_name = self._get_object_id_names(best_object_ids)
+        if best_target_too_far:
+            second_stores = (
+                f"nothing within max_match_distance (nearest: {second_name})"
+            )
+        else:
+            second_stores = second_name
         logger.debug(
             f"Object-ID mismatch found on channel {best_channel} "
             f"(cluster of {best_cluster_size} nodes); at the target, the top "
             f"hypothesis stores {top_name} and the second hypothesis stores "
-            f"{second_name}"
+            f"{second_stores}"
         )
         return best_channel, best_target_loc_id
 
@@ -1044,7 +1057,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 continue
 
             top_pos = np.asarray(top_graph.pos)
-            nearest_node_ids = self._nearest_second_graph_nodes(
+            nearest_node_ids, _ = self._nearest_second_graph_nodes(
                 top_pos, second_graph, top_mlh, second_mlh
             )
 
@@ -1087,16 +1100,23 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         for each point's single nearest neighbor.
 
         Returns:
-            Array of node indices into the second graph, one per top-graph point.
+            Tuple of (node indices into the second graph, distances to those
+            nodes), each with one entry per top-graph point.
         """
         transformed_pos = self._transform_to_second_mlh_rf(
             top_pos, top_mlh, second_mlh
         )
-        return second_graph.find_nearest_neighbors(
+        nearest_node_ids = second_graph.find_nearest_neighbors(
             transformed_pos,
             num_neighbors=1,
             return_distance=False,
         )
+        distances = second_graph.find_nearest_neighbors(
+            transformed_pos,
+            num_neighbors=1,
+            return_distance=True,
+        )
+        return nearest_node_ids, distances
 
     def _largest_spatial_cluster(self, points):
         """Find the largest spatially-contiguous cluster among points.

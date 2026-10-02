@@ -99,6 +99,7 @@ def gsg_with_graphs(graphs, **gsg_kwargs) -> EvidenceGoalGenerator:
     lm = MagicMock()
     lm.learning_module_id = "learning_module_2"
     lm.object_id_feature_names = {}
+    lm.max_match_distance = 0.01
     lm.buffer.get_first_sensory_input_channel.return_value = SENSOR_CHANNEL
     lm.get_top_two_mlh_ids.return_value = (TOP_ID, SECOND_ID)
     lm.get_mlh_for_object.side_effect = identity_mlh
@@ -277,6 +278,35 @@ class DiscreteFeaturePathTest(unittest.TestCase):
         gsg = gsg_with_graphs(graphs)
 
         self.assertIsNone(gsg._compute_graph_mismatch(make_ctx()))
+
+    def test_matching_object_ids_beyond_max_match_distance_mismatch(self) -> None:
+        # The second graph stores the same object ID, but only 2cm away from the
+        # top graph's three nodes, i.e. beyond max_match_distance (1cm).
+        top_lm = FakeGraph(
+            np.array([[0.0, 0.0, 0.0], [0.004, 0.0, 0.0], [0.008, 0.0, 0.0]]),
+            {"object_id": np.array([1, 1, 1])},
+        )
+        second_lm = FakeGraph(
+            np.array([[0.004, 0.02, 0.0]]), {"object_id": np.array([1])}
+        )
+        graphs = {
+            TOP_ID: {SENSOR_CHANNEL: sensor_graph(), "learning_module_0": top_lm},
+            SECOND_ID: {
+                SENSOR_CHANNEL: sensor_graph(),
+                "learning_module_0": second_lm,
+            },
+        }
+        gsg = gsg_with_graphs(graphs)
+
+        channel, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
+        self.assertEqual(channel, "learning_module_0")
+        self.assertEqual(target_loc_id, 1, "Middle of the three-node cluster.")
+
+        gsg.parent_lm.max_match_distance = 0.03
+        self.assertIsNone(
+            gsg._compute_graph_mismatch(make_ctx()),
+            "Within max_match_distance, matching object IDs are not a mismatch.",
+        )
 
 
 # A contiguous "logo" of LM-channel nodes around BASE_POINTS[2], plus a far-away
@@ -458,6 +488,30 @@ class ObjectIdLoggingTest(unittest.TestCase):
             gsg,
             "the top hypothesis stores tbp_logo and the second hypothesis stores "
             "numenta_logo",
+        )
+
+    def test_mismatch_beyond_max_match_distance_logs_nearest_object_id(self) -> None:
+        graphs = {
+            TOP_ID: {
+                SENSOR_CHANNEL: sensor_graph(),
+                "learning_module_0": FakeGraph(
+                    np.array([[0.0, 0.0, 0.0]]), {"object_id": [1]}
+                ),
+            },
+            SECOND_ID: {
+                SENSOR_CHANNEL: sensor_graph(),
+                "learning_module_0": FakeGraph(
+                    np.array([[0.0, 0.02, 0.0]]), {"object_id": [1]}
+                ),
+            },
+        }
+        gsg = gsg_with_graphs(graphs)
+        gsg.parent_lm.object_id_feature_names = {1: "mug"}
+
+        self.assert_logged(
+            gsg,
+            "the top hypothesis stores mug and the second hypothesis stores "
+            "nothing within max_match_distance (nearest: mug)",
         )
 
     def test_novel_channel_mismatch_logs_name_of_novel_object_id(self) -> None:

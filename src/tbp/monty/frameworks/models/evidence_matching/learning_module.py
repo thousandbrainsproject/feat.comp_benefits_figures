@@ -1527,10 +1527,16 @@ class EvidenceGraphLM(GraphLM):
         if not mlh:  # No objects in memory
             mlh = self.current_mlh
             mlh["graph_id"] = "new_object0"
-        logger.info(
-            f"current most likely hypothesis: {mlh['graph_id']} "
-            f"with evidence {np.round(mlh['evidence'], 2)}"
-        )
+        if graph_id is not None:
+            logger.info(
+                f"current most likely hypothesis for provided graph_id: {graph_id} "
+                f"has evidence {np.round(mlh['evidence'], 2)}"
+            )
+        else:
+            logger.info(
+                f"overall most likely hypothesis: {mlh['graph_id']} "
+                f"with evidence {np.round(mlh['evidence'], 2)}"
+            )
         return mlh
 
     def _get_node_distance_weights(self, distances):
