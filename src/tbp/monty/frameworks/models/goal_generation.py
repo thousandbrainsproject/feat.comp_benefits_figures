@@ -467,11 +467,11 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     def __init__(
         self,
         goal_tolerances=None,
-        elapsed_steps_factor=10,
+        elapsed_steps_factor=5,
         min_post_goal_success_steps=np.inf,
         x_percent_scale_factor=0.75,
         desired_object_distance=0.03,
-        wait_growth_multiplier=2,
+        wait_growth_multiplier=1,
         *,
         feature_mismatch_distance_threshold=0.02,
         cluster_distance_threshold=0.01,
@@ -617,10 +617,13 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         nearest-neighbor separation between the two point clouds is below
         `feature_mismatch_distance_threshold`), Euclidean distance is not a useful
         discriminator. In that case, we instead compare the features stored at the
-        graphs' nodes, considering the input channels present in both graphs:
-        - Discrete features: object IDs provided by input from other LMs; these are
-          prioritized over continuous features when present.
-        - Continuous features: hue (from HSV) provided by input from sensor modules.
+        graphs' nodes, in the following order of priority:
+        - Discrete features: object IDs provided by input from other LMs, on the
+          input channels present in both graphs.
+        - Novel channels: input channels storing object IDs in only one of the two
+          graphs (e.g. a logo present on one object but absent from the other).
+        - Continuous features: hue (from HSV) provided by input from sensor modules,
+          on the input channels present in both graphs.
 
         --- Some Details ---
         Part of this method transforms the graph of the most likely object into
@@ -714,13 +717,13 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
 
         self.prev_top_mlhs = [top_mlh, second_mlh_object]
 
-        if (
-            radius_node_dists[target_loc_id]
-            >= self.feature_mismatch_distance_threshold
-        ):
-            # The graphs are sufficiently different spatially, so the most separated
-            # point is an informative location to test
-            return sensor_channel_name, target_loc_id
+        # if (
+        #     radius_node_dists[target_loc_id]
+        #     >= self.feature_mismatch_distance_threshold
+        # ):
+        #     # The graphs are sufficiently different spatially, so the most separated
+        #     # point is an informative location to test
+        #     return sensor_channel_name, target_loc_id
 
         # The point clouds are near-identical in shape; fall back to comparing the
         # features stored at the graphs' nodes, over the channels present in both
@@ -743,6 +746,15 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         )
         if discrete_mismatch is not None:
             return discrete_mismatch
+
+        novel_channel_mismatch = self._compute_novel_channel_mismatch(
+            top_id=top_id,
+            second_id=second_id,
+            top_mlh=top_mlh,
+            second_mlh=second_mlh,
+        )
+        if novel_channel_mismatch is not None:
+            return novel_channel_mismatch
 
         return self._compute_continuous_feature_mismatch(
             ctx,
@@ -809,6 +821,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         best_channel = None
         best_cluster_size = 0
         best_target_loc_id = None
+        best_object_ids = None
 
         for channel in shared_channels:
             top_graph = self.parent_lm.get_graph(top_id, input_channel=channel)
@@ -825,13 +838,12 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 top_pos, second_graph, top_mlh, second_mlh
             )
 
-            top_object_ids = self._get_feature_values(top_graph, "object_id")
-            second_object_ids = self._get_feature_values(second_graph, "object_id")
+            top_object_ids = self._get_feature_values(top_graph, "object_id").flatten()
+            second_object_ids = self._get_feature_values(
+                second_graph, "object_id"
+            )[nearest_node_ids].flatten()
 
-            mismatching_nodes = np.nonzero(
-                top_object_ids.flatten()
-                != second_object_ids[nearest_node_ids].flatten()
-            )[0]
+            mismatching_nodes = np.nonzero(top_object_ids != second_object_ids)[0]
 
             if len(mismatching_nodes) == 0:
                 continue
@@ -842,26 +854,158 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             cluster_node_ids = mismatching_nodes[cluster_members]
 
             if len(cluster_node_ids) > best_cluster_size:
-                # Use the learned point closest to the cluster's geometric mean as
-                # the target, i.e. an actual model point approximately at the center
-                # of the cluster
-                cluster_positions = top_pos[cluster_node_ids]
-                cluster_center = cluster_positions.mean(axis=0)
-                closest_member = np.argmin(
-                    np.linalg.norm(cluster_positions - cluster_center, axis=1)
-                )
+                closest_member = self._closest_to_center(top_pos[cluster_node_ids])
                 best_channel = channel
                 best_cluster_size = len(cluster_node_ids)
                 best_target_loc_id = cluster_node_ids[closest_member]
+                best_object_ids = (
+                    top_object_ids[best_target_loc_id],
+                    second_object_ids[best_target_loc_id],
+                )
 
         if best_channel is None:
             return None
 
+        top_name, second_name = self._get_object_id_names(best_object_ids)
         logger.debug(
             f"Object-ID mismatch found on channel {best_channel} "
-            f"(cluster of {best_cluster_size} nodes)"
+            f"(cluster of {best_cluster_size} nodes); at the target, the top "
+            f"hypothesis stores {top_name} and the second hypothesis stores "
+            f"{second_name}"
         )
         return best_channel, best_target_loc_id
+
+    def _compute_novel_channel_mismatch(
+        self, *, top_id, second_id, top_mlh, second_mlh
+    ):
+        """Find a target location on an input channel present in only one graph.
+
+        A channel is novel to a graph if that graph stores "object_id" features for
+        it (i.e. input from another LM), while the other graph either has no data
+        stored for the channel, or stores it without object IDs. For example, if one
+        candidate mug has a logo (a child object recognized by another LM) and the
+        other candidate mug has no logo, the logo's input channel is only present
+        in the graph of the former, so there are no nearest-neighbor object IDs to
+        compare against. Instead, all nodes of each novel channel are spatially
+        clustered (as in `_compute_discrete_feature_mismatch`), and the channel
+        whose largest cluster contains the most points wins, regardless of which
+        of the two graphs it belongs to.
+
+        If the winning channel belongs to the top MLH graph, the target is the node
+        of the cluster closest to the cluster's center. If it belongs to the second
+        MLH graph, the cluster is first transformed into the reference frame of the
+        top MLH graph (in which Goals are computed), and the target is the node of
+        the top MLH graph's sensory channel nearest to the cluster's center, i.e.
+        a learned surface point (with a surface normal) where the top MLH graph
+        predicts the novel child object would be, if the second MLH were correct.
+
+        Returns:
+            A tuple of (input_channel, target_loc_id), where target_loc_id is a node
+            in the top MLH graph of the given input channel, or None if neither
+            graph has a novel channel.
+        """
+        candidates = [
+            (top_id, channel)
+            for channel in self._get_novel_object_id_channels(top_id, second_id)
+        ] + [
+            (second_id, channel)
+            for channel in self._get_novel_object_id_channels(second_id, top_id)
+        ]
+
+        best_graph_id = None
+        best_channel = None
+        best_cluster_size = 0
+        best_target_loc_id = None
+        best_target_pos = None
+
+        for graph_id, channel in candidates:
+            pos = np.asarray(
+                self.parent_lm.get_graph(graph_id, input_channel=channel).pos
+            )
+            if graph_id != top_id:
+                pos = self._transform_to_second_mlh_rf(pos, second_mlh, top_mlh)
+
+            cluster_node_ids = self._largest_spatial_cluster(pos)
+
+            if len(cluster_node_ids) > best_cluster_size:
+                closest_member = self._closest_to_center(pos[cluster_node_ids])
+                best_graph_id = graph_id
+                best_channel = channel
+                best_cluster_size = len(cluster_node_ids)
+                best_target_loc_id = cluster_node_ids[closest_member]
+                best_target_pos = pos[best_target_loc_id]
+
+        if best_channel is None:
+            return None
+
+        novel_graph = self.parent_lm.get_graph(
+            best_graph_id, input_channel=best_channel
+        )
+        (novel_name,) = self._get_object_id_names(
+            self._get_feature_values(novel_graph, "object_id")[best_target_loc_id]
+        )
+        hypothesis = "top" if best_graph_id == top_id else "second"
+        logger.debug(
+            f"Novel channel {best_channel} found in graph of {best_graph_id} "
+            f"(cluster of {best_cluster_size} nodes); at the target, only the "
+            f"{hypothesis} hypothesis stores {novel_name}"
+        )
+
+        if best_graph_id == top_id:
+            return best_channel, best_target_loc_id
+
+        sensor_channel_name = self.parent_lm.buffer.get_first_sensory_input_channel()
+        sensor_graph = self.parent_lm.get_graph(
+            top_id, input_channel=sensor_channel_name
+        )
+        nearest_sensor_node = sensor_graph.find_nearest_neighbors(
+            np.atleast_2d(best_target_pos),
+            num_neighbors=1,
+            return_distance=False,
+        )[0]
+        return sensor_channel_name, nearest_sensor_node
+
+    def _get_novel_object_id_channels(self, graph_id, other_id):
+        """Get channels storing object IDs in one graph, but not in the other.
+
+        Returns:
+            The input channels of graph_id that store "object_id" features, and
+            for which other_id either has no data stored, or stores no object IDs.
+        """
+        other_channels = self.parent_lm.get_input_channels_in_graph(other_id)
+        novel_channels = []
+        for channel in self.parent_lm.get_input_channels_in_graph(graph_id):
+            graph = self.parent_lm.get_graph(graph_id, input_channel=channel)
+            if "object_id" not in graph.feature_mapping:
+                continue
+            if channel in other_channels:
+                other_graph = self.parent_lm.get_graph(other_id, input_channel=channel)
+                if "object_id" in other_graph.feature_mapping:
+                    continue
+            novel_channels.append(channel)
+        return novel_channels
+
+    def _get_object_id_names(self, object_id_features) -> list:
+        """Get the names of the objects encoded by "object_id" feature values.
+
+        Returns:
+            The name of each object, or the feature value itself if its name is
+            not known to the parent LM.
+        """
+        names = self.parent_lm.object_id_feature_names
+        return [names.get(int(feature), int(feature)) for feature in object_id_features]
+
+    @staticmethod
+    def _closest_to_center(points) -> int:
+        """Find the point closest to the geometric mean of a set of points.
+
+        Used to select an actual learned model point approximately at the center
+        of a cluster.
+
+        Returns:
+            Index (into `points`) of the point closest to their geometric mean.
+        """
+        return int(np.argmin(np.linalg.norm(points - points.mean(axis=0), axis=1)))
 
     def _compute_continuous_feature_mismatch(
         self,

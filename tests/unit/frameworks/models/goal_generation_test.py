@@ -10,8 +10,8 @@
 
 The spatial (Euclidean) mismatch path is additionally covered end-to-end in
 tests/unit/frameworks/models/evidence_matching/evidence_lm_test.py; the tests here
-use mock graphs to exercise the discrete (object ID) and continuous (hue) feature
-paths that are used when two graphs are spatially near-identical.
+use mock graphs to exercise the discrete (object ID), novel channel, and continuous
+(hue) feature paths that are used when two graphs are spatially near-identical.
 """
 from __future__ import annotations
 
@@ -98,6 +98,7 @@ def gsg_with_graphs(graphs, **gsg_kwargs) -> EvidenceGoalGenerator:
     """
     lm = MagicMock()
     lm.learning_module_id = "learning_module_2"
+    lm.object_id_feature_names = {}
     lm.buffer.get_first_sensory_input_channel.return_value = SENSOR_CHANNEL
     lm.get_top_two_mlh_ids.return_value = (TOP_ID, SECOND_ID)
     lm.get_mlh_for_object.side_effect = identity_mlh
@@ -276,6 +277,210 @@ class DiscreteFeaturePathTest(unittest.TestCase):
         gsg = gsg_with_graphs(graphs)
 
         self.assertIsNone(gsg._compute_graph_mismatch(make_ctx()))
+
+
+# A contiguous "logo" of LM-channel nodes around BASE_POINTS[2], plus a far-away
+# outlier node that should be excluded from the cluster.
+LOGO_POSITIONS = np.array(
+    [
+        [0.046, 0.05, 0.0],
+        [0.05, 0.05, 0.0],
+        [0.054, 0.05, 0.0],
+        [0.0, 0.0, 0.0],  # outlier, >1cm from the cluster
+    ]
+)
+
+
+def logo_graph(positions=LOGO_POSITIONS):
+    """An LM-channel graph storing object IDs at the given positions.
+
+    Returns:
+        The graph.
+    """
+    return FakeGraph(positions, {"object_id": np.ones(len(positions))})
+
+
+class NovelChannelPathTest(unittest.TestCase):
+    def test_channel_only_in_top_graph_targets_center_of_its_cluster(self) -> None:
+        graphs = {
+            TOP_ID: {SENSOR_CHANNEL: sensor_graph(), "learning_module_1": logo_graph()},
+            SECOND_ID: {SENSOR_CHANNEL: sensor_graph()},
+        }
+        gsg = gsg_with_graphs(graphs)
+
+        channel, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
+
+        self.assertEqual(channel, "learning_module_1")
+        self.assertEqual(target_loc_id, 1, "Middle of the logo cluster.")
+
+    def test_channel_only_in_second_graph_targets_top_graph_sensor_node(
+        self,
+    ) -> None:
+        # The second MLH has a different pose to the top MLH, so its graph is
+        # stored in a different frame; the logo should be mapped back into the
+        # top MLH graph's frame, landing on the top graph's sensor node 2.
+        second_rotation = Rotation.from_euler("z", 90, degrees=True)
+        second_location = np.array([0.1, 0.0, 0.0])
+
+        def mlh_for_object(graph_id):
+            mlh = identity_mlh(graph_id)
+            if graph_id == SECOND_ID:
+                mlh["rotation"] = second_rotation
+                mlh["location"] = second_location
+            return mlh
+
+        def to_second_frame(points):
+            return second_rotation.apply(points) + second_location
+
+        graphs = {
+            TOP_ID: {SENSOR_CHANNEL: sensor_graph()},
+            SECOND_ID: {
+                SENSOR_CHANNEL: FakeGraph(to_second_frame(BASE_POINTS)),
+                "learning_module_1": logo_graph(to_second_frame(LOGO_POSITIONS)),
+            },
+        }
+        gsg = gsg_with_graphs(graphs)
+        gsg.parent_lm.get_mlh_for_object.side_effect = mlh_for_object
+
+        channel, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
+
+        self.assertEqual(
+            channel,
+            SENSOR_CHANNEL,
+            "Targets must index the top MLH graph, which has no logo channel.",
+        )
+        self.assertEqual(target_loc_id, 2)
+
+    def test_channel_without_object_ids_in_other_graph_is_novel(self) -> None:
+        graphs = {
+            TOP_ID: {SENSOR_CHANNEL: sensor_graph(), "learning_module_1": logo_graph()},
+            SECOND_ID: {
+                SENSOR_CHANNEL: sensor_graph(),
+                "learning_module_1": FakeGraph(LOGO_POSITIONS),
+            },
+        }
+        gsg = gsg_with_graphs(graphs)
+
+        channel, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
+
+        self.assertEqual(channel, "learning_module_1")
+        self.assertEqual(target_loc_id, 1)
+
+    def test_larger_novel_cluster_wins_across_graphs(self) -> None:
+        # The top graph's novel cluster has two nodes, the second graph's has
+        # three (around BASE_POINTS[3]), so the latter should be targeted.
+        graphs = {
+            TOP_ID: {
+                SENSOR_CHANNEL: sensor_graph(),
+                "learning_module_0": logo_graph(
+                    np.array([[0.05, 0.0, 0.0], [0.054, 0.0, 0.0]])
+                ),
+            },
+            SECOND_ID: {
+                SENSOR_CHANNEL: sensor_graph(),
+                "learning_module_1": logo_graph(
+                    np.array(
+                        [[-0.004, 0.05, 0.0], [0.0, 0.05, 0.0], [0.004, 0.05, 0.0]]
+                    )
+                ),
+            },
+        }
+        gsg = gsg_with_graphs(graphs)
+
+        channel, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
+
+        self.assertEqual(channel, SENSOR_CHANNEL)
+        self.assertEqual(target_loc_id, 3)
+
+    def test_shared_object_id_mismatch_prioritized_over_novel_channel(self) -> None:
+        shared_positions = np.array([[0.0, 0.0, 0.0]])
+        graphs = {
+            TOP_ID: {
+                SENSOR_CHANNEL: sensor_graph(),
+                "learning_module_0": FakeGraph(
+                    shared_positions, {"object_id": np.array([1])}
+                ),
+                "learning_module_1": logo_graph(),
+            },
+            SECOND_ID: {
+                SENSOR_CHANNEL: sensor_graph(),
+                "learning_module_0": FakeGraph(
+                    shared_positions, {"object_id": np.array([2])}
+                ),
+            },
+        }
+        gsg = gsg_with_graphs(graphs)
+
+        channel, _ = gsg._compute_graph_mismatch(make_ctx())
+
+        self.assertEqual(channel, "learning_module_0")
+
+    def test_novel_channel_prioritized_over_hue_mismatch(self) -> None:
+        graphs = {
+            TOP_ID: {
+                SENSOR_CHANNEL: sensor_graph(hues=np.array([0.0, 0.5, 0.0, 0.0])),
+                "learning_module_1": logo_graph(),
+            },
+            SECOND_ID: {SENSOR_CHANNEL: sensor_graph(hues=np.zeros(4))},
+        }
+        gsg = gsg_with_graphs(graphs)
+
+        channel, _ = gsg._compute_graph_mismatch(make_ctx())
+
+        self.assertEqual(channel, "learning_module_1")
+
+
+class ObjectIdLoggingTest(unittest.TestCase):
+    def assert_logged(self, gsg, expected_message) -> None:
+        with self.assertLogs(
+            "tbp.monty.frameworks.models.goal_generation", level="DEBUG"
+        ) as logs:
+            gsg._compute_graph_mismatch(make_ctx())
+
+        self.assertIn(expected_message, "\n".join(logs.output))
+
+    def test_shared_channel_mismatch_logs_names_of_compared_object_ids(self) -> None:
+        positions = np.array([[0.0, 0.0, 0.0]])
+        graphs = {
+            TOP_ID: {
+                SENSOR_CHANNEL: sensor_graph(),
+                "learning_module_1": FakeGraph(positions, {"object_id": [1]}),
+            },
+            SECOND_ID: {
+                SENSOR_CHANNEL: sensor_graph(),
+                "learning_module_1": FakeGraph(positions, {"object_id": [2]}),
+            },
+        }
+        gsg = gsg_with_graphs(graphs)
+        gsg.parent_lm.object_id_feature_names = {1: "tbp_logo", 2: "numenta_logo"}
+
+        self.assert_logged(
+            gsg,
+            "the top hypothesis stores tbp_logo and the second hypothesis stores "
+            "numenta_logo",
+        )
+
+    def test_novel_channel_mismatch_logs_name_of_novel_object_id(self) -> None:
+        graphs = {
+            TOP_ID: {SENSOR_CHANNEL: sensor_graph()},
+            SECOND_ID: {
+                SENSOR_CHANNEL: sensor_graph(),
+                "learning_module_1": logo_graph(),
+            },
+        }
+        gsg = gsg_with_graphs(graphs)
+        gsg.parent_lm.object_id_feature_names = {1: "numenta_logo"}
+
+        self.assert_logged(gsg, "only the second hypothesis stores numenta_logo")
+
+    def test_unknown_object_ids_are_logged_as_feature_values(self) -> None:
+        graphs = {
+            TOP_ID: {SENSOR_CHANNEL: sensor_graph(), "learning_module_1": logo_graph()},
+            SECOND_ID: {SENSOR_CHANNEL: sensor_graph()},
+        }
+        gsg = gsg_with_graphs(graphs)
+
+        self.assert_logged(gsg, "only the top hypothesis stores 1")
 
 
 class ContinuousFeaturePathTest(unittest.TestCase):
