@@ -476,6 +476,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         feature_mismatch_distance_threshold=0.02,
         cluster_distance_threshold=0.005,
         min_hue_mismatch=0.1,
+        min_hue_saturation=0.1,
+        min_hue_value=0.1,
         **kwargs,
     ) -> None:
         """Initialize the Evidence GSG.
@@ -534,6 +536,14 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             min_hue_mismatch: Minimum circular distance in hue space (hue is in the
                 range [0, 1]) between two nearest-neighbor nodes for a color-based
                 mismatch to be considered meaningful. Defaults to 0.1.
+            min_hue_saturation: Minimum HSV saturation (in the range [0, 1]) both
+                nodes of a nearest-neighbor pair must have for their hues to be
+                compared. Hue is undefined for achromatic (grey, white, or black)
+                colors, so it varies arbitrarily between neighboring achromatic
+                nodes. Defaults to 0.1.
+            min_hue_value: Minimum HSV value (in the range [0, 1]) both nodes of a
+                nearest-neighbor pair must have for their hues to be compared, as hue
+                is similarly unreliable for near-black colors. Defaults to 0.1.
             **kwargs: Additional keyword arguments.
         """
         super().__init__(goal_tolerances, **kwargs)
@@ -546,6 +556,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         self.feature_mismatch_distance_threshold = feature_mismatch_distance_threshold
         self.cluster_distance_threshold = cluster_distance_threshold
         self.min_hue_mismatch = min_hue_mismatch
+        self.min_hue_saturation = min_hue_saturation
+        self.min_hue_value = min_hue_value
 
     # ======================= Public ==========================
 
@@ -1089,8 +1101,11 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         For every input channel (present in both graphs) that stores an "hsv"
         feature (i.e. input from a sensor module), compute the circular distance in
         hue space between each node of the top MLH graph and its nearest neighbor in
-        the second MLH graph. The target is the node with the maximally different
-        hue; in the event of a tie, one of the tied nodes is chosen at random.
+        the second MLH graph. Pairs in which either node is achromatic (saturation
+        below `min_hue_saturation`, or value below `min_hue_value`) are ignored, as
+        their hue is meaningless. The target is the node with the maximally
+        different hue; in the event of a tie, one of the tied nodes is chosen at
+        random.
 
         Returns:
             A tuple of (input_channel, target_loc_id), or None if no channel has a
@@ -1115,15 +1130,22 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 top_pos, second_graph, top_mlh, second_mlh
             )
 
-            # Hue is the first dimension of the HSV feature
-            top_hues = self._get_feature_values(top_graph, "hsv")[:, 0]
-            second_hues = self._get_feature_values(second_graph, "hsv")[
-                nearest_node_ids, 0
+            top_hsv = self._get_feature_values(top_graph, "hsv")
+            second_hsv = self._get_feature_values(second_graph, "hsv")[
+                nearest_node_ids
             ]
 
             # Circular distance in hue space (hue lives on a circle in [0, 1])
-            abs_diff = np.abs(top_hues - second_hues)
+            abs_diff = np.abs(top_hsv[:, 0] - second_hsv[:, 0])
             hue_dists = np.minimum(abs_diff, 1.0 - abs_diff)
+
+            chromatic = (
+                (top_hsv[:, 1] >= self.min_hue_saturation)
+                & (second_hsv[:, 1] >= self.min_hue_saturation)
+                & (top_hsv[:, 2] >= self.min_hue_value)
+                & (second_hsv[:, 2] >= self.min_hue_value)
+            )
+            hue_dists[~chromatic] = 0.0
 
             max_hue_dist = hue_dists.max()
             if max_hue_dist <= best_hue_dist:

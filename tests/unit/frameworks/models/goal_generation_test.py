@@ -133,8 +133,10 @@ BASE_POINTS = np.array(
 )
 
 
-def sensor_graph(hues=None):
+def sensor_graph(hues=None, saturations=None, values=None):
     """A sensor-channel graph over BASE_POINTS, optionally with HSV features.
+
+    Saturations and values default to 1 (fully chromatic) when hues are given.
 
     Returns:
         The graph.
@@ -142,7 +144,15 @@ def sensor_graph(hues=None):
     features = None
     if hues is not None:
         ones = np.ones_like(hues)
-        features = {"hsv": np.column_stack([hues, ones, ones])}
+        features = {
+            "hsv": np.column_stack(
+                [
+                    hues,
+                    ones if saturations is None else saturations,
+                    ones if values is None else values,
+                ]
+            )
+        }
     return FakeGraph(BASE_POINTS, features)
 
 
@@ -577,6 +587,46 @@ class ContinuousFeaturePathTest(unittest.TestCase):
         gsg = gsg_with_graphs(graphs, min_hue_mismatch=0.1)
 
         self.assertIsNone(gsg._compute_graph_mismatch(make_ctx()))
+
+    def test_no_goal_when_hue_mismatch_is_between_achromatic_nodes(self) -> None:
+        # Node 0 has a large hue difference, but is near-grey in the top graph
+        # (low saturation) and near-black in the second graph (low value).
+        top_hues = np.array([0.7, 0.0, 0.0, 0.0])
+        second_hues = np.array([0.0, 0.0, 0.0, 0.0])
+        graphs = {
+            TOP_ID: {
+                SENSOR_CHANNEL: sensor_graph(
+                    hues=top_hues, saturations=np.array([0.02, 1.0, 1.0, 1.0])
+                )
+            },
+            SECOND_ID: {
+                SENSOR_CHANNEL: sensor_graph(
+                    hues=second_hues, values=np.array([0.01, 1.0, 1.0, 1.0])
+                )
+            },
+        }
+        gsg = gsg_with_graphs(graphs, min_hue_saturation=0.1, min_hue_value=0.1)
+
+        self.assertIsNone(gsg._compute_graph_mismatch(make_ctx()))
+
+    def test_chromatic_hue_mismatch_wins_over_larger_achromatic_one(self) -> None:
+        # Node 0's hue difference (0.4) is largest but its top node is grey;
+        # node 2's smaller difference (0.2) is between chromatic nodes.
+        top_hues = np.array([0.5, 0.0, 0.3, 0.0])
+        second_hues = np.array([0.9, 0.0, 0.1, 0.0])
+        graphs = {
+            TOP_ID: {
+                SENSOR_CHANNEL: sensor_graph(
+                    hues=top_hues, saturations=np.array([0.02, 1.0, 1.0, 1.0])
+                )
+            },
+            SECOND_ID: {SENSOR_CHANNEL: sensor_graph(hues=second_hues)},
+        }
+        gsg = gsg_with_graphs(graphs, min_hue_saturation=0.1)
+
+        _, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
+
+        self.assertEqual(target_loc_id, 2)
 
     def test_no_goal_when_no_valid_feature_channels(self) -> None:
         graphs = {
