@@ -834,6 +834,9 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 "object_id" not in top_graph.feature_mapping
                 or "object_id" not in second_graph.feature_mapping
             ):
+                logger.debug(
+                    f"Object-ID channel {channel} not present in both graphs; skipping"
+                )
                 continue
 
             top_pos = np.asarray(top_graph.pos)
@@ -852,6 +855,15 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             )[0]
 
             if len(mismatching_nodes) == 0:
+                logger.debug(
+                    f"No mismatching nodes found on channel {channel}; skipping"
+                )
+                if np.nonzero(too_far) == 0:
+                    logger.debug(
+                        f"No nodes within max_match_distance found on channel {channel}"
+                    )
+                if np.nonzero(top_object_ids != second_object_ids) == 0:
+                    logger.debug(f"No object-ID mismatch found on channel {channel}")
                 continue
 
             cluster_members = self._largest_spatial_cluster(
