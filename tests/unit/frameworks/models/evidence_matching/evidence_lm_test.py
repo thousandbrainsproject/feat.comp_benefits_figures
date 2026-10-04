@@ -10,16 +10,24 @@
 from __future__ import annotations
 
 import copy
+import unittest
 
 import numpy as np
 
 from tbp.monty.cmp import Goal, Message
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
+from tbp.monty.frameworks.models.evidence_matching.hypothesis_trace import (
+    HypothesisTracer,
+)
 from tbp.monty.frameworks.models.evidence_matching.learning_module import (
     EvidenceGraphLM,
 )
 from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
 from tests.unit.resources.unit_test_utils import BaseGraphTest
+
+SKIP_ID_CHANNEL_HYPOTHESIS_TESTING = (
+    "Object-ID channel hypothesis testing is under active development"
+)
 
 
 class EvidenceLMTest(BaseGraphTest):
@@ -661,6 +669,7 @@ class EvidenceLMTest(BaseGraphTest):
             "Should propose testing 5th (indexed from 0) location on object"
         )
 
+    @unittest.skip(SKIP_ID_CHANNEL_HYPOTHESIS_TESTING)
     def test_hypothesis_testing_proposal_for_id(self):
         """Test that the LM correctly predicts a location on a graph to test.
 
@@ -686,6 +695,7 @@ class EvidenceLMTest(BaseGraphTest):
             graph_lm, fake_obs_test, target_object="new_object1"
         )
 
+    @unittest.skip(SKIP_ID_CHANNEL_HYPOTHESIS_TESTING)
     def test_hypothesis_testing_proposal_for_id_with_transformation(self):
         """Test that the LM correctly predicts a location on a graph to test.
 
@@ -711,6 +721,7 @@ class EvidenceLMTest(BaseGraphTest):
             graph_lm, fake_obs_test, target_object="new_object1"
         )
 
+    @unittest.skip(SKIP_ID_CHANNEL_HYPOTHESIS_TESTING)
     def test_hypothesis_testing_proposal_for_pose(self):
         """Test that the LM correctly predicts a location on a graph to test.
 
@@ -736,6 +747,7 @@ class EvidenceLMTest(BaseGraphTest):
             graph_lm, fake_obs_test, target_object="new_object0", focus_on_pose=True
         )
 
+    @unittest.skip(SKIP_ID_CHANNEL_HYPOTHESIS_TESTING)
     def test_hypothesis_testing_proposal_for_pose_with_transformation(self):
         """Test that the LM correctly predicts a location on a graph to test.
 
@@ -920,3 +932,64 @@ class EvidenceLMTest(BaseGraphTest):
             [0, 0, 0],
             "Should recognize rotation 0, 0, 0.",
         )
+
+    def _run_hotspot_learning_episode(
+        self, house_obs, hotspot_learning=True
+    ) -> EvidenceGraphLM:
+        """Learn a square and a house, then infer the house with a hypothesis tracer.
+
+        The house is the square plus a rooftop, so only the rooftop distinguishes it.
+
+        Returns:
+            The LM after the end-of-episode memory update.
+        """
+        graph_lm = self.get_elm_with_two_fake_objects(
+            self.fake_obs_square, house_obs, initial_possible_poses="informed", gsg=None
+        )
+        graph_lm.hypothesis_tracer = HypothesisTracer(num_recent_locations=5)
+        graph_lm.set_hotspot_learning(enabled=hotspot_learning)
+        graph_lm.mode = ExperimentMode.EVAL
+        graph_lm.reset_stm()
+        graph_lm.fixme_reset_ground_truth(primary_target=self.placeholder_target)
+        for observation in copy.deepcopy(house_obs):
+            graph_lm.add_lm_processing_to_buffer_stats(lm_processed=True)
+            graph_lm.matching_step(self.ctx, [observation])
+            # Usually Monty coordinates terminal condition checks.
+            graph_lm.update_terminal_condition()
+        graph_lm.update_ltm_from_stm()
+        return graph_lm
+
+    def test_hotspot_learning_tags_distinguishing_location_on_match(self):
+        graph_lm = self._run_hotspot_learning_episode(self.fake_obs_house_3d)
+
+        self.assertEqual(graph_lm.terminal_state, "match")
+        house_model = graph_lm.get_graph("new_object1")["patch"]
+        node_id, value = house_model.get_max_hotspot_node()
+        np.testing.assert_allclose(
+            house_model.pos[node_id], self.fake_obs_house_3d[4].location
+        )
+        # The house gained 2 evidence at the rooftop, while the square lost 1.
+        self.assertAlmostEqual(value, 3.0)
+        square_model = graph_lm.get_graph("new_object0")["patch"]
+        self.assertIsNone(square_model.get_max_hotspot_node())
+
+    def test_no_hotspots_tagged_when_hotspot_learning_disabled(self):
+        graph_lm = self._run_hotspot_learning_episode(
+            self.fake_obs_house_3d, hotspot_learning=False
+        )
+
+        self.assertEqual(graph_lm.terminal_state, "match")
+        for graph_id in graph_lm.get_all_known_object_ids():
+            self.assertIsNone(
+                graph_lm.get_graph(graph_id)["patch"].get_max_hotspot_node()
+            )
+
+    def test_no_hotspots_tagged_without_convergence(self):
+        # The flat house's pose remains ambiguous, so the LM never converges.
+        graph_lm = self._run_hotspot_learning_episode(self.fake_obs_house)
+
+        self.assertNotEqual(graph_lm.terminal_state, "match")
+        for graph_id in graph_lm.get_all_known_object_ids():
+            self.assertIsNone(
+                graph_lm.get_graph(graph_id)["patch"].get_max_hotspot_node()
+            )

@@ -167,6 +167,36 @@ class DecayFieldTest(unittest.TestCase):
         np.testing.assert_array_equal(weights, 0.0)
 
 
+class SumPoolingDecayFieldTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.field = DecayField(
+            kernel_factory=DecayKernelFactory(tau_t=10.0, tau_s=0.01),
+            pooling="sum",
+        )
+
+    def test_overlapping_kernels_accumulate(self) -> None:
+        point = np.array([[1.01, 2, 3]])
+        self.field.add(np.array([1, 2, 3]))
+        single = self.field.compute_weights(point)
+
+        self.field.add(np.array([1.02, 2, 3]))
+
+        np.testing.assert_allclose(self.field.compute_weights(point), 2 * single)
+
+    def test_accumulated_weight_is_bounded_to_one(self) -> None:
+        location = np.array([1, 2, 3])
+        for _ in range(5):
+            self.field.add(location)
+
+        np.testing.assert_allclose(
+            self.field.compute_weights(location.reshape(1, 3)), 1.0
+        )
+
+    def test_unknown_pooling_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            DecayField(pooling="mean")  # type: ignore[arg-type]
+
+
 class ReturnInhibitorTest(unittest.TestCase):
     def setUp(self) -> None:
         self.return_inhibitor = ReturnInhibitor(decay_field=MagicMock())

@@ -9,6 +9,8 @@ experiment:
   config:
     do_eval: false
     do_train: false
+    do_post_training_unsupervised_learning: false
+    n_post_training_unsupervised_epochs: 1
 
 # Which episodes to run (zero-based). Examples: "all" | "3" | "0,3,5:8" | "4:" | ":8".
 episodes: all

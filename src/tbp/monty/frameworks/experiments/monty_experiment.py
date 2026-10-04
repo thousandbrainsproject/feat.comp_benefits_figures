@@ -88,8 +88,15 @@ class MontyExperiment:
         self.rng = np.random.RandomState(config["seed"])
 
         self.do_train = config["do_train"]
+        self.do_post_training_unsupervised_learning = config.get(
+            "do_post_training_unsupervised_learning", False
+        )
         self.do_eval = config["do_eval"]
         self.experiment_mode = ExperimentMode.TRAIN
+        self.n_post_training_unsupervised_epochs = config.get(
+            "n_post_training_unsupervised_epochs", 1
+        )
+        self._hotspot_learning = False
         self.max_eval_steps = config["max_eval_steps"]
         self.max_train_steps = config["max_train_steps"]
         self.max_total_steps = config["max_total_steps"]
@@ -183,8 +190,11 @@ class MontyExperiment:
         else:
             self.train_env_interface = None
 
-        # Initialize eval environment interfaces if needed
-        if config["do_eval"]:
+        # Initialize eval environment interfaces if needed. Post-training
+        # unsupervised learning also runs on the eval environment interface.
+        if config["do_eval"] or config.get(
+            "do_post_training_unsupervised_learning", False
+        ):
             env_interface_class = config["eval_env_interface_class"]
             env_interface_args = dict(
                 env=self.env,
@@ -441,6 +451,7 @@ class MontyExperiment:
         else:
             self.model.reset()
         self.model.set_experiment_mode(self.experiment_mode)
+        self.model.set_hotspot_learning(enabled=self._hotspot_learning)
 
     def pre_episode(self) -> None:
         """Call pre_episode on elements in experiment and set mode."""
@@ -626,6 +637,9 @@ class MontyExperiment:
         if self.do_train:
             self.train()
 
+        if self.do_post_training_unsupervised_learning:
+            self.post_training_unsupervised_learning()
+
         if self.do_eval:
             self.evaluate()
 
@@ -649,6 +663,36 @@ class MontyExperiment:
         self.model.set_experiment_mode(self.experiment_mode)
         for _ in range(self.n_eval_epochs):
             self.run_epoch()
+        self.logger_handler.post_eval(self.logger_args)
+
+    def post_training_unsupervised_learning(self) -> None:
+        """Run n_post_training_unsupervised_epochs of hot spot learning.
+
+        Episodes run as inference (eval mode, on the eval environment interface,
+        and are logged as eval episodes), but LMs with a hypothesis tracer tag the
+        locations that helped them converge as hot spots on the recognized object's
+        model. The hot spots are saved with the model at the end of each epoch,
+        unless saving is skipped for eval runs with parallel wandb logging.
+
+        Note:
+            Running eval in the same experiment continues from the eval epoch and
+            episode counters (and environment interface state) reached here.
+        """
+        logger.info(
+            f"running {self.n_post_training_unsupervised_epochs} post-training "
+            "unsupervised learning epochs"
+        )
+        self.experiment_mode = ExperimentMode.EVAL
+        self._hotspot_learning = True
+        self.logger_handler.pre_eval(self.logger_args)
+        self.model.set_experiment_mode(self.experiment_mode)
+        self.model.set_hotspot_learning(enabled=True)
+        try:
+            for _ in range(self.n_post_training_unsupervised_epochs):
+                self.run_epoch()
+        finally:
+            self._hotspot_learning = False
+            self.model.set_hotspot_learning(enabled=False)
         self.logger_handler.post_eval(self.logger_args)
 
     def state_dict(self):

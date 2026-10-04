@@ -12,7 +12,7 @@ from typing import Mapping, Protocol
 
 from typing_extensions import Self
 
-__all__ = ["AnyLMsMatch", "MatchCriterion", "NamedLMsMatch"]
+__all__ = ["AnyLMsMatch", "MatchCriterion", "NamedLMsMatch", "NeverMatch"]
 
 
 class MatchCriterion(Protocol):
@@ -82,3 +82,14 @@ class NamedLMsMatch(MatchCriterion):
 
     def __call__(self: Self, terminal_states: Mapping[str, str | None]) -> bool:
         return all(terminal_states[lm_id] == "match" for lm_id in self._ids)
+
+
+class NeverMatch(MatchCriterion):
+    """Never satisfied, so episodes only end when they reach their step limit.
+
+    Learning modules still reach their own terminal states, and pass on their
+    outputs once they have matched.
+    """
+
+    def __call__(self: Self, terminal_states: Mapping[str, str | None]) -> bool:  # noqa: ARG002
+        return False

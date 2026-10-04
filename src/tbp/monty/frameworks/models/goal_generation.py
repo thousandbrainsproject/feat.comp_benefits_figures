@@ -9,6 +9,7 @@
 # https://opensource.org/licenses/MIT.
 from __future__ import annotations
 
+import itertools
 import logging
 from typing import TYPE_CHECKING
 
@@ -26,9 +27,12 @@ if TYPE_CHECKING:
     from tbp.monty.frameworks.models.graph_matching import GraphLM
 
 __all__ = [
+    "CubeViewGoalGenerator",
     "EvidenceGoalGenerator",
     "GraphGoalGenerator",
+    "ModelTargetGoalGenerator",
     "ParentLMNotProvided",
+    "TraceGoalGenerator",
 ]
 
 logger = logging.getLogger(__name__)
@@ -450,7 +454,232 @@ class GraphGoalGenerator(GoalGenerator):
             )
 
 
-class EvidenceGoalGenerator(GraphGoalGenerator):
+class ModelTargetGoalGenerator(GraphGoalGenerator):
+    """Base class for GSGs that move the sensor to a location on the MLH's model.
+
+    Provides the transform of a target location in the reference frame of the most
+    likely object hypothesis (MLH) into a Goal in the body-centric frame of
+    reference for the motor-actuator.
+    """
+
+    def __init__(
+        self, goal_tolerances=None, desired_object_distance=0.03, **kwargs
+    ) -> None:
+        """Initialize the GSG.
+
+        Args:
+            goal_tolerances: The tolerances for each attribute of the Goal that can be
+                used by the GSG when determining whether a Goal is achieved.
+            desired_object_distance: The desired distance between the agent and the
+                object, which is used to determine whether the agent is close enough to
+                the object to consider it "achieved". Note this need not be the same as
+                the one specified for the motor-system (e.g. the surface-policy), as we
+                may want to aim for an initially farther distance, while the
+                surface-policy may want to stay quite close to the object. Defaults to
+                0.03.
+            **kwargs: Additional keyword arguments.
+        """
+        super().__init__(goal_tolerances, **kwargs)
+        self.desired_object_distance = desired_object_distance
+
+    # ======================= Private ==========================
+
+    # ------------------- Main Algorithm -----------------------
+
+    def _get_target_loc_info(self, target_loc_id, input_channel):
+        """Given a target location ID and channel, get the location and pose vectors.
+
+        Note:
+            Currently assumes we are computing with the MLH graph.
+
+        Args:
+            target_loc_id: Index of the target node in the graph of the given
+                input channel.
+            input_channel: The input channel whose graph the target node belongs to.
+
+        Returns:
+            A dictionary containing the hypothesis to test, the target location and
+            surface normal of the target point on the object.
+        """
+        mlh = self.parent_lm._get_current_mlh()
+        mlh_id = mlh["graph_id"]
+
+        target_object = self.parent_lm.get_graph(mlh_id)
+        sensor_channel_name = self.parent_lm.buffer.get_first_sensory_input_channel()
+        target_graph = target_object[input_channel]
+        target_loc = target_graph.pos[target_loc_id]
+
+        if input_channel == sensor_channel_name:
+            surface_normal_mapping = target_graph.feature_mapping["pose_vectors"]
+            target_surface_normal = target_graph.x[
+                target_loc_id,
+                surface_normal_mapping[0] : surface_normal_mapping[0] + 3,
+            ]
+        else:
+            # The pose vectors stored on nodes of an LM input channel describe the
+            # child object's pose, not the surface of the parent object, so we
+            # retrieve the surface normal from the nearest node in the sensory
+            # channel's graph instead
+            sensor_graph = target_object[sensor_channel_name]
+            nearest_sensor_node = sensor_graph.find_nearest_neighbors(
+                np.atleast_2d(np.asarray(target_loc)),
+                num_neighbors=1,
+                return_distance=False,
+            )[0]
+            surface_normal_mapping = sensor_graph.feature_mapping["pose_vectors"]
+            target_surface_normal = sensor_graph.x[
+                nearest_sensor_node,
+                surface_normal_mapping[0] : surface_normal_mapping[0] + 3,
+            ]
+
+        return {
+            "hypothesis_to_test": mlh,
+            "target_loc": target_loc,
+            "target_surface_normal": target_surface_normal,
+        }
+
+    def _compute_goal_for_target_loc(
+        self, observations, target_info, goal_confidence=1.0
+    ) -> Goal:
+        """Specify a Goal for the motor-actuator.
+
+        Based on a target location (in object-centric coordinates) and the associated
+        surface normal of that location, specify a Goal for the motor-actuator,
+        such that any sensors associated with the motor-actuator should be pointed down
+        at and observing the target location (i.e. parallel to the surface normal).
+
+        For the movement to have a high probability of arriving at the desired location,
+        the current hypothesis of the object ID and pose used to inform the movement
+        should be correct, although subsequent observations may still provide useful
+        information to the agent, i.e. even if we are wrong about the object ID and
+        pose.
+
+        Args:
+            observations: The current observations, which should include the sensory
+                input.
+            target_info: A dictionary containing the target location and surface normal
+                of the target point on the object.
+            goal_confidence: The confidence of the Goal, which should be in the
+                range [0, 1]. This is used by receiving modules to weigh the
+                importance of the Goal relative to other Goals.
+
+        Returns:
+            A Goal for the motor-actuator.
+        """
+        # Determine the displacement, and therefore the environmental target location,
+        # that we will use
+        sensor_channel_name = self.parent_lm.buffer.get_first_sensory_input_channel()
+        sensory_input = get_percept_from_channel(
+            percepts=observations, channel_name=sensor_channel_name
+        )
+        displacement = (
+            target_info["target_loc"] - target_info["hypothesis_to_test"]["location"]
+        )
+
+        object_rot = target_info["hypothesis_to_test"]["rotation"].inv()  # MLH rotation
+        # is stored as the rotation needed to convert a displacement to the object pose,
+        # so the *object pose* is given by its inverse
+
+        # Rotate the displacement; note we're converting from an *internal* object frame
+        # of reference, to the global frame of reference; thus, we rotate not by the
+        # inverse, but by the actual object orientation.
+        rotated_disp = object_rot.apply(displacement)
+
+        # The target location on the object's surface in global/body-centric coordinates
+        proposed_surface_loc = sensory_input.location + rotated_disp
+
+        # Rotate the learned surface normal (which was committed to memory assuming a
+        # default 0,0,0 orientation of the object)
+        target_surface_normal_rotated = object_rot.apply(
+            target_info["target_surface_normal"]
+        )
+
+        # Scale the surface normal by the desired distance x1.5 (i.e. so that we start
+        # a bit further away from the object; we will separately move forward if we
+        # are indeed facing it)
+        surface_displacement = (
+            target_surface_normal_rotated * self.desired_object_distance * 1.5
+        )
+
+        target_loc = proposed_surface_loc + surface_displacement
+
+        # Extra metadata for logging. 'achieved' and
+        # 'matching_step_when_output_goal_set' should be updated at the next step.
+        # We initialize them as `None` to indicate that no valid values have been set.
+        # The model-frame target location and graph id are snapshotted here because
+        # they cannot be reconstructed later (the sensor location used to derive the
+        # world-frame goal is not stored) and `hypothesis_to_test` is a live dict
+        # whose graph_id may change after the goal is created; visualizers use them
+        # to mark the goal on the hypothesized object model.
+        # The hypothesis identity ('hypothesis_to_test_graph_id' / '..._mlh_id') is
+        # snapshotted for the same reason: if the motor system attempts this goal,
+        # the parent LM uses these to decrement the evidence of the hypothesis that
+        # proposed the jump when the jump is judged to have failed.
+        # 'predicted_displacement' is the sensory displacement the parent LM should
+        # experience if the jump succeeds; the LM compares it against the actually
+        # sensed displacement to judge success.
+        info = {
+            "proposed_surface_loc": proposed_surface_loc,
+            "model_frame_target_loc": np.array(target_info["target_loc"]),
+            "model_frame_graph_id": target_info["hypothesis_to_test"]["graph_id"],
+            "hypothesis_to_test": target_info["hypothesis_to_test"],
+            "hypothesis_to_test_graph_id": target_info["hypothesis_to_test"][
+                "graph_id"
+            ],
+            "hypothesis_to_test_mlh_id": target_info["hypothesis_to_test"]["mlh_id"],
+            "predicted_displacement": np.array(rotated_disp),
+            "achieved": None,
+            "matching_step_when_output_goal_set": None,
+        }
+
+        return Goal(
+            location=np.array(target_loc),
+            morphological_features={
+                # Note the hypothesis-testing policy does not specify the roll of the
+                # agent, because this is not relevant to the task
+                "pose_vectors": np.array(
+                    [
+                        (-1) * target_surface_normal_rotated,
+                        [np.nan, np.nan, np.nan],
+                        [np.nan, np.nan, np.nan],
+                    ]
+                ),
+                "pose_fully_defined": None,
+                "on_object": 1,
+            },
+            non_morphological_features=None,
+            confidence=goal_confidence,
+            pass_message=True,
+            sender_id=self.parent_lm.learning_module_id,
+            sender_type="GSG",
+            process_features_in_lm=True,
+            goal_tolerances=None,
+            info=info,
+        )
+
+    def _check_keep_current_output_goal(self) -> bool:
+        """Determine whether the GSG should keep the current Goal.
+
+        Jumps to a target location should be executed as one-off attempts, lest we get
+        stuck in a loop of trying to achieve the same goal that is impossible (e.g.
+        due to collision with objects).
+
+        Returns:
+            Whether the GSG should keep the current Goal. Always returns False.
+        """
+        return False
+
+    def _get_num_steps_post_output_goal_generated(self):
+        """Number of steps since last output Goal.
+
+        Returns:
+            The number of Monty-matching steps that have elapsed since the last time
+            an output Goal was generated.
+        """
+        return self.parent_lm.buffer.get_num_steps_post_output_goal_generated()
+
+
+class EvidenceGoalGenerator(ModelTargetGoalGenerator):
     """Generator of Goals for an evidence-based graph LM.
 
     GSG specifically set up for generating Goals for an evidence-based graph LM,
@@ -546,12 +775,13 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 is similarly unreliable for near-black colors. Defaults to 0.1.
             **kwargs: Additional keyword arguments.
         """
-        super().__init__(goal_tolerances, **kwargs)
+        super().__init__(
+            goal_tolerances, desired_object_distance=desired_object_distance, **kwargs
+        )
 
         self.elapsed_steps_factor = elapsed_steps_factor
         self.min_post_goal_success_steps = min_post_goal_success_steps
         self.x_percent_scale_factor = x_percent_scale_factor
-        self.desired_object_distance = desired_object_distance
         self.wait_growth_multiplier = wait_growth_multiplier
         self.feature_mismatch_distance_threshold = feature_mismatch_distance_threshold
         self.cluster_distance_threshold = cluster_distance_threshold
@@ -736,19 +966,14 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
 
         self.prev_top_mlhs = [top_mlh, second_mlh_object]
 
-        # if (
-        #     radius_node_dists[target_loc_id]
-        #     >= self.feature_mismatch_distance_threshold
-        # ):
-        #     # The graphs are sufficiently different spatially, so the most separated
-        #     # point is an informative location to test
-        #     return sensor_channel_name, target_loc_id
+        if radius_node_dists[target_loc_id] >= self.feature_mismatch_distance_threshold:
+            # The graphs are sufficiently different spatially, so the most separated
+            # point is an informative location to test
+            return sensor_channel_name, target_loc_id
 
         # The point clouds are near-identical in shape; fall back to comparing the
         # features stored at the graphs' nodes, over the channels present in both
-        logger.debug(
-            "Graphs spatially near-identical; comparing node features instead"
-        )
+        logger.debug("Graphs spatially near-identical; comparing node features instead")
 
         top_channels = self.parent_lm.get_input_channels_in_graph(top_id)
         second_channels = self.parent_lm.get_input_channels_in_graph(second_id)
@@ -873,9 +1098,9 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             )
 
             top_object_ids = self._get_feature_values(top_graph, "object_id").flatten()
-            second_object_ids = self._get_feature_values(
-                second_graph, "object_id"
-            )[nearest_node_ids].flatten()
+            second_object_ids = self._get_feature_values(second_graph, "object_id")[
+                nearest_node_ids
+            ].flatten()
             too_far = nearest_node_dists > self.parent_lm.max_match_distance
 
             print(
@@ -904,9 +1129,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                     logger.debug(f"No object-ID mismatch found on channel {channel}")
                 continue
 
-            cluster_members = self._largest_spatial_cluster(
-                top_pos[mismatching_nodes]
-            )
+            cluster_members = self._largest_spatial_cluster(top_pos[mismatching_nodes])
             cluster_node_ids = mismatching_nodes[cluster_members]
 
             if len(cluster_node_ids) > best_cluster_size:
@@ -1131,9 +1354,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             )
 
             top_hsv = self._get_feature_values(top_graph, "hsv")
-            second_hsv = self._get_feature_values(second_graph, "hsv")[
-                nearest_node_ids
-            ]
+            second_hsv = self._get_feature_values(second_graph, "hsv")[nearest_node_ids]
 
             # Circular distance in hue space (hue lives on a circle in [0, 1])
             abs_diff = np.abs(top_hsv[:, 0] - second_hsv[:, 0])
@@ -1166,7 +1387,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             f"Hue mismatch found on channel {best_channel} "
             f"(circular hue distance {best_hue_dist:.3f})"
         )
-        assert False, "Stop here"
         return best_channel, best_target_loc_id
 
     def _nearest_second_graph_nodes(self, top_pos, second_graph, top_mlh, second_mlh):
@@ -1180,9 +1400,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             Tuple of (node indices into the second graph, distances to those
             nodes), each with one entry per top-graph point.
         """
-        transformed_pos = self._transform_to_second_mlh_rf(
-            top_pos, top_mlh, second_mlh
-        )
+        transformed_pos = self._transform_to_second_mlh_rf(top_pos, top_mlh, second_mlh)
         nearest_node_ids = second_graph.find_nearest_neighbors(
             transformed_pos,
             num_neighbors=1,
@@ -1232,177 +1450,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         feature_idx = graph.feature_mapping[feature]
         return np.asarray(graph.x[:, feature_idx[0] : feature_idx[1]])
 
-    def _get_target_loc_info(self, target_loc_id, input_channel):
-        """Given a target location ID and channel, get the location and pose vectors.
-
-        Note:
-            Currently assumes we are computing with the MLH graph.
-
-        Args:
-            target_loc_id: Index of the target node in the graph of the given
-                input channel.
-            input_channel: The input channel whose graph the target node belongs to.
-
-        Returns:
-            A dictionary containing the hypothesis to test, the target location and
-            surface normal of the target point on the object.
-        """
-        mlh = self.parent_lm._get_current_mlh()
-        mlh_id = mlh["graph_id"]
-
-        target_object = self.parent_lm.get_graph(mlh_id)
-        sensor_channel_name = self.parent_lm.buffer.get_first_sensory_input_channel()
-        target_graph = target_object[input_channel]
-        target_loc = target_graph.pos[target_loc_id]
-
-        if input_channel == sensor_channel_name:
-            surface_normal_mapping = target_graph.feature_mapping["pose_vectors"]
-            target_surface_normal = target_graph.x[
-                target_loc_id,
-                surface_normal_mapping[0] : surface_normal_mapping[0] + 3,
-            ]
-        else:
-            # The pose vectors stored on nodes of an LM input channel describe the
-            # child object's pose, not the surface of the parent object, so we
-            # retrieve the surface normal from the nearest node in the sensory
-            # channel's graph instead
-            sensor_graph = target_object[sensor_channel_name]
-            nearest_sensor_node = sensor_graph.find_nearest_neighbors(
-                np.atleast_2d(np.asarray(target_loc)),
-                num_neighbors=1,
-                return_distance=False,
-            )[0]
-            surface_normal_mapping = sensor_graph.feature_mapping["pose_vectors"]
-            target_surface_normal = sensor_graph.x[
-                nearest_sensor_node,
-                surface_normal_mapping[0] : surface_normal_mapping[0] + 3,
-            ]
-
-        return {
-            "hypothesis_to_test": mlh,
-            "target_loc": target_loc,
-            "target_surface_normal": target_surface_normal,
-        }
-
-    def _compute_goal_for_target_loc(
-        self, observations, target_info, goal_confidence=1.0
-    ) -> Goal:
-        """Specify a Goal for the motor-actuator.
-
-        Based on a target location (in object-centric coordinates) and the associated
-        surface normal of that location, specify a Goal for the motor-actuator,
-        such that any sensors associated with the motor-actuator should be pointed down
-        at and observing the target location (i.e. parallel to the surface normal).
-
-        For the movement to have a high probability of arriving at the desired location,
-        the current hypothesis of the object ID and pose used to inform the movement
-        should be correct, although subsequent observations may still provide useful
-        information to the agent, i.e. even if we are wrong about the object ID and
-        pose.
-
-        Args:
-            observations: The current observations, which should include the sensory
-                input.
-            target_info: A dictionary containing the target location and surface normal
-                of the target point on the object.
-            goal_confidence: The confidence of the Goal, which should be in the
-                range [0, 1]. This is used by receiving modules to weigh the
-                importance of the Goal relative to other Goals.
-
-        Returns:
-            A Goal for the motor-actuator.
-        """
-        # Determine the displacement, and therefore the environmental target location,
-        # that we will use
-        sensor_channel_name = self.parent_lm.buffer.get_first_sensory_input_channel()
-        sensory_input = get_percept_from_channel(
-            percepts=observations, channel_name=sensor_channel_name
-        )
-        displacement = (
-            target_info["target_loc"] - target_info["hypothesis_to_test"]["location"]
-        )
-
-        object_rot = target_info["hypothesis_to_test"]["rotation"].inv()  # MLH rotation
-        # is stored as the rotation needed to convert a displacement to the object pose,
-        # so the *object pose* is given by its inverse
-
-        # Rotate the displacement; note we're converting from an *internal* object frame
-        # of reference, to the global frame of reference; thus, we rotate not by the
-        # inverse, but by the actual object orientation.
-        rotated_disp = object_rot.apply(displacement)
-
-        # The target location on the object's surface in global/body-centric coordinates
-        proposed_surface_loc = sensory_input.location + rotated_disp
-
-        # Rotate the learned surface normal (which was committed to memory assuming a
-        # default 0,0,0 orientation of the object)
-        target_surface_normal_rotated = object_rot.apply(
-            target_info["target_surface_normal"]
-        )
-
-        # Scale the surface normal by the desired distance x1.5 (i.e. so that we start
-        # a bit further away from the object; we will separately move forward if we
-        # are indeed facing it)
-        surface_displacement = (
-            target_surface_normal_rotated * self.desired_object_distance * 1.5
-        )
-
-        target_loc = proposed_surface_loc + surface_displacement
-
-        # Extra metadata for logging. 'achieved' and
-        # 'matching_step_when_output_goal_set' should be updated at the next step.
-        # We initialize them as `None` to indicate that no valid values have been set.
-        # The model-frame target location and graph id are snapshotted here because
-        # they cannot be reconstructed later (the sensor location used to derive the
-        # world-frame goal is not stored) and `hypothesis_to_test` is a live dict
-        # whose graph_id may change after the goal is created; visualizers use them
-        # to mark the goal on the hypothesized object model.
-        # The hypothesis identity ('hypothesis_to_test_graph_id' / '..._mlh_id') is
-        # snapshotted for the same reason: if the motor system attempts this goal,
-        # the parent LM uses these to decrement the evidence of the hypothesis that
-        # proposed the jump when the jump is judged to have failed.
-        # 'predicted_displacement' is the sensory displacement the parent LM should
-        # experience if the jump succeeds; the LM compares it against the actually
-        # sensed displacement to judge success.
-        info = {
-            "proposed_surface_loc": proposed_surface_loc,
-            "model_frame_target_loc": np.array(target_info["target_loc"]),
-            "model_frame_graph_id": target_info["hypothesis_to_test"]["graph_id"],
-            "hypothesis_to_test": target_info["hypothesis_to_test"],
-            "hypothesis_to_test_graph_id": target_info["hypothesis_to_test"][
-                "graph_id"
-            ],
-            "hypothesis_to_test_mlh_id": target_info["hypothesis_to_test"]["mlh_id"],
-            "predicted_displacement": np.array(rotated_disp),
-            "achieved": None,
-            "matching_step_when_output_goal_set": None,
-        }
-
-        return Goal(
-            location=np.array(target_loc),
-            morphological_features={
-                # Note the hypothesis-testing policy does not specify the roll of the
-                # agent, because this is not relevant to the task
-                "pose_vectors": np.array(
-                    [
-                        (-1) * target_surface_normal_rotated,
-                        [np.nan, np.nan, np.nan],
-                        [np.nan, np.nan, np.nan],
-                    ]
-                ),
-                "pose_fully_defined": None,
-                "on_object": 1,
-            },
-            non_morphological_features=None,
-            confidence=goal_confidence,
-            pass_message=True,
-            sender_id=self.parent_lm.learning_module_id,
-            sender_type="GSG",
-            process_features_in_lm=True,
-            goal_tolerances=None,
-            info=info,
-        )
-
     def _check_need_new_output_goal(
         self, ctx: RuntimeContext, output_goal_achieved
     ) -> bool:
@@ -1419,18 +1466,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             return False
 
         return self._check_conditions_for_hypothesis_test(ctx)
-
-    def _check_keep_current_output_goal(self) -> bool:
-        """Determine whether the GSG should keep the current Goal.
-
-        Hypothesis-testing actions should be executed as one-off attempts, lest we get
-        stuck in a loop of trying to achieve the same goal that is impossible (e.g.
-        due to collision with objects).
-
-        Returns:
-            Whether the GSG should keep the current Goal. Always returns False.
-        """
-        return False
 
     def _check_conditions_for_hypothesis_test(self, ctx: RuntimeContext):
         """Check if good chance to discriminate between conflicting object IDs or poses.
@@ -1558,11 +1593,232 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
 
         return False
 
-    def _get_num_steps_post_output_goal_generated(self):
-        """Number of steps since last output Goal.
+
+class TraceGoalGenerator(ModelTargetGoalGenerator):
+    """Generator of Goals that visit the hot spots of the most likely object.
+
+    Hot spots are learned on each object model during post-training unsupervised
+    learning (see `HypothesisTracer`), and mark the locations that have proven most
+    informative for distinguishing the object from others. This GSG moves the sensor
+    to the hot spot with the highest value on the model of the most likely object
+    hypothesis (MLH), transformed into the body frame using the MLH's pose.
+
+    The maximal hot spot is always selected, even if this means revisiting it.
+    """
+
+    def __init__(
+        self,
+        goal_tolerances=None,
+        desired_object_distance=0.03,
+        min_steps_between_goals=10,
+        min_hotspot_value=0.0,
+        **kwargs,
+    ) -> None:
+        """Initialize the Trace GSG.
+
+        Args:
+            goal_tolerances: The tolerances for each attribute of the Goal that can be
+                used by the GSG when determining whether a Goal is achieved.
+            desired_object_distance: The desired distance between the agent and the
+                object surface at the target. Defaults to 0.03.
+            min_steps_between_goals: Number of matching steps that must have elapsed
+                since the last Goal was generated before a new one is generated.
+                Defaults to 10.
+            min_hotspot_value: A hot spot is only visited if its value is above this
+                threshold. Defaults to 0.
+            **kwargs: Additional keyword arguments.
+        """
+        super().__init__(
+            goal_tolerances, desired_object_distance=desired_object_distance, **kwargs
+        )
+        self.min_steps_between_goals = min_steps_between_goals
+        self.min_hotspot_value = min_hotspot_value
+
+    # ======================= Private ==========================
+
+    # ------------------- Main Algorithm -----------------------
+
+    def _generate_goal(self, _ctx: RuntimeContext, observations) -> Goal | None:
+        """Generate a Goal that moves the sensor to the MLH object's maximal hot spot.
 
         Returns:
-            The number of Monty-matching steps that have elapsed since the last time
-            an output Goal was generated.
+            A Goal for the motor system, or a None-type Goal if the MLH object has no
+            hot spot above min_hotspot_value.
         """
-        return self.parent_lm.buffer.get_num_steps_post_output_goal_generated()
+        mlh = self.parent_lm._get_current_mlh()
+        graph_id = mlh["graph_id"]
+        if graph_id not in self.parent_lm.get_all_known_object_ids():
+            return self._generate_none_goal()
+
+        input_channel = self.parent_lm.buffer.get_first_sensory_input_channel()
+        model = self.parent_lm.get_graph(graph_id).get(input_channel)
+        hotspot = model.get_max_hotspot_node() if model is not None else None
+        if hotspot is None or hotspot[1] <= self.min_hotspot_value:
+            return self._generate_none_goal()
+
+        node_id, hotspot_value = hotspot
+        target_info = self._get_target_loc_info(node_id, input_channel)
+        goal = self._compute_goal_for_target_loc(
+            observations,
+            target_info,
+            goal_confidence=self.parent_lm.get_output().confidence,
+        )
+        goal.info["hotspot_node_id"] = node_id
+        goal.info["hotspot_value"] = hotspot_value
+        logger.debug(
+            f"Trace goal: visiting hot spot {node_id} (value {hotspot_value:.3f}) "
+            f"on {graph_id}"
+        )
+        return goal
+
+    def _check_need_new_output_goal(
+        self,
+        ctx: RuntimeContext,  # noqa: ARG002
+        output_goal_achieved,
+    ) -> bool:
+        """Determine whether the GSG should generate a new output Goal.
+
+        After reaching a hot spot, the sensor should explore there for a while, so
+        success in achieving the Goal is not an indication to need a new one.
+
+        Returns:
+            Whether the GSG should generate a new output Goal.
+        """
+        if output_goal_achieved:
+            return False
+        return (
+            self._get_num_steps_post_output_goal_generated()
+            > self.min_steps_between_goals
+        )
+
+
+def _cube_view_directions() -> np.ndarray:
+    """Unit directions onto the 6 faces and 8 corners of a cube centered at 0.
+
+    Returns:
+        A (14, 3) array of unit vectors, faces first.
+    """
+    faces = np.vstack([np.eye(3), -np.eye(3)])
+    corners = np.array(list(itertools.product([1.0, -1.0], repeat=3))) / np.sqrt(3)
+    return np.vstack([faces, corners])
+
+
+class CubeViewGoalGenerator(ModelTargetGoalGenerator):
+    """Generator of Goals that view the most likely object from 14 directions.
+
+    The views look onto the 6 faces and 8 corners of a cube enclosing the object,
+    with the cube aligned to the reference frame of the most likely object
+    hypothesis (MLH). The initial view, and then each cube view, is held for
+    steps_per_view matching steps, during which the motor system's default policy
+    explores locally, before the sensor jumps to the next view. This is an
+    LM-driven, 3D analogue of a scan policy.
+
+    For each view direction, the sensor looks along the opposite direction at the
+    point of the MLH object's model that lies furthest along the view direction,
+    so that the view is centered on the object's surface.
+
+    Jumps are made under the current MLH pose, so early views (before the pose is
+    known) may land elsewhere on the object, or fail and be undone by the motor
+    system. Each view is attempted once.
+    """
+
+    VIEW_DIRECTIONS = _cube_view_directions()
+
+    def __init__(
+        self,
+        goal_tolerances=None,
+        desired_object_distance=0.03,
+        steps_per_view=50,
+        **kwargs,
+    ) -> None:
+        """Initialize the Cube View GSG.
+
+        Args:
+            goal_tolerances: The tolerances for each attribute of the Goal that can be
+                used by the GSG when determining whether a Goal is achieved.
+            desired_object_distance: The desired distance between the agent and the
+                object surface at the center of a view. Defaults to 0.03.
+            steps_per_view: Number of matching steps spent on each view before
+                moving on to the next one. Defaults to 50.
+            **kwargs: Additional keyword arguments.
+        """
+        super().__init__(
+            goal_tolerances, desired_object_distance=desired_object_distance, **kwargs
+        )
+        self.steps_per_view = steps_per_view
+
+    def reset(self):
+        super().reset()
+        self._next_view_index = 0
+
+    @property
+    def num_views(self) -> int:
+        return len(self.VIEW_DIRECTIONS)
+
+    # ======================= Private ==========================
+
+    # ------------------- Main Algorithm -----------------------
+
+    def _generate_goal(self, _ctx: RuntimeContext, observations) -> Goal | None:
+        """Generate a Goal that moves the sensor to the next view of the MLH object.
+
+        Returns:
+            A Goal for the motor system, or a None-type Goal if the MLH is not yet
+            a known object, in which case the view is attempted on a later step.
+        """
+        mlh = self.parent_lm._get_current_mlh()
+        graph_id = mlh["graph_id"]
+        if graph_id not in self.parent_lm.get_all_known_object_ids():
+            return self._generate_none_goal()
+
+        input_channel = self.parent_lm.buffer.get_first_sensory_input_channel()
+        model = self.parent_lm.get_graph(graph_id).get(input_channel)
+        if model is None:
+            return self._generate_none_goal()
+
+        view_index = self._next_view_index
+        view_direction = self.VIEW_DIRECTIONS[view_index]
+        positions = np.asarray(model.pos)
+        center = (positions.min(axis=0) + positions.max(axis=0)) / 2
+        target_loc_id = int(np.argmax((positions - center) @ view_direction))
+
+        goal = self._compute_goal_for_target_loc(
+            observations,
+            {
+                "hypothesis_to_test": mlh,
+                "target_loc": positions[target_loc_id],
+                "target_surface_normal": view_direction,
+            },
+        )
+        # Exploration jumps do not test the MLH, so a failed jump must not be
+        # attributed to it (see EvidenceGraphLM.receive_goal_attempt).
+        goal.info["hypothesis_to_test_graph_id"] = None
+        goal.info["hypothesis_to_test_mlh_id"] = None
+        goal.info["view_index"] = view_index
+        goal.info["view_direction"] = view_direction
+        self._next_view_index += 1
+        logger.debug(
+            f"Cube view goal: view {view_index} (direction {view_direction}) of "
+            f"{graph_id}, centered on node {target_loc_id}"
+        )
+        print(f"Performing a cube view jump!")
+
+        # assert False, "Stop here"
+        return goal
+
+    def _check_need_new_output_goal(
+        self,
+        ctx: RuntimeContext,  # noqa: ARG002
+        output_goal_achieved,  # noqa: ARG002
+    ) -> bool:
+        """Determine whether it is time to move on to the next view.
+
+        Returns:
+            Whether the GSG should generate a new output Goal.
+        """
+        if self._next_view_index >= self.num_views:
+            return False
+        return (
+            self.parent_lm.buffer.get_num_matching_steps()
+            > (self._next_view_index + 1) * self.steps_per_view
+        )

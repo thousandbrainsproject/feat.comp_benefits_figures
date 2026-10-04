@@ -1,0 +1,12 @@
+# @package experiment.config
+
+do_eval: true
+eval_env_interface_args:
+  object_names:
+  - 024_mug_tbp_horz
+  - 026_mug_numenta_horz
+  - 025_mug_tbp_vert
+  - 027_mug_numenta_vert
+  object_init_sampler:
+    _target_: tbp.monty.frameworks.environments.object_init_samplers.RandomRotation
+eval_env_interface_class: ${monty.class:tbp.monty.experiment.environment.OneObjectPerEpisodeInterface}

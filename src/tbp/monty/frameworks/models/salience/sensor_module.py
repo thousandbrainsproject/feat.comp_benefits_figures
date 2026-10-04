@@ -50,8 +50,26 @@ class SalienceSM(SensorModule):
         return_inhibitor: ReturnInhibitor | None = None,
         snapshot_telemetry: SalienceSMTelemetryProtocol | None = None,
         segmentation_strategy: SegmentationStrategy | None = None,
+        ior_weight: float = 0.75,
     ) -> None:
+        """Initialize the salience SM.
+
+        Args:
+            sensor_module_id: ID of the sensor module.
+            save_raw_obs: Whether to record raw observations in the telemetry,
+                if no snapshot_telemetry is given.
+            salience_strategy: Computes the salience map of an observation.
+            return_inhibitor: Computes inhibition-of-return weights in [0, 1] for
+                the locations in view.
+            snapshot_telemetry: Telemetry storage for the SM.
+            segmentation_strategy: Segments the surface under fixation into a
+                region proposal.
+            ior_weight: How strongly inhibition of return lowers salience: the
+                inhibition-of-return weight of a location, scaled by ior_weight,
+                is subtracted from its salience (which lies in [0, 1]).
+        """
         self._sensor_module_id = sensor_module_id
+        self._ior_weight = ior_weight
         self._salience_strategy = (
             Uniform() if salience_strategy is None else salience_strategy
         )
@@ -219,8 +237,7 @@ class SalienceSM(SensorModule):
     def _decay_salience(
         self, salience: np.ndarray, ior_weights: np.ndarray
     ) -> np.ndarray:
-        decay_factor = 0.75
-        return salience - decay_factor * ior_weights
+        return salience - self._ior_weight * ior_weights
 
     def _randomize_salience(
         self, ctx: RuntimeContext, weighted_salience: np.ndarray

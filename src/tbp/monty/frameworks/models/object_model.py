@@ -401,6 +401,11 @@ class GridObjectModel(GraphObjectModel):
         # filled or used to constrain nodes in graph.
         self.use_original_graph = False
         self._location_tree = None
+        # Running sum and count of hot spot values tagged on each graph node. Hot
+        # spots mark locations that have proven informative for distinguishing this
+        # object from others. None until the first node is tagged.
+        self._hotspot_sum = None
+        self._hotspot_count = None
 
     # =============== Public Interface Functions ===============
     # ------------------- Main Algorithm -----------------------
@@ -412,12 +417,14 @@ class GridObjectModel(GraphObjectModel):
         ) = self._extract_feature_array(features)
         # TODO: part of init method?
         logger.info(f"building graph from {locations.shape[0]} observations")
+        old_hotspots = self._get_hotspot_state()
         self._initialize_and_fill_grid(
             locations=locations,
             features=feature_array,
             observation_feature_mapping=observation_feature_mapping,
         )
         self._graph = self._build_graph_from_grids()
+        self._carry_over_hotspots(*old_hotspots)
         logger.info(f"built graph {self._graph}")
 
     def update_model(
@@ -446,6 +453,7 @@ class GridObjectModel(GraphObjectModel):
             features=feature_array,
             feature_mapping=observation_feature_mapping,
         )
+        old_hotspots = self._get_hotspot_state()
         new_graph = self._build_graph_from_grids()
         assert not np.any(np.isnan(new_graph.x))
         self._graph = new_graph
@@ -454,6 +462,7 @@ class GridObjectModel(GraphObjectModel):
             new_graph.pos,
             leafsize=40,
         )
+        self._carry_over_hotspots(*old_hotspots)
 
     def find_nearest_neighbors(
         self,
@@ -497,6 +506,60 @@ class GridObjectModel(GraphObjectModel):
 
         return nearest_node_ids
 
+    def tag_hotspots(self, locations, values) -> None:
+        """Add values to the running average hot spot value of the nearest nodes.
+
+        Args:
+            locations: Locations in the model's reference frame, shape (N, 3).
+            values: Value to tag at each location, shape (N,).
+        """
+        values = np.asarray(values, dtype=float).reshape(-1)
+        if len(values) == 0:
+            return
+        locations = np.atleast_2d(np.asarray(locations, dtype=float))
+        node_ids = np.atleast_1d(
+            self.find_nearest_neighbors(locations, num_neighbors=1)
+        )
+        if getattr(self, "_hotspot_sum", None) is None:
+            self._hotspot_sum = np.zeros(self.num_nodes)
+            self._hotspot_count = np.zeros(self.num_nodes, dtype=int)
+        np.add.at(self._hotspot_sum, node_ids, values)
+        np.add.at(self._hotspot_count, node_ids, 1)
+
+    @property
+    def hotspot_values(self) -> np.ndarray:
+        """Running average hot spot value of each node (0 for untagged nodes)."""
+        sums = getattr(self, "_hotspot_sum", None)
+        if sums is None:
+            return np.zeros(self.num_nodes)
+        return np.divide(
+            sums,
+            self._hotspot_count,
+            out=np.zeros_like(sums),
+            where=self._hotspot_count > 0,
+        )
+
+    @property
+    def hotspot_counts(self) -> np.ndarray:
+        """Number of times each node has been tagged as a hot spot."""
+        counts = getattr(self, "_hotspot_count", None)
+        if counts is None:
+            return np.zeros(self.num_nodes, dtype=int)
+        return counts
+
+    def get_max_hotspot_node(self) -> tuple[int, float] | None:
+        """Return the node with the highest average hot spot value.
+
+        Returns:
+            Tuple of (node_id, hot spot value), or None if no node has been tagged.
+        """
+        counts = self.hotspot_counts
+        if not np.any(counts > 0):
+            return None
+        values = self.hotspot_values
+        node_id = int(np.argmax(np.where(counts > 0, values, -np.inf)))
+        return node_id, float(values[node_id])
+
     # ------------------ Getters & Setters ---------------------
     def set_graph(self, graph):
         """Set self._graph property and convert input graph to right format."""
@@ -504,20 +567,9 @@ class GridObjectModel(GraphObjectModel):
             # could also check if is type torch_geometric.data.data.Data
             logger.debug(f"turning graph of type {type(graph)} into numpy graph")
             graph = torch_graph_to_numpy(graph)
-        if self.use_original_graph:
-            # Just use pretrained graph. Do not use grids to constrain nodes.
-            self._graph = graph
-            self._location_tree = KDTree(
-                graph.pos,
-                leafsize=40,
-            )
-        else:
-            self._initialize_and_fill_grid(
-                locations=graph.pos,
-                features=graph.x,
-                observation_feature_mapping=graph.feature_mapping,
-            )
-            self._graph = self._build_graph_from_grids()
+        old_hotspots = self._get_hotspot_state()
+        self._set_graph(graph)
+        self._carry_over_hotspots(*old_hotspots)
 
     # ------------------ Logging & Saving ----------------------
     def __repr__(self) -> str:
@@ -720,7 +772,51 @@ class GridObjectModel(GraphObjectModel):
         )
         return graph
 
+    def _set_graph(self, graph):
+        """Set self._graph from a NumpyGraph, constraining it by grids if needed."""
+        if self.use_original_graph:
+            # Just use pretrained graph. Do not use grids to constrain nodes.
+            self._graph = graph
+            self._location_tree = KDTree(
+                graph.pos,
+                leafsize=40,
+            )
+        else:
+            self._initialize_and_fill_grid(
+                locations=graph.pos,
+                features=graph.x,
+                observation_feature_mapping=graph.feature_mapping,
+            )
+            self._graph = self._build_graph_from_grids()
+
     # ------------------------ Helper --------------------------
+    def _get_hotspot_state(self):
+        """Return the node locations and hot spot tallies of the current graph.
+
+        Returns:
+            Tuple of (node locations, hot spot sums, hot spot counts), or a tuple of
+            Nones if no node has been tagged.
+        """
+        sums = getattr(self, "_hotspot_sum", None)
+        if sums is None or self._graph is None:
+            return None, None, None
+        return np.array(self.pos), sums, self._hotspot_count
+
+    def _carry_over_hotspots(self, old_pos, old_sums, old_counts) -> None:
+        """Move hot spot tallies from a previous graph onto the nearest new nodes."""
+        self._hotspot_sum = None
+        self._hotspot_count = None
+        if old_sums is None or not np.any(old_counts > 0):
+            return
+        tagged = old_counts > 0
+        new_ids = np.atleast_1d(
+            self.find_nearest_neighbors(old_pos[tagged], num_neighbors=1)
+        )
+        self._hotspot_sum = np.zeros(self.num_nodes)
+        self._hotspot_count = np.zeros(self.num_nodes, dtype=int)
+        np.add.at(self._hotspot_sum, new_ids, old_sums[tagged])
+        np.add.at(self._hotspot_count, new_ids, old_counts[tagged])
+
     def _extract_feature_array(self, feature_dict):
         """Turns the dict of features into an array + feature mapping.
 

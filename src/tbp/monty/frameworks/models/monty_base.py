@@ -427,6 +427,12 @@ class MontyBase(Monty):
         for lm in self.learning_modules:
             lm.set_experiment_mode(mode)
 
+    def set_hotspot_learning(self, enabled: bool) -> None:
+        """Enable or disable hot spot learning in the LMs that support it."""
+        for lm in self.learning_modules:
+            if hasattr(lm, "set_hotspot_learning"):
+                lm.set_hotspot_learning(enabled=enabled)
+
     def reset(self) -> None:
         # TODO: move most (all?) of this logic to Experiment
         self._is_done = False

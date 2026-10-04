@@ -405,6 +405,17 @@ class SalienceSMPrivateTest(unittest.TestCase):
         normalized = self.sensor_module._normalize_salience(salience)
         np.testing.assert_array_equal(normalized, np.array([]))
 
+    def test_decay_salience_subtracts_scaled_ior_weights(self) -> None:
+        sensor_module = SalienceSM(
+            sensor_module_id="test", snapshot_telemetry=MagicMock(), ior_weight=1.5
+        )
+
+        decayed = sensor_module._decay_salience(
+            np.array([1.0, 0.5, 0.2]), np.array([0.0, 0.5, 1.0])
+        )
+
+        np.testing.assert_allclose(decayed, [1.0, -0.25, -1.3])
+
     def test_weight_salience_decays_randomizes_and_normalizes_salience_in_that_order(
         self,
     ) -> None:

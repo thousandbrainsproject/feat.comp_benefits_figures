@@ -1,0 +1,16 @@
+# @package experiment.config
+
+# The four mug variants, which differ only in their logo and its orientation, at the
+# 14 rotations used for supervised pretraining. Used for post-training unsupervised
+# learning of hot spots (which runs on the eval environment interface).
+do_post_training_unsupervised_learning: true
+eval_env_interface_args:
+  object_names:
+  - 024_mug_tbp_horz
+  - 026_mug_numenta_horz
+  - 025_mug_tbp_vert
+  - 027_mug_numenta_vert
+  object_init_sampler:
+    _target_: tbp.monty.frameworks.environments.object_init_samplers.Predefined
+    rotations: ${constants.rotations_all}
+eval_env_interface_class: ${monty.class:tbp.monty.experiment.environment.OneObjectPerEpisodeInterface}

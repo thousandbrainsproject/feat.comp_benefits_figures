@@ -315,3 +315,104 @@ class ObjectModelTest(unittest.TestCase):
                 self.dummy_locs,
                 self.dummy_features,
             )
+
+
+class GridObjectModelHotspotTest(unittest.TestCase):
+    def setUp(self):
+        self.locs = np.array([[0, 0, 0], [0, 1, 0], [1, 0, 0], [1, 1, 0]], dtype=float)
+        pv = np.eye(3).flatten()
+        self.features = {
+            "pose_vectors": np.vstack([pv, pv, pv, pv]),
+            "pose_fully_defined": np.array([True, True, True, True]),
+        }
+        self.model = GridObjectModel(
+            "test_model", max_nodes=10, max_size=10, num_voxels_per_dim=10
+        )
+        self.model.build_model(self.locs, self.features)
+
+    def node_at(self, location) -> int:
+        return int(np.argmin(np.linalg.norm(self.model.pos - location, axis=1)))
+
+    def test_untagged_model_has_no_hotspots(self):
+        self.assertIsNone(self.model.get_max_hotspot_node())
+        np.testing.assert_array_equal(self.model.hotspot_values, np.zeros(4))
+        np.testing.assert_array_equal(self.model.hotspot_counts, np.zeros(4))
+
+    def test_tags_go_to_nearest_node(self):
+        self.model.tag_hotspots([[0.9, 0.1, 0.0]], [2.0])
+
+        node = self.node_at([1, 0, 0])
+        expected = np.zeros(4)
+        expected[node] = 2.0
+        np.testing.assert_array_equal(self.model.hotspot_values, expected)
+        self.assertEqual(self.model.hotspot_counts[node], 1)
+
+    def test_values_are_running_average_across_calls(self):
+        self.model.tag_hotspots([[0, 1, 0]], [3.0])
+        self.model.tag_hotspots([[0, 1, 0], [0, 1, 0]], [1.0, 2.0])
+
+        node = self.node_at([0, 1, 0])
+        self.assertAlmostEqual(self.model.hotspot_values[node], 2.0)
+        self.assertEqual(self.model.hotspot_counts[node], 3)
+
+    def test_max_hotspot_is_node_with_highest_average(self):
+        # Node at (1, 1, 0) is tagged most often, but node at (0, 1, 0) has the
+        # highest average value.
+        self.model.tag_hotspots(
+            [[1, 1, 0], [1, 1, 0], [1, 1, 0], [0, 1, 0]], [1.0, 1.0, 1.0, 1.5]
+        )
+
+        node_id, value = self.model.get_max_hotspot_node()
+
+        self.assertEqual(node_id, self.node_at([0, 1, 0]))
+        self.assertAlmostEqual(value, 1.5)
+
+    def test_max_hotspot_ignores_untagged_nodes_when_all_tags_are_zero(self):
+        self.model.tag_hotspots([[1, 0, 0]], [0.0])
+
+        node_id, value = self.model.get_max_hotspot_node()
+
+        self.assertEqual(node_id, self.node_at([1, 0, 0]))
+        self.assertEqual(value, 0.0)
+
+    def test_hotspots_survive_copy_round_trip(self):
+        self.model.tag_hotspots([[1, 1, 0]], [4.0])
+
+        restored = copy.deepcopy(self.model)
+
+        np.testing.assert_array_equal(
+            restored.hotspot_values, self.model.hotspot_values
+        )
+        np.testing.assert_array_equal(
+            restored.hotspot_counts, self.model.hotspot_counts
+        )
+
+    def test_model_pickled_before_hotspots_existed_still_works(self):
+        del self.model._hotspot_sum
+        del self.model._hotspot_count
+
+        self.assertIsNone(self.model.get_max_hotspot_node())
+        self.model.tag_hotspots([[0, 0, 0]], [1.0])
+        self.assertEqual(self.model.get_max_hotspot_node()[0], self.node_at([0, 0, 0]))
+
+    def test_hotspots_are_carried_over_when_model_is_updated(self):
+        self.model.tag_hotspots([[1, 1, 0]], [5.0])
+        new_locs = np.array([[2, 2, 0], [2, 3, 0]], dtype=float)
+        pv = np.eye(3).flatten()
+
+        self.model.update_model(
+            locations=new_locs,
+            features={
+                "pose_vectors": np.vstack([pv, pv]),
+                "pose_fully_defined": np.array([True, True]),
+            },
+            location_rel_model=np.zeros(3),
+            object_location_rel_body=np.zeros(3),
+            object_rotation=Rotation.identity(),
+        )
+
+        self.assertEqual(self.model.num_nodes, 6)
+        node_id, value = self.model.get_max_hotspot_node()
+        self.assertEqual(node_id, self.node_at([1, 1, 0]))
+        self.assertAlmostEqual(value, 5.0)
+        self.assertEqual(self.model.hotspot_counts.sum(), 1)

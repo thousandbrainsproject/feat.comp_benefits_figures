@@ -39,6 +39,16 @@ class EvidenceGraphMemory(GraphMemory):
     # =============== Public Interface Functions ===============
 
     # ------------------- Main Algorithm -----------------------
+    def tag_hotspots(self, graph_id, locations, values) -> None:
+        """Tag hot spot values at locations on every input channel model of a graph.
+
+        Args:
+            graph_id: ID of the graph to tag.
+            locations: Locations in the graph's reference frame, shape (N, 3).
+            values: Value to tag at each location, shape (N,).
+        """
+        for channel_model in self.models_in_memory[graph_id].values():
+            channel_model.tag_hotspots(locations, values)
 
     # ------------------ Getters & Setters ---------------------
     def get_initial_hypotheses(self):

@@ -53,6 +53,14 @@ class ExperimentMonty(Protocol):
         """
         ...
 
+    def set_hotspot_learning(self, enabled: bool) -> None:
+        """Enable or disable hot spot learning (post-training unsupervised learning).
+
+        Args:
+            enabled: Whether LMs should tag hot spots on their object models.
+        """
+        ...
+
     def is_done(self) -> bool:
         """Return `True` if the model has reached a terminal condition."""
         ...

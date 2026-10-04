@@ -772,6 +772,9 @@ class GraphLM(LearningModule):
     def set_experiment_mode(self, mode: ExperimentMode) -> None:
         self.mode = mode
 
+    def set_hotspot_learning(self, enabled: bool) -> None:
+        """Enable or disable learning of hot spots (not supported by this LM)."""
+
     def set_detected_object(self, terminal_state):
         """Set the current graph ID.
 

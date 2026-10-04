@@ -33,6 +33,9 @@ from tbp.monty.frameworks.models.evidence_matching.hypotheses_updater import (
     HypothesesUpdater,
     HypothesesUpdaterTelemetry,
 )
+from tbp.monty.frameworks.models.evidence_matching.hypothesis_trace import (
+    HypothesisTracer,
+)
 from tbp.monty.frameworks.models.evidence_matching.region_proposal.context import (
     EvidenceLMRegionContext,
 )
@@ -43,7 +46,7 @@ from tbp.monty.frameworks.models.evidence_matching.telemetry import (
     EvidenceGraphLMTelemetryProtocol,
     NoopEvidenceGraphLMTelemetry,
 )
-from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
+from tbp.monty.frameworks.models.goal_generation import ModelTargetGoalGenerator
 from tbp.monty.frameworks.models.graph_matching import GraphLM
 from tbp.monty.frameworks.utils.graph_matching_utils import (
     add_pose_features_to_tolerances,
@@ -250,6 +253,10 @@ class EvidenceGraphLM(GraphLM):
             LM.
         hypotheses_updater_args: Dictionary of configuration parameters for the
             hypotheses updater.
+        hypothesis_tracer: Records the trace of the most likely hypothesis during
+            post-training unsupervised learning, so that the locations that helped
+            the LM converge can be tagged as hot spots on the recognized object's
+            model. If None, no hot spots are learned.
 
     Debugging Attributes:
         use_multithreading: Whether to calculate evidence updates for different
@@ -292,11 +299,12 @@ class EvidenceGraphLM(GraphLM):
         max_nodes_per_graph=2000,
         num_model_voxels_per_dim=50,  # -> voxel size = 6mm3 (0.006)
         use_multithreading=True,
-        gsg: EvidenceGoalGenerator | None = None,
+        gsg: ModelTargetGoalGenerator | None = None,
         hypotheses_updater_class: type[HypothesesUpdater] = DefaultHypothesesUpdater,
         hypotheses_updater_args: dict | None = None,
         region_proposers: Sequence[RegionProposer] = (),
         telemetry: EvidenceGraphLMTelemetryProtocol | None = None,
+        hypothesis_tracer: HypothesisTracer | None = None,
         *args,
         **kwargs,
     ) -> None:
@@ -375,12 +383,22 @@ class EvidenceGraphLM(GraphLM):
         self.hypotheses_updater = hypotheses_updater_class(**hypotheses_updater_args)
         self.hypotheses_updater_telemetry: HypothesesUpdaterTelemetry = {}
 
+        self.hypothesis_tracer = hypothesis_tracer
+        # Set by the experiment during post-training unsupervised learning.
+        self.hotspot_learning_enabled = False
+
         # TODO: make this part of `__init__()` after `reset_stm()` is removed.
         self._init_EvidenceGraphLM()
 
     def _init_EvidenceGraphLM(self) -> None:  # noqa: N802
         self.symmetry_evidence = 0
         self._hypotheses = {}
+
+        if self.hypothesis_tracer is not None:
+            self.hypothesis_tracer.reset()
+        # Object the LM first converged on this episode, whose hot spots are tagged
+        # from the frozen trace at the end of the episode.
+        self._converged_graph_id: str | None = None
 
         # Efferent copy of a goal of this LM the motor system attempted but
         # whose outcome the LM has not yet judged from its sensory input.
@@ -420,6 +438,48 @@ class EvidenceGraphLM(GraphLM):
         for proposer in self._region_proposers:
             proposer.reset()
         self._telemetry.reset()
+
+    def set_hotspot_learning(self, enabled: bool) -> None:
+        self.hotspot_learning_enabled = enabled
+
+    def update_ltm_from_stm(self) -> None:
+        """Update memory from buffer if training, and tag hot spots if enabled.
+
+        Hot spots are tagged on the model of the object the LM converged on, at
+        the most recent trace locations leading up to convergence, weighted by
+        how much more evidence that object gained than its strongest competitor.
+        The differential is tagged with its sign, so that locations shared with
+        other objects (where the differential is noise around 0) average out,
+        while the running average of distinguishing locations stays positive.
+        """
+        super().update_ltm_from_stm()
+        if not self.hotspot_learning_enabled or self.hypothesis_tracer is None:
+            return
+        graph_id = self._converged_graph_id
+        steps = [
+            step
+            for step in self.hypothesis_tracer.frozen_recent_steps()
+            if step.graph_id == graph_id
+        ]
+        self.hypothesis_tracer.save_history(
+            prefix=self.learning_module_id,
+            metadata={
+                "primary_target": self.primary_target,
+                "converged_graph_id": graph_id,
+                "terminal_state": self.terminal_state,
+                "num_tagged_steps": len(steps) if graph_id is not None else 0,
+            },
+        )
+        if graph_id is None or len(steps) == 0:
+            return
+        logger.info(
+            f"{self.learning_module_id} tagging {len(steps)} hot spots on {graph_id}"
+        )
+        self.graph_memory.tag_hotspots(
+            graph_id,
+            locations=np.array([step.location for step in steps]),
+            values=np.array([step.differential for step in steps]),
+        )
 
     def propose_region(self) -> AttentionRegion | None:
         """Collect the regions this LM's region proposers emit.
@@ -531,10 +591,7 @@ class EvidenceGraphLM(GraphLM):
             # hypothesis that proposed the goal, the outcome can neither be
             # judged nor attributed.
             return
-        if (
-            np.linalg.norm(predicted_displacement)
-            < self.failed_goal_displacement_eta
-        ):
+        if np.linalg.norm(predicted_displacement) < self.failed_goal_displacement_eta:
             return
         self._pending_goal_attempt = goal
 
@@ -1053,6 +1110,9 @@ class EvidenceGraphLM(GraphLM):
         query,
     ):
         """Update evidence for each hypothesis instead of removing them."""
+        tracing = self.hotspot_learning_enabled and self.hypothesis_tracer is not None
+        if tracing:
+            prev_max_evidence = dict(zip(*self.evidence_for_each_graph()))
         with self.hypotheses_updater:
             thread_list = []
             for graph_id in self.get_all_known_object_ids():
@@ -1081,6 +1141,34 @@ class EvidenceGraphLM(GraphLM):
             self.possible_matches = self._threshold_possible_matches()
             self.previous_mlh = self.current_mlh
             self.current_mlh = self._calculate_most_likely_hypothesis()
+        if tracing:
+            self.hypothesis_tracer.update(
+                prev_max_evidence=prev_max_evidence,
+                curr_max_evidence=dict(zip(*self.evidence_for_each_graph())),
+                mlh=self.current_mlh,
+                body_location=self.buffer.last_location,
+                inputs=self._summarize_inputs(query[0]),
+                episode_step=len(self.buffer.stats["lm_processed_steps"]),
+            )
+
+    def _summarize_inputs(self, features: dict) -> dict[str, str | None]:
+        """Summarize the input channels of a step for the hypothesis trace history.
+
+        Returns:
+            For each input channel, the name of the object encoded by its
+            "object_id" feature, or None for channels without one.
+        """
+        summary = {}
+        for channel, channel_features in features.items():
+            object_id = channel_features.get("object_id")
+            if object_id is None:
+                summary[channel] = None
+                continue
+            object_id = int(np.asarray(object_id).flatten()[0])
+            summary[channel] = self.object_id_feature_names.get(
+                object_id, str(object_id)
+            )
+        return summary
 
     def _displace_hypotheses(self, percepts: Sequence[Message]) -> None:
         """Displace all hypotheses by the movement since the last location.
@@ -1353,7 +1441,16 @@ class EvidenceGraphLM(GraphLM):
             # Clears the possible hypotheses by setting all hypotheses values to False.
             for hyp in self._hypotheses.values():
                 hyp.possible[:] = False
-        return super().update_terminal_condition()
+        terminal_state = super().update_terminal_condition()
+        if (
+            terminal_state == "match"
+            and self.hypothesis_tracer is not None
+            and not self.hypothesis_tracer.is_frozen
+        ):
+            # Steps taken after convergence did not contribute to it.
+            self.hypothesis_tracer.freeze()
+            self._converged_graph_id = self.get_possible_matches()[0]
+        return terminal_state
 
     def _object_pose_to_features(self, pose):
         """Turn object rotation into pose feature like vectors.
