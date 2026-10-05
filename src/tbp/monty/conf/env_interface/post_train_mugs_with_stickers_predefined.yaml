@@ -12,5 +12,5 @@ eval_env_interface_args:
   - 027_mug_numenta_vert
   object_init_sampler:
     _target_: tbp.monty.frameworks.environments.object_init_samplers.Predefined
-    rotations: ${constants.rotations_all}
+    rotations: ${constants.rotations_one_back}
 eval_env_interface_class: ${monty.class:tbp.monty.experiment.environment.OneObjectPerEpisodeInterface}

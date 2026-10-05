@@ -58,6 +58,9 @@ rotations_all:
 # One rotation.
 rotations_one_count: 1
 rotations_one:
+  - [0, 0, 0]
+
+rotations_one_back:
   - [0, 180, 0]
 
 rotations_3_count: 3 # Surprise!

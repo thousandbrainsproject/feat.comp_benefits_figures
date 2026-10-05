@@ -103,3 +103,19 @@ sensor_module_3:
         _target_: tbp.monty.frameworks.models.salience.strategies.vocus2.vocus2.NoOperatingLimits
   segmentation_strategy:
     _target_: tbp.monty.frameworks.models.salience.segmentation.strategies.slic_merge.SlicMerge
+  # Long-lasting, accumulating inhibition of return with a small (2 mm) spatial
+  # field, so that the sensor does not keep fixating the same few locations (e.g.
+  # on a shadow), while neighboring locations, such as the rest of a logo, can
+  # still be explored.
+  ior_weight: 1.0
+  return_inhibitor:
+    _target_: tbp.monty.frameworks.models.salience.return_inhibitor.ReturnInhibitor
+    decay_field:
+      _target_: tbp.monty.frameworks.models.salience.return_inhibitor.DecayField
+      pooling: sum
+      kernel_factory:
+        _target_: tbp.monty.frameworks.models.salience.return_inhibitor.DecayKernelFactory
+        tau_t: 40.0
+        tau_s: 0.003
+        spatial_cutoff: 0.005
+        w_t_min: 0.1

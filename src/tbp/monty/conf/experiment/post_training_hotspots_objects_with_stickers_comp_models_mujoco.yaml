@@ -87,7 +87,7 @@ experiment:
           segmentation_strategy:
             _target_: tbp.monty.frameworks.models.salience.segmentation.strategies.slic_merge.SlicMerge
           snapshot_telemetry:
-            _target_: tbp.monty.frameworks.models.salience.telemetry.NoopSalienceSMTelemetry
+            _target_: tbp.monty.frameworks.models.salience.telemetry.SalienceSMTelemetry
       attention_system:
         telemetry:
           _target_: tbp.monty.attention.telemetry.NoopAttentionSystemTelemetry
