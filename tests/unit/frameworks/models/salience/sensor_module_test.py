@@ -110,14 +110,18 @@ class SalienceSMTest(unittest.TestCase):
     ) -> None:
         self.sensor_module._salience_strategy.return_value = sentinel.salience_map  # type: ignore[attr-defined]
         locations = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+        on_object_mask = np.zeros((64, 64), dtype=bool)
+        on_object_mask[0, :3] = True
+        on_object_salience = np.array([0.2, 0.4, 0.6])
+        ior_weights = np.array([0.0, 0.5, 1.0])
         on_object_observation.return_value = OnObjectObservation(
             center_location=sentinel.center_location,
             locations=locations,
-            salience=sentinel.salience_map,
-            on_object_mask=np.zeros((64, 64), dtype=bool),
+            salience=on_object_salience,
+            on_object_mask=on_object_mask,
             locations_map=np.zeros((64, 64, 3)),
         )
-        self.sensor_module._return_inhibitor.return_value = sentinel.ior_weights  # type: ignore[attr-defined]
+        self.sensor_module._return_inhibitor.return_value = ior_weights  # type: ignore[attr-defined]
         salience = 0.1 * np.array([1, 2, 3])
         self.sensor_module._weight_salience = MagicMock(return_value=salience)  # type: ignore[method-assign]
         data = SensorObservation(
@@ -136,9 +140,13 @@ class SalienceSMTest(unittest.TestCase):
         self.sensor_module._return_inhibitor.assert_called_once_with(  # type: ignore[attr-defined]
             sentinel.center_location, locations
         )
-        self.sensor_module._weight_salience.assert_called_once_with(
-            self.ctx, sentinel.salience_map, sentinel.ior_weights
+        self.sensor_module._weight_salience.assert_called_once()
+        ctx, weighted_salience, weighted_ior = (
+            self.sensor_module._weight_salience.call_args.args
         )
+        self.assertIs(ctx, self.ctx)
+        self.assertIs(weighted_salience, on_object_salience)
+        self.assertIs(weighted_ior, ior_weights)
 
         self.assertEqual(len(goals), locations.shape[0])
         for i, g in enumerate(goals):
@@ -188,7 +196,7 @@ class SalienceSMRegionTest(unittest.TestCase):
         self.sensor_module = SalienceSM(
             sensor_module_id="test",
             salience_strategy=MagicMock(return_value=sentinel.salience_map),
-            return_inhibitor=MagicMock(return_value=sentinel.ior_weights),
+            return_inhibitor=MagicMock(return_value=np.zeros(3)),
             snapshot_telemetry=MagicMock(),
             segmentation_strategy=self.segmentation_strategy,
         )
@@ -210,7 +218,7 @@ class SalienceSMRegionTest(unittest.TestCase):
         on_object = OnObjectObservation(
             center_location=None,
             locations=self.locations_map[pix_rows, pix_cols],
-            salience=sentinel.salience_map,
+            salience=np.zeros(3),
             on_object_mask=self.on_object_mask,
             locations_map=self.locations_map,
         )
@@ -275,15 +283,20 @@ class SalienceSMTelemetryRecordingTest(unittest.TestCase):
                 self.locations_map[row, col] = [row, col, 1.0]
         self.segmentation_map = np.array([[1, 0], [1, 1]], dtype=np.uint8)
         self.weighted_salience = np.array([0.1, 0.5, 0.9])
+        # On-object salience and IoR weights in row-major order: (0, 0), (0, 1),
+        # (1, 1).
+        self.on_object_salience = np.array([0.8, 0.6, 0.4])
+        self.ior_weights = np.array([1.0, 0.5, 0.0])
 
         self.telemetry = SalienceSMTelemetry()
         self.sensor_module = SalienceSM(
             sensor_module_id="test",
             save_raw_obs=True,
             salience_strategy=MagicMock(return_value=sentinel.salience_map),
-            return_inhibitor=MagicMock(return_value=sentinel.ior_weights),
+            return_inhibitor=MagicMock(return_value=self.ior_weights),
             snapshot_telemetry=self.telemetry,
             segmentation_strategy=MagicMock(return_value=self.segmentation_map),
+            ior_weight=0.5,
         )
         self.sensor_module._weight_salience = MagicMock(  # type: ignore[method-assign]
             return_value=self.weighted_salience
@@ -303,7 +316,7 @@ class SalienceSMTelemetryRecordingTest(unittest.TestCase):
         on_object = OnObjectObservation(
             center_location=None,
             locations=self.locations_map[pix_rows, pix_cols],
-            salience=sentinel.salience_map,
+            salience=self.on_object_salience,
             on_object_mask=self.on_object_mask,
             locations_map=self.locations_map,
         )
@@ -312,6 +325,17 @@ class SalienceSMTelemetryRecordingTest(unittest.TestCase):
             return_value=on_object,
         ):
             self.sensor_module.step(self.ctx, self.observation)
+
+    def test_step_records_the_ior_weights_as_an_image(self) -> None:
+        self.step()
+        (ior_map,) = self.telemetry.state_dict()["ior_maps"]
+        np.testing.assert_array_equal(ior_map, [[1.0, 0.5], [np.nan, 0.0]])
+
+    def test_step_records_the_salience_left_after_ior_as_an_image(self) -> None:
+        self.step()
+        (inhibited,) = self.telemetry.state_dict()["inhibited_salience_maps"]
+        # salience - ior_weight * ior_weights, NaN off-object.
+        np.testing.assert_allclose(inhibited, [[0.3, 0.35], [np.nan, 0.4]])
 
     def test_step_records_the_segmentation_mask(self) -> None:
         self.step()
@@ -356,6 +380,8 @@ class SalienceSMTelemetryRecordingTest(unittest.TestCase):
                 "sm_properties",
                 "segmentation_maps",
                 "salience_maps",
+                "ior_maps",
+                "inhibited_salience_maps",
                 "goals",
                 "attention_regions",
             },
@@ -366,7 +392,7 @@ class SalienceSMTelemetryRecordingTest(unittest.TestCase):
             sensor_module_id="test",
             save_raw_obs=False,
             salience_strategy=MagicMock(return_value=sentinel.salience_map),
-            return_inhibitor=MagicMock(return_value=sentinel.ior_weights),
+            return_inhibitor=MagicMock(return_value=self.ior_weights),
             segmentation_strategy=MagicMock(return_value=self.segmentation_map),
         )
         self.sensor_module._weight_salience = MagicMock(  # type: ignore[method-assign]
@@ -376,11 +402,14 @@ class SalienceSMTelemetryRecordingTest(unittest.TestCase):
         state = self.sensor_module.state_dict()
         self.assertEqual(state["segmentation_maps"], [])
         self.assertEqual(state["raw_observations"], [])
+        self.assertEqual(state["ior_maps"], [])
 
     def test_reset_discards_the_recordings(self) -> None:
         self.step()
         self.sensor_module.reset()
         self.assertEqual(self.telemetry.state_dict()["segmentation_maps"], [])
+        self.assertEqual(self.telemetry.state_dict()["ior_maps"], [])
+        self.assertEqual(self.telemetry.state_dict()["inhibited_salience_maps"], [])
 
 
 class SalienceSMPrivateTest(unittest.TestCase):

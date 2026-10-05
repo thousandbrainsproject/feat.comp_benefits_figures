@@ -23,6 +23,21 @@ class OnObjectObservation:
     on_object_mask: np.ndarray
     locations_map: np.ndarray
 
+    def to_image(self, values: np.ndarray) -> np.ndarray:
+        """Scatter per-location values back into the image grid.
+
+        Args:
+            values: One value per on-object location, in the same (row-major)
+                order as `locations` and `salience`.
+
+        Returns:
+            An image-shaped float array holding `values` at the on-object pixels
+            and NaN everywhere else.
+        """
+        image = np.full(self.on_object_mask.shape, np.nan)
+        image[self.on_object_mask] = values
+        return image
+
 
 def on_object_observation(
     observation: SensorObservation,

@@ -41,6 +41,10 @@ class SalienceSMTelemetryProtocol(Protocol):
 
     def salience_map(self, salience_map: np.ndarray) -> None: ...
 
+    def ior_map(self, ior_map: np.ndarray) -> None: ...
+
+    def inhibited_salience_map(self, inhibited_salience_map: np.ndarray) -> None: ...
+
     def segmentation_map(self, segmentation_map: np.ndarray | None) -> None: ...
 
     def goals(self, goals: Sequence[Goal]) -> None: ...
@@ -65,6 +69,12 @@ class NoopSalienceSMTelemetry(SalienceSMTelemetryProtocol):
     def salience_map(self, salience_map: np.ndarray) -> None:
         pass
 
+    def ior_map(self, ior_map: np.ndarray) -> None:
+        pass
+
+    def inhibited_salience_map(self, inhibited_salience_map: np.ndarray) -> None:
+        pass
+
     def segmentation_map(self, segmentation_map: np.ndarray | None) -> None:
         pass
 
@@ -80,6 +90,8 @@ class NoopSalienceSMTelemetry(SalienceSMTelemetryProtocol):
             raw_observations=[],
             sm_properties=[],
             salience_maps=[],
+            ior_maps=[],
+            inhibited_salience_maps=[],
             segmentation_maps=[],
             goals=[],
             attention_regions=[],
@@ -90,7 +102,9 @@ class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
     """Keeps track of all of SalienceSM's telemetry.
 
     Records per step: raw observation snapshots with their poses, the 2D
-    salience map, the 2D segmentation mask, the goals proposed (as columns, see
+    salience map, the 2D inhibition-of-return (IoR) weights and the salience
+    they leave behind (both NaN off-object), the 2D segmentation mask, the goals
+    proposed (as columns, see
     :func:`~tbp.monty.cmp.goals_to_columns`) and the attention region
     proposed from the mask. Whether anything is recorded at all is the sensor module's
     decision (its `save_raw_obs` switch).
@@ -102,6 +116,8 @@ class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
         self.raw_observations: list[SensorObservation] = []
         self.poses: list[dict[str, np.ndarray]] = []
         self.salience_maps: list[np.ndarray] = []
+        self.ior_maps: list[np.ndarray] = []
+        self.inhibited_salience_maps: list[np.ndarray] = []
         self.segmentation_maps: list[np.ndarray | None] = []
         self._goals: list[dict[str, np.ndarray]] = []
         self._attention_regions: list[AttentionRegion | None] = []
@@ -111,6 +127,8 @@ class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
         self.raw_observations = []
         self.poses = []
         self.salience_maps = []
+        self.ior_maps = []
+        self.inhibited_salience_maps = []
         self.segmentation_maps = []
         self._goals = []
         self._attention_regions = []
@@ -143,6 +161,25 @@ class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
             salience_map: The 2D salience map.
         """
         self.salience_maps.append(salience_map)
+
+    def ior_map(self, ior_map: np.ndarray) -> None:
+        """Record one step's inhibition-of-return weights.
+
+        Args:
+            ior_map: The 2D IoR weights in [0, 1], NaN off-object.
+        """
+        self.ior_maps.append(ior_map)
+
+    def inhibited_salience_map(self, inhibited_salience_map: np.ndarray) -> None:
+        """Record one step's salience after inhibition of return.
+
+        This is the salience minus the scaled IoR weights, before the noise and
+        range normalization that turn it into goal confidences.
+
+        Args:
+            inhibited_salience_map: The 2D inhibited salience, NaN off-object.
+        """
+        self.inhibited_salience_maps.append(inhibited_salience_map)
 
     def segmentation_map(self, segmentation_map: np.ndarray | None) -> None:
         """Record one step's segmentation mask.
@@ -178,9 +215,10 @@ class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
 
         Returns:
             Raw observations in `raw_observations` with poses in
-            `sm_properties`, salience maps in `salience_maps`, segmentation
-            masks in `segmentation_maps`, goal columns in `goals`, and the
-            proposed regions in `attention_regions`.
+            `sm_properties`, salience maps in `salience_maps`, IoR weights in
+            `ior_maps`, the salience after IoR in `inhibited_salience_maps`,
+            segmentation masks in `segmentation_maps`, goal columns in `goals`,
+            and the proposed regions in `attention_regions`.
         """
         return dict(
             goals=self._goals,
@@ -188,5 +226,7 @@ class SalienceSMTelemetry(SalienceSMTelemetryProtocol):
             raw_observations=self.raw_observations,
             sm_properties=self.poses,
             salience_maps=self.salience_maps,
+            ior_maps=self.ior_maps,
+            inhibited_salience_maps=self.inhibited_salience_maps,
             segmentation_maps=self.segmentation_maps,
         )

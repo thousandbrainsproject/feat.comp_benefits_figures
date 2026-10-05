@@ -183,6 +183,12 @@ class SalienceSM(SensorModule):
                 observation, self.state.rotation, self.state.position
             )
             self._snapshot_telemetry.salience_map(salience_map)
+            self._snapshot_telemetry.ior_map(on_object.to_image(ior_weights))
+            self._snapshot_telemetry.inhibited_salience_map(
+                on_object.to_image(
+                    self._decay_salience(on_object.salience, ior_weights)
+                )
+            )
             self._snapshot_telemetry.segmentation_map(segmentation_map)
             self._snapshot_telemetry.goals(self._goals)
             self._snapshot_telemetry.attention_region(self._region)

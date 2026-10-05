@@ -78,6 +78,35 @@ class SalienceSMTelemetrySalienceTest(unittest.TestCase):
         self.assertEqual(self.telemetry.state_dict()["salience_maps"], [])
 
 
+class SalienceSMTelemetryInhibitionOfReturnTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.telemetry = SalienceSMTelemetry()
+        self.ior_map = np.array([[1.0, 0.0], [np.nan, 0.5]])
+        self.inhibited_salience_map = np.array([[-0.2, 0.9], [np.nan, 0.1]])
+
+    def test_each_call_records_a_map(self) -> None:
+        self.telemetry.ior_map(self.ior_map)
+        self.telemetry.inhibited_salience_map(self.inhibited_salience_map)
+        state = self.telemetry.state_dict()
+        np.testing.assert_array_equal(state["ior_maps"][0], self.ior_map)
+        np.testing.assert_array_equal(
+            state["inhibited_salience_maps"][0], self.inhibited_salience_map
+        )
+
+    def test_reset_discards_the_maps(self) -> None:
+        self.telemetry.ior_map(self.ior_map)
+        self.telemetry.inhibited_salience_map(self.inhibited_salience_map)
+        self.telemetry.reset()
+        state = self.telemetry.state_dict()
+        self.assertEqual(state["ior_maps"], [])
+        self.assertEqual(state["inhibited_salience_maps"], [])
+
+    def test_maps_are_json_encodable(self) -> None:
+        self.telemetry.ior_map(self.ior_map)
+        encoded = json.loads(json.dumps(self.telemetry.state_dict(), cls=BufferEncoder))
+        np.testing.assert_array_equal(encoded["ior_maps"][0], self.ior_map)
+
+
 def goal(x: float, confidence: float) -> Goal:
     return Goal(
         location=np.array([x, 0.0, 0.0]),
@@ -158,6 +187,8 @@ class NoopSalienceSMTelemetryTest(unittest.TestCase):
             {"rgba": np.zeros((2, 2, 4))}, qt.quaternion(1, 0, 0, 0), np.zeros(3)
         )
         self.telemetry.salience_map(np.zeros((2, 2)))
+        self.telemetry.ior_map(np.zeros((2, 2)))
+        self.telemetry.inhibited_salience_map(np.zeros((2, 2)))
         self.telemetry.segmentation_map(np.zeros((2, 2), dtype=np.uint8))
         self.telemetry.goals([goal(1.0, 0.5)])
         self.telemetry.attention_region(AttentionRegion.empty())
@@ -168,6 +199,8 @@ class NoopSalienceSMTelemetryTest(unittest.TestCase):
                 "raw_observations": [],
                 "sm_properties": [],
                 "salience_maps": [],
+                "ior_maps": [],
+                "inhibited_salience_maps": [],
                 "segmentation_maps": [],
                 "goals": [],
                 "attention_regions": [],
