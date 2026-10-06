@@ -1727,7 +1727,7 @@ class CubeViewGoalGenerator(ModelTargetGoalGenerator):
     def __init__(
         self,
         goal_tolerances=None,
-        desired_object_distance=0.03,
+        desired_object_distance=0.06,
         steps_per_view=50,
         **kwargs,
     ) -> None:
@@ -1746,6 +1746,9 @@ class CubeViewGoalGenerator(ModelTargetGoalGenerator):
             goal_tolerances, desired_object_distance=desired_object_distance, **kwargs
         )
         self.steps_per_view = steps_per_view
+        assert desired_object_distance > 0.03, (
+            f"Desired object distance must be greater than 0.03, but got {desired_object_distance}"
+        )
 
     def reset(self):
         super().reset()
@@ -1780,13 +1783,12 @@ class CubeViewGoalGenerator(ModelTargetGoalGenerator):
         view_direction = self.VIEW_DIRECTIONS[view_index]
         positions = np.asarray(model.pos)
         center = (positions.min(axis=0) + positions.max(axis=0)) / 2
-        target_loc_id = int(np.argmax((positions - center) @ view_direction))
 
         goal = self._compute_goal_for_target_loc(
             observations,
             {
                 "hypothesis_to_test": mlh,
-                "target_loc": positions[target_loc_id],
+                "target_loc": center,  # Use the center of the object as the target location
                 "target_surface_normal": view_direction,
             },
         )
@@ -1799,11 +1801,10 @@ class CubeViewGoalGenerator(ModelTargetGoalGenerator):
         self._next_view_index += 1
         logger.debug(
             f"Cube view goal: view {view_index} (direction {view_direction}) of "
-            f"{graph_id}, centered on node {target_loc_id}"
+            f"{graph_id}, centered on the object at {center}"
         )
         print(f"Performing a cube view jump!")
 
-        # assert False, "Stop here"
         return goal
 
     def _check_need_new_output_goal(

@@ -51,17 +51,17 @@ experiment:
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.NoopEvidenceGraphLMTelemetry
           gsg:
-            min_post_goal_success_steps: 10
+            min_post_goal_success_steps: 20
       sensor_modules:
         sensor_module_0:
           # Random rotations often leave the sticker at a steep angle, where the
           # sticker LM stalls. The patch SM asks for a face-on view when the
           # smoothed view angle says the surface sits steeply to the camera
-          # gsg:
-          #   _target_: tbp.monty.frameworks.models.face_on_reorientation.FaceOnReorientation
-          #   max_view_angle: 60.0
-          #   window: 2
-          #   min_steps_between_goals: 25
+          gsg:
+            _target_: tbp.monty.frameworks.models.face_on_reorientation.FaceOnReorientation
+            max_view_angle: 60.0
+            window: 2
+            min_steps_between_goals: 25
           region_proposers:
             - _target_: tbp.monty.frameworks.models.sm_region_proposal.excite_goal_locations.ExciteGoalLocations
         sensor_module_3:

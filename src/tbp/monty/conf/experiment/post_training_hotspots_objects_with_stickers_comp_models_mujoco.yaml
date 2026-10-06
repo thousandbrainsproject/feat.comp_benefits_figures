@@ -73,6 +73,7 @@ experiment:
             # CubeViewGoalGenerator does not use are ignored.
             _target_: tbp.monty.frameworks.models.goal_generation.CubeViewGoalGenerator
             steps_per_view: 50
+            desired_object_distance: 0.06
           hypothesis_tracer:
             _target_: tbp.monty.frameworks.models.evidence_matching.hypothesis_trace.HypothesisTracer
             num_recent_locations: 30
@@ -83,6 +84,11 @@ experiment:
         sensor_module_0:
           region_proposers:
             - _target_: tbp.monty.frameworks.models.sm_region_proposal.excite_goal_locations.ExciteGoalLocations
+          gsg:
+            _target_: tbp.monty.frameworks.models.face_on_reorientation.FaceOnReorientation
+            max_view_angle: 60.0
+            window: 2
+            min_steps_between_goals: 25
         sensor_module_3:
           segmentation_strategy:
             _target_: tbp.monty.frameworks.models.salience.segmentation.strategies.slic_merge.SlicMerge
