@@ -115,7 +115,7 @@ sensor_module_3:
       pooling: sum
       kernel_factory:
         _target_: tbp.monty.frameworks.models.salience.return_inhibitor.DecayKernelFactory
-        tau_t: 40.0
+        tau_t: 10.0
         tau_s: 0.003
-        spatial_cutoff: 0.005
+        spatial_cutoff: 0.006
         w_t_min: 0.1
