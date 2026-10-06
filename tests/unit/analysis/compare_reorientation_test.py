@@ -17,11 +17,15 @@ from hypothesis import strategies as st
 from scipy.spatial.transform import Rotation
 
 from analysis.scripts.compare_reorientation import (
+    accuracy_by_tilt,
+    by_rotation,
     expected_logo,
     paired_table,
     rotation_label,
     rotation_magnitude,
+    steps_by_axis,
     summary,
+    tilt_axis,
 )
 
 angles = st.lists(st.integers(min_value=0, max_value=359), min_size=3, max_size=3)
@@ -79,6 +83,60 @@ class TablesTest(unittest.TestCase):
         self.assertEqual(row.parent_correct, 2)
         self.assertEqual(row.parent_converged, 1)
         self.assertEqual(row.goals, 3)
+
+    def test_by_rotation_sums_the_trials_at_each_rotation(self) -> None:
+        table = episode_frame(["correct", "correct_mlh", "confused"], [0, 1, 2])
+        table["rotation"] = ["0/60/0", "0/60/0", "0/75/0"]
+        rows = by_rotation({"a": table})
+        self.assertEqual(list(rows.index), ["0/60/0", "0/75/0"])
+        self.assertEqual(rows.loc["0/60/0", "correct [a]"], 2)
+        self.assertEqual(rows.loc["0/60/0", "converged [a]"], 1)
+        self.assertEqual(rows.loc["0/75/0", "goals [a]"], 2)
+
+    def test_baseline_rotations_lead_the_table_but_skip_the_step_mean(self) -> None:
+        table = episode_frame(["correct", "correct", "correct"], [0, 0, 0])
+        table["rotation"] = ["0/60/0", "0/75/0", "0/0/0"]
+        table["steps"] = [40, 60, 10]
+        self.assertEqual(
+            list(by_rotation({"a": table}, baseline=["0/0/0"]).index),
+            ["0/0/0", "0/60/0", "0/75/0"],
+        )
+        self.assertEqual(
+            summary({"a": table}, baseline=["0/0/0"]).loc["a", "mean_steps"], 50
+        )
+        self.assertEqual(summary({"a": table}).loc["a", "mean_steps"], 110 / 3)
+
+    def test_tilt_axis_reads_single_axis_rotations_only(self) -> None:
+        self.assertEqual(tilt_axis("0/45/0"), ("y", 45.0))
+        self.assertEqual(tilt_axis("85/0/0"), ("x", 85.0))
+        self.assertIsNone(tilt_axis("0/0/0"))
+        self.assertIsNone(tilt_axis("45/45/0"))
+
+    def test_steps_by_axis_averages_per_axis_and_pooled(self) -> None:
+        table = episode_frame(["correct"] * 4, [0] * 4)
+        table["rotation"] = ["0/45/0", "45/0/0", "0/45/0", "0/0/0"]
+        table["steps"] = [10, 30, 20, 99]
+        rows = steps_by_axis({"a": table}).set_index(["axis", "tilt"])["a"]
+        self.assertEqual(rows[("y", 45.0)], 15)
+        self.assertEqual(rows[("x", 45.0)], 30)
+        self.assertEqual(rows[("pooled", 45.0)], 20)
+        self.assertNotIn(0.0, rows.index.get_level_values("tilt"))
+
+    def test_accuracy_by_tilt_pools_axes_and_counts_wrong_trials(self) -> None:
+        table = episode_frame(["correct", "confused", "correct_mlh"], [0, 0, 0])
+        table["rotation_deg"] = [45.0, 45.0, 60.0]
+        rows = accuracy_by_tilt({"a": table}).set_index("tilt")
+        self.assertEqual(rows.loc[45.0, "correct [a]"], 1)
+        self.assertEqual(rows.loc[45.0, "incorrect [a]"], 1)
+        self.assertEqual(rows.loc[60.0, "correct [a]"], 1)
+        self.assertEqual(rows.loc[60.0, "incorrect [a]"], 0)
+
+    def test_accuracy_by_tilt_drops_baseline_rotations(self) -> None:
+        table = episode_frame(["correct", "correct"], [0, 0])
+        table["rotation"] = ["0/0/0", "0/45/0"]
+        table["rotation_deg"] = [0.0, 45.0]
+        rows = accuracy_by_tilt({"a": table}, baseline=["0/0/0"])
+        self.assertEqual(list(rows.tilt), [45.0])
 
     def test_paired_table_puts_every_run_beside_the_trial(self) -> None:
         tables = {

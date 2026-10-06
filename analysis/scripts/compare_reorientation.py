@@ -21,10 +21,14 @@ trial in every run. Per episode, the script reads:
   the share of steps above the generator's threshold); and the steps on
   which the agent was repositioned.
 
-It prints one table per run and a paired table, writes them as CSV next to
-the figure, and draws, against the rotation of each trial: the parent LM's
-outcome, the steps until the sticker LM first held the correct logo, and the
-face-on goals fired. Run from the repo root, e.g.::
+It prints one table per run, a paired table, a summary per run and a table
+aggregated per object rotation, writes them as CSV next to the figures, and
+draws two figures: per trial, the parent LM's outcome, the steps until the
+sticker LM first held the correct logo and the face-on goals fired; and per
+rotation, the parent LM's correct and converged counts, mean steps and
+goals, one bar group per run; and mean steps against tilt about Y, about X,
+and pooled over both axes, vertically aligned by angle; and correct versus
+incorrect trial counts per angle, pooled over axes. Run from the repo root, e.g.::
 
     python -m analysis.scripts.compare_reorientation \
         reorient_cube_sweep_no_gsg reorient_cube_sweep_sm_gsg
@@ -53,6 +57,7 @@ from tbp.monty.frameworks.loggers.npz_handler import materialize
 
 if TYPE_CHECKING:
     import os
+    from collections.abc import Sequence
 
     from matplotlib.axes import Axes
 
@@ -244,8 +249,15 @@ def paired_table(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     return out
 
 
-def summary(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
+def summary(
+    tables: dict[str, pd.DataFrame], baseline: Sequence[str] = ()
+) -> pd.DataFrame:
     """Per-run totals over the episodes.
+
+    Args:
+        tables: Episode table per run label.
+        baseline: Rotation labels (``x/y/z``) of baseline trials; they count
+            toward the outcomes but are left out of ``mean_steps``.
 
     Returns:
         A table with one row per run.
@@ -253,11 +265,12 @@ def summary(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     rows = {}
     for label, t in tables.items():
         sticker_step = t.get("first_correct_mlh_step", pd.Series(dtype=float))
+        tilted = t[~t.rotation.isin(baseline)]
         rows[label] = dict(
             episodes=len(t),
             parent_correct=int(t.correct.sum()),
             parent_converged=int(t.converged.sum()),
-            mean_steps=float(t.steps.mean()),
+            mean_steps=float(tilted.steps.mean()),
             sticker_final_correct=int(t.get("final_mlh_correct", pd.Series()).sum()),
             sticker_ever_correct=int(sticker_step.notna().sum()),
             median_sticker_step=float(sticker_step.median()),
@@ -336,6 +349,238 @@ def _draw_goals(ax: Axes, tables: dict[str, pd.DataFrame]) -> None:
     ax.legend(fontsize=8)
 
 
+def by_rotation(
+    tables: dict[str, pd.DataFrame], baseline: Sequence[str] = ()
+) -> pd.DataFrame:
+    """The runs' measures aggregated over the trials at each object rotation.
+
+    Args:
+        tables: Episode table per run label.
+        baseline: Rotation labels to list first, whatever their position.
+
+    Returns:
+        One row per rotation, baseline first then in order of appearance,
+        with ``n`` trials and,
+        per run, ``correct`` and ``converged`` counts, mean ``steps``,
+        ``sticker_final_correct`` and ``goals``, the columns named
+        ``measure [run]``.
+    """
+    first = next(iter(tables.values()))
+    seen = list(dict.fromkeys(first.rotation))
+    order = [r for r in baseline if r in seen] + [r for r in seen if r not in baseline]
+    out = pd.DataFrame(
+        {"n": first.groupby("rotation").size().loc[order]}, index=order
+    ).rename_axis("rotation")
+    for label, t in tables.items():
+        g = t.groupby("rotation")
+        out[f"correct [{label}]"] = g["correct"].sum().loc[order]
+        out[f"converged [{label}]"] = g["converged"].sum().loc[order]
+        out[f"steps [{label}]"] = g["steps"].mean().loc[order].round(1)
+        if "final_mlh_correct" in t:
+            out[f"sticker_final_correct [{label}]"] = (
+                g["final_mlh_correct"].sum().loc[order]
+            )
+        if "goals" in t:
+            out[f"goals [{label}]"] = g["goals"].sum().loc[order]
+    return out
+
+
+def create_rotation_figure(
+    tables: dict[str, pd.DataFrame],
+    parent_lm: str = "LM_2",
+    baseline: Sequence[str] = (),
+) -> plt.Figure:
+    """Outcome, steps and goals per object rotation, one bar group per run.
+
+    Args:
+        tables: Episode table per run label.
+        parent_lm: The module the outcomes describe, for the title.
+        baseline: Rotation labels drawn first.
+
+    Returns:
+        The figure.
+    """
+    table = by_rotation(tables, baseline)
+    labels = list(tables)
+    x = np.arange(len(table))
+    width = 0.8 / len(labels)
+    fig, axes = plt.subplots(3, 1, figsize=(max(8, len(table)), 9), sharex=True)
+    for i, label in enumerate(labels):
+        xs = x + (i - (len(labels) - 1) / 2) * width
+        converged = table[f"converged [{label}]"].to_numpy(dtype=float)
+        correct = table[f"correct [{label}]"].to_numpy(dtype=float)
+        bars = axes[0].bar(xs, converged, width, label=label)
+        axes[0].bar(
+            xs,
+            correct - converged,
+            width,
+            bottom=converged,
+            color=bars[0].get_facecolor(),
+            alpha=0.4,
+        )
+        axes[1].bar(xs, table[f"steps [{label}]"], width, label=label)
+        if f"goals [{label}]" in table:
+            axes[2].bar(xs, table[f"goals [{label}]"], width, label=label)
+    n = int(table.n.max())
+    axes[0].set_ylabel(f"trials correct (of {n})\nsolid: converged, light: MLH only")
+    axes[0].set_yticks(range(n + 1))
+    axes[0].set_title(f"{parent_lm} performance per object rotation")
+    axes[0].legend(fontsize=8)
+    axes[1].set_ylabel("mean matching steps")
+    axes[2].set_ylabel("face-on goals")
+    axes[2].set_xticks(x)
+    axes[2].set_xticklabels(table.index)
+    axes[2].set_xlabel("object rotation x/y/z (deg)")
+    fig.tight_layout()
+    return fig
+
+
+def tilt_axis(rotation: str) -> tuple[str, float] | None:
+    """Split a single-axis rotation label into its axis and angle.
+
+    Returns:
+        ``("x", 45.0)`` for ``"45/0/0"``, ``("y", 45.0)`` for ``"0/45/0"``,
+        and so on; None for the identity or a rotation about several axes.
+    """
+    angles = [float(a) for a in rotation.split("/")]
+    nonzero = [(axis, a) for axis, a in zip("xyz", angles) if a != 0]
+    return nonzero[0] if len(nonzero) == 1 else None
+
+
+def steps_by_axis(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Mean matching steps per single-axis tilt, per run, plus the axes pooled.
+
+    Returns:
+        Columns ``axis`` (``x``, ``y`` or ``pooled``), ``tilt`` in degrees,
+        and one mean-steps column per run label. Multi-axis rotations and
+        the identity are left out.
+    """
+    frames = []
+    for label, t in tables.items():
+        parsed = t.rotation.map(tilt_axis)
+        keep = parsed.notna()
+        rows = pd.DataFrame(
+            {
+                "axis": [p[0] for p in parsed[keep]],
+                "tilt": [p[1] for p in parsed[keep]],
+                label: t.steps[keep].to_numpy(dtype=float),
+            }
+        )
+        pooled = rows.assign(axis="pooled")
+        frames.append(pd.concat([rows, pooled]).groupby(["axis", "tilt"])[label].mean())
+    return pd.concat(frames, axis=1).reset_index()
+
+
+def create_steps_by_axis_figure(
+    tables: dict[str, pd.DataFrame], parent_lm: str = "LM_2"
+) -> plt.Figure:
+    """Mean steps against tilt: about Y, about X, and both axes pooled.
+
+    The rows share the tilt axis so the same angle lines up vertically.
+
+    Returns:
+        The figure.
+    """
+    table = steps_by_axis(tables)
+    labels = list(tables)
+    tilts = sorted(table.tilt.unique())
+    x = np.arange(len(tilts))
+    width = 0.8 / len(labels)
+    rows = [
+        ("y", "tilt about Y"),
+        ("x", "tilt about X"),
+        ("pooled", "both axes pooled"),
+    ]
+    fig, axes = plt.subplots(3, 1, figsize=(max(6, 1.1 * len(tilts)), 9), sharex=True)
+    for ax, (axis, title) in zip(axes, rows):
+        part = table[table.axis == axis].set_index("tilt").reindex(tilts)
+        for i, label in enumerate(labels):
+            ax.bar(
+                x + (i - (len(labels) - 1) / 2) * width, part[label], width, label=label
+            )
+        ax.set_title(title)
+        ax.set_ylabel("mean matching steps")
+    axes[0].legend(fontsize=8)
+    axes[-1].set_xticks(x)
+    axes[-1].set_xticklabels([f"{t:g}" for t in tilts])
+    axes[-1].set_xlabel("degrees off the canonical pose")
+    fig.suptitle(f"{parent_lm} matching steps by tilt")
+    fig.tight_layout()
+    return fig
+
+
+def accuracy_by_tilt(
+    tables: dict[str, pd.DataFrame], baseline: Sequence[str] = ()
+) -> pd.DataFrame:
+    """Correct and incorrect trial counts per angle from the canonical pose.
+
+    Trials at the same angle are pooled whatever the axis of rotation.
+
+    Args:
+        tables: Episode table per run label.
+        baseline: Rotation labels (``x/y/z``) to leave out.
+
+    Returns:
+        Columns ``tilt``, and per run ``correct [run]`` (converged or correct
+        MLH) and ``incorrect [run]``.
+    """
+    first = next(iter(tables.values()))
+    first = first[~first.rotation.isin(baseline)]
+    tilts = sorted(first.rotation_deg.round(1).unique())
+    out = pd.DataFrame({"tilt": tilts})
+    for label, table in tables.items():
+        t = table[~table.rotation.isin(baseline)]
+        g = t.groupby(t.rotation_deg.round(1))
+        out[f"correct [{label}]"] = g["correct"].sum().reindex(tilts).to_numpy()
+        out[f"incorrect [{label}]"] = (
+            (g["correct"].size() - g["correct"].sum()).reindex(tilts).to_numpy()
+        )
+    return out
+
+
+def create_accuracy_by_tilt_figure(
+    tables: dict[str, pd.DataFrame],
+    parent_lm: str = "LM_2",
+    baseline: Sequence[str] = (),
+) -> plt.Figure:
+    """Stacked bars per angle: correct trials in the run's color, wrong in black.
+
+    Args:
+        tables: Episode table per run label.
+        parent_lm: The module the outcomes describe, for the title.
+        baseline: Rotation labels to leave out.
+
+    Returns:
+        The figure.
+    """
+    table = accuracy_by_tilt(tables, baseline)
+    labels = list(tables)
+    x = np.arange(len(table))
+    width = 0.8 / len(labels)
+    fig, ax = plt.subplots(figsize=(max(6, 1.1 * len(table)), 4.5))
+    for i, label in enumerate(labels):
+        xs = x + (i - (len(labels) - 1) / 2) * width
+        correct = table[f"correct [{label}]"]
+        ax.bar(xs, correct, width, label=label)
+        ax.bar(
+            xs,
+            table[f"incorrect [{label}]"],
+            width,
+            bottom=correct,
+            color="black",
+            label="Incorrect" if i == 0 else None,
+        )
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{t:g}" for t in table.tilt])
+    ax.set_xlabel("degrees off the canonical pose")
+    ax.set_ylabel("trials")
+    ax.set_title(f"{parent_lm}: correct (converged or MLH) vs incorrect, per tilt")
+    # Every bar can reach the top, so the legend goes beside the axes.
+    ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1.0))
+    fig.tight_layout()
+    return fig
+
+
 def create_figure(tables: dict[str, pd.DataFrame]) -> plt.Figure:
     """The three comparison panels.
 
@@ -357,11 +602,27 @@ def main() -> None:
     parser.add_argument("--sticker-lm", default="LM_1")
     parser.add_argument("--patch-module", default="SM_0")
     parser.add_argument("--output", type=Path, default=None, help="Figure path.")
+    parser.add_argument(
+        "--labels",
+        nargs="*",
+        default=None,
+        help="display name per run, in order (default: the run directory names)",
+    )
+    parser.add_argument(
+        "--baseline",
+        nargs="*",
+        default=(),
+        metavar="X/Y/Z",
+        help="rotations that are baselines: listed first, left out of mean steps",
+    )
     args = parser.parse_args()
 
+    labels = args.labels or [run.name for run in args.runs]
+    if len(labels) != len(args.runs):
+        parser.error("--labels needs one name per run")
     tables = {
-        run.name: episode_table(run, args.parent_lm, args.sticker_lm, args.patch_module)
-        for run in args.runs
+        label: episode_table(run, args.parent_lm, args.sticker_lm, args.patch_module)
+        for label, run in zip(labels, args.runs)
     }
     pd.set_option("display.width", 250)
     pd.set_option("display.max_columns", 40)
@@ -369,17 +630,40 @@ def main() -> None:
         print(f"\n== {label}")
         print(table.to_string())
     print("\n== summary")
-    print(summary(tables).to_string())
+    print(summary(tables, args.baseline).to_string())
+    print("\n== by rotation")
+    print(by_rotation(tables, args.baseline).to_string())
 
     output = args.output or DEFAULT_FIGURE_DIR / (
-        "reorientation_" + "_vs_".join(t for t in tables) + ".png"
+        "reorientation_" + "_vs_".join(run.name for run in args.runs) + ".png"
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     paired_table(tables).to_csv(output.with_suffix(".csv"))
-    summary(tables).to_csv(output.with_name(output.stem + "_summary.csv"))
-    fig = create_figure(tables)
-    fig.savefig(output, dpi=120)
-    print(f"\nFigure: {output}\nTables: {output.with_suffix('.csv')}")
+    summary(tables, args.baseline).to_csv(
+        output.with_name(output.stem + "_summary.csv")
+    )
+    create_figure(tables).savefig(output, dpi=120)
+    rotation_output = output.with_name(output.stem + "_by_rotation.png")
+    by_rotation(tables, args.baseline).to_csv(rotation_output.with_suffix(".csv"))
+    create_rotation_figure(tables, args.parent_lm, args.baseline).savefig(
+        rotation_output, dpi=120
+    )
+    axis_output = output.with_name(output.stem + "_steps_by_axis.png")
+    steps_by_axis(tables).to_csv(axis_output.with_suffix(".csv"), index=False)
+    create_steps_by_axis_figure(tables, args.parent_lm).savefig(axis_output, dpi=120)
+    accuracy_output = output.with_name(output.stem + "_accuracy_by_tilt.png")
+    accuracy_by_tilt(tables, args.baseline).to_csv(
+        accuracy_output.with_suffix(".csv"), index=False
+    )
+    create_accuracy_by_tilt_figure(tables, args.parent_lm, args.baseline).savefig(
+        accuracy_output, dpi=120
+    )
+    print(
+        f"\nFigures: {output}, {rotation_output}, {axis_output}, {accuracy_output}"
+        f"\nTables: {output.with_suffix('.csv')}, "
+        f"{output.with_name(output.stem + '_summary.csv')}, "
+        f"{rotation_output.with_suffix('.csv')}"
+    )
 
 
 if __name__ == "__main__":

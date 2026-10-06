@@ -1,0 +1,132 @@
+# @package _global_
+
+# Control condition of the face-on re-orientation sweep on the logos alone:
+# the two sticker objects, shown at tilts from 45 to 85 degrees in 5 degree
+# steps about Y then X plus a face-on baseline, with the patch SM's goal
+# generator off. The sticker LM (LM_1) is the one that has to recognize them,
+# so it decides the episode. The *_sm_gsg variant layers the generator on top
+# of this config; everything else is the randrot stickers comp config.
+defaults:
+  - /monty: evidencegraph_exp1000_emin_t3
+  - /monty/motor_system_config: distant_5
+  - /monty/learning_module: evidence_3lm_heterarchy
+  - /monty/sensor_module: 3sm_2d3d_dist_slic
+  - /monty/connectivity: 3lm_3sm_heterarchy
+  - /monty/attention_system: default
+  - /environment: mujoco_dist_agent_sensors3_256
+  - /env_interface: eval_objects_with_stickers_randrot
+  - /env_interface/positioning_procedures_eval: getgoodview_viewfinder_patch0
+  - /env_interface/transform: gaussianblur_missing_depthto3d_sensor4_256
+  - /logging: telemetry_detailed
+
+experiment:
+  _target_: tbp.monty.frameworks.experiments.object_recognition_experiments.MontyObjectRecognitionExperiment
+  config:
+    show_sensor_output: false
+    max_train_steps: 1000
+    max_eval_steps: 100
+    max_total_steps: 500
+    n_train_epochs: 3
+    # One epoch per rotation in the sweep below.
+    n_eval_epochs: 19
+    model_name_or_path: ${path.expanduser:${oc.env:MONTY_MODELS}/my_trained_models/supervised_pre_training_cube_cylinder_comp_models_3lm_mujoco/pretrained/}
+    match_criterion:
+      _target_: tbp.monty.experiment.match_criteria.NamedLMsMatch
+      ids:
+        - learning_module_1
+    seed: 42
+    supervised_lm_ids: []
+    python_log_level: DEBUG
+    eval_env_interface_args:
+      object_names:
+        - 021_logo_tbp
+        - 022_logo_numenta
+      object_init_sampler:
+        _target_: tbp.monty.frameworks.environments.object_init_samplers.Predefined
+        # Tilt the logo away from the camera, from the generator's threshold
+        # up: about Y, then about X.
+        rotations:
+          - [0, 45, 0]
+          - [0, 50, 0]
+          - [0, 55, 0]
+          - [0, 60, 0]
+          - [0, 65, 0]
+          - [0, 70, 0]
+          - [0, 75, 0]
+          - [0, 80, 0]
+          - [0, 85, 0]
+          - [45, 0, 0]
+          - [50, 0, 0]
+          - [55, 0, 0]
+          - [60, 0, 0]
+          - [65, 0, 0]
+          - [70, 0, 0]
+          - [75, 0, 0]
+          - [80, 0, 0]
+          - [85, 0, 0]
+          # Face-on baseline, last so the tilts keep their episode seeds.
+          - [0, 0, 0]
+      # GetGoodView stops at 50% view-finder coverage or 3 cm from the nearest
+      # point. A 2 cm tall logo never reaches the coverage criterion, so it
+      # would end 2 cm from the surface. The sticker-on-cube experiments start
+      # 7 cm away at the canonical pose (3.9 to 7 cm across tilts); stop there.
+      positioning_procedures:
+        - _target_: tbp.monty.frameworks.environments.positioning_procedures.GetGoodViewFactory
+          agent_id: agent_id_0
+          sensor_id: view_finder
+          good_view_distance: 0.07
+        - _target_: tbp.monty.frameworks.environments.positioning_procedures.GetGoodViewFactory
+          agent_id: agent_id_0
+          sensor_id: patch_0
+          allow_translation: false
+          max_orientation_attempts: 3
+          good_view_distance: 0.07
+    logging:
+      run_name: reorient_logo_sweep_no_gsg
+      # Each sweep gets its own results subdirectory.
+      output_dir: ${path.expanduser:'~/tbp/results/comp_benefits_figures/reorient_logo_sweep'}
+      exclude:
+        - SM_*/raw_observations/*/sensor_frame_data
+        # The view finder keeps cam_to_world: the reorientation figures
+        # project goals into its frames with it.
+        - SM_[012]/raw_observations/*/cam_to_world
+        # Only the view finder's frames are needed for the visualizations.
+        - SM_[012]/raw_observations/*/rgba
+        - SM_[012]/raw_observations/*/depth
+        - SM_[012]/raw_observations/*/semantic
+        - SM_[012]/raw_observations/*/world_camera
+        - SM_3/raw_observations/*/depth
+        - SM_3/raw_observations/*/semantic
+        - SM_3/raw_observations/*/world_camera
+        - SM_3/salience_maps
+        - SM_3/segmentation_maps
+    monty_config:
+      motor_system_config:
+        telemetry:
+          _target_: tbp.monty.frameworks.models.motor_system_telemetry.NoopMotorSystemTelemetry
+      learning_modules:
+        learning_module_0:
+          gsg: null
+        learning_module_1:
+          gsg: null
+          output_min_evidence: 5.0
+        learning_module_2:
+          region_proposers:
+            - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
+          gsg:
+            min_post_goal_success_steps: 20
+      sensor_modules:
+        sensor_module_0:
+          # The gsg telemetry block (view angles, goals) is logged with raw obs.
+          save_raw_obs: true
+          gsg: null
+          region_proposers: []
+        sensor_module_3:
+          # The view finder's frames feed the reorientation visualizations;
+          # its salience and segmentation maps are excluded below.
+          save_raw_obs: true
+          segmentation_strategy:
+            _target_: tbp.monty.frameworks.models.salience.segmentation.strategies.slic_merge.SlicMerge
+      attention_system:
+        telemetry:
+          _target_: tbp.monty.attention.telemetry.NoopAttentionSystemTelemetry

@@ -1,0 +1,21 @@
+# @package _global_
+
+# The logo sweep with the patch SM's face-on re-orientation at the lower
+# threshold, averaging over only a handful of steps before it fires.
+defaults:
+  - /experiment/debug/reorient_logo_sweep_no_gsg
+
+experiment:
+  config:
+    logging:
+      run_name: reorient_logo_sweep_sm_gsg
+    monty_config:
+      sensor_modules:
+        sensor_module_0:
+          gsg:
+            _target_: tbp.monty.frameworks.models.face_on_reorientation.FaceOnReorientation
+            max_view_angle: 45.0
+            window: 3
+            min_steps_between_goals: 60
+          region_proposers:
+            - _target_: tbp.monty.frameworks.models.sm_region_proposal.excite_goal_locations.ExciteGoalLocations
