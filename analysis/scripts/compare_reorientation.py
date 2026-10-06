@@ -15,7 +15,7 @@ trial in every run. Per episode, the script reads:
 * from ``eval_stats.csv``: the parent LM's outcome and steps, the target
   object and its rotation;
 * from the telemetry: the first episode step on which the sticker LM's most
-  likely hypothesis was the right logo, whether it was still right at the
+  likely hypothesis was the correct logo, whether it was still correct at the
   end, and the step it reached its terminal state; the patch module's
   ``gsg`` block (face-on goals proposed and achieved, mean view angle and
   the share of steps above the generator's threshold); and the steps on
@@ -23,7 +23,7 @@ trial in every run. Per episode, the script reads:
 
 It prints one table per run and a paired table, writes them as CSV next to
 the figure, and draws, against the rotation of each trial: the parent LM's
-outcome, the steps until the sticker LM first held the right logo, and the
+outcome, the steps until the sticker LM first held the correct logo, and the
 face-on goals fired. Run from the repo root, e.g.::
 
     python -m analysis.scripts.compare_reorientation \
@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 DEFAULT_FIGURE_DIR = Path("~/tbp/projects/comp_benefits_figures/figures").expanduser()
 # The sticker each compositional object carries, by its name's logo tag.
 LOGOS = {"tbp": "021_logo_tbp", "numenta": "022_logo_numenta"}
-RIGHT = ("correct", "correct_mlh")
+CORRECT = ("correct", "correct_mlh")
 
 
 def expected_logo(target: str) -> str | None:
@@ -125,23 +125,23 @@ def gsg_threshold(run_dir: Path, patch_module: str) -> float | None:
 
 
 def sticker_lm_record(ep: EpisodeTelemetry, lm: str, logo: str | None) -> dict:
-    """When the sticker LM held the right logo, from its MLH per processed step.
+    """When the sticker LM held the correct logo, from its MLH per processed step.
 
     Returns:
-        ``first_right_mlh_step`` (episode step, NaN if never), ``final_mlh``,
-        ``final_mlh_right``, and ``ts_step`` (the processed step the module's
+        ``first_correct_mlh_step`` (episode step, NaN if never), ``final_mlh``,
+        ``final_mlh_correct``, and ``ts_step`` (the processed step the module's
         terminal state was reached on, NaN if none).
     """
     block = ep.blocks[lm]
     mlh = materialize(block["current_mlh"])
     ids = [m["graph_id"] for m in mlh]
     steps = ep.episode_steps(f"{lm}/current_mlh")
-    right = [i for i, g in enumerate(ids) if g == logo]
+    hits = [i for i, g in enumerate(ids) if g == logo]
     ts = block.get("individual_ts_reached_at_step")
     return dict(
-        first_right_mlh_step=float(steps[right[0]]) if right else np.nan,
+        first_correct_mlh_step=float(steps[hits[0]]) if hits else np.nan,
         final_mlh=ids[-1] if ids else None,
-        final_mlh_right=bool(ids) and ids[-1] == logo,
+        final_mlh_correct=bool(ids) and ids[-1] == logo,
         ts_step=np.nan if ts is None else float(ts),
         ts_object=block.get("individual_ts_object"),
     )
@@ -215,7 +215,7 @@ def episode_table(
             rotation=rotation_label(row.primary_target_rotation_euler),
             rotation_deg=rotation_magnitude(row.primary_target_rotation_euler),
             outcome=row.primary_performance,
-            right=row.primary_performance in RIGHT,
+            correct=row.primary_performance in CORRECT,
             converged=row.primary_performance == "correct",
             steps=int(row.num_steps),
         )
@@ -239,7 +239,7 @@ def paired_table(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     for label, table in tables.items():
         out[f"outcome [{label}]"] = table["outcome"]
         out[f"steps [{label}]"] = table["steps"]
-        out[f"sticker step [{label}]"] = table.get("first_right_mlh_step")
+        out[f"sticker step [{label}]"] = table.get("first_correct_mlh_step")
         out[f"goals [{label}]"] = table.get("goals")
     return out
 
@@ -252,14 +252,14 @@ def summary(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """
     rows = {}
     for label, t in tables.items():
-        sticker_step = t.get("first_right_mlh_step", pd.Series(dtype=float))
+        sticker_step = t.get("first_correct_mlh_step", pd.Series(dtype=float))
         rows[label] = dict(
             episodes=len(t),
-            parent_right=int(t.right.sum()),
+            parent_correct=int(t.correct.sum()),
             parent_converged=int(t.converged.sum()),
             mean_steps=float(t.steps.mean()),
-            sticker_final_right=int(t.get("final_mlh_right", pd.Series()).sum()),
-            sticker_ever_right=int(sticker_step.notna().sum()),
+            sticker_final_correct=int(t.get("final_mlh_correct", pd.Series()).sum()),
+            sticker_ever_correct=int(sticker_step.notna().sum()),
             median_sticker_step=float(sticker_step.median()),
             goals=int(t.get("goals", pd.Series()).sum()),
             goals_achieved=int(t.get("goals_achieved", pd.Series()).sum()),
@@ -276,12 +276,12 @@ def _draw_outcomes(ax: Axes, tables: dict[str, pd.DataFrame]) -> None:
     width = 0.8 / len(labels)
     for i, label in enumerate(labels):
         t = tables[label]
-        score = np.where(t.converged, 1.0, np.where(t.right, 0.5, 0.0))
+        score = np.where(t.converged, 1.0, np.where(t.correct, 0.5, 0.0))
         ax.bar(x + (i - (len(labels) - 1) / 2) * width, score, width, label=label)
     ax.set_xticks(x)
     ax.set_xticklabels(trials, rotation=90, fontsize=7)
     ax.set_yticks([0, 0.5, 1])
-    ax.set_yticklabels(["wrong", "right MLH", "converged"])
+    ax.set_yticklabels(["wrong", "correct MLH", "converged"])
     ax.set_title("Parent LM outcome per trial (object, rotation x/y/z)")
     ax.legend(fontsize=8)
 
@@ -297,10 +297,10 @@ def _jittered(t: pd.DataFrame, i: int, n: int) -> np.ndarray:
 
 def _draw_sticker_steps(ax: Axes, tables: dict[str, pd.DataFrame]) -> None:
     for i, (label, t) in enumerate(tables.items()):
-        if "first_right_mlh_step" not in t:
+        if "first_correct_mlh_step" not in t:
             continue
         x = _jittered(t, i, len(tables))
-        y = t.first_right_mlh_step.to_numpy(dtype=float)
+        y = t.first_correct_mlh_step.to_numpy(dtype=float)
         never = np.isnan(y)
         ax.plot(x, y, "o", label=label, alpha=0.8)
         if never.any():
@@ -313,7 +313,7 @@ def _draw_sticker_steps(ax: Axes, tables: dict[str, pd.DataFrame]) -> None:
             )
     ax.set_xlabel("rotation from canonical pose (deg)")
     ax.set_ylabel("episode step")
-    ax.set_title("First step the sticker LM's MLH was the right logo (x: never)")
+    ax.set_title("First step the sticker LM's MLH was the correct logo (x: never)")
     ax.legend(fontsize=8)
 
 

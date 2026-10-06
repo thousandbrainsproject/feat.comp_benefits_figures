@@ -60,11 +60,11 @@ def episode_frame(outcomes: list[str], goals: list[int]) -> pd.DataFrame:
             rotation=["0/0/0"] * len(outcomes),
             rotation_deg=[0.0] * len(outcomes),
             outcome=outcomes,
-            right=[o in ("correct", "correct_mlh") for o in outcomes],
+            correct=[o in ("correct", "correct_mlh") for o in outcomes],
             converged=[o == "correct" for o in outcomes],
             steps=[10] * len(outcomes),
-            first_right_mlh_step=[0.0] * len(outcomes),
-            final_mlh_right=[True] * len(outcomes),
+            first_correct_mlh_step=[0.0] * len(outcomes),
+            final_mlh_correct=[True] * len(outcomes),
             goals=goals,
             goals_achieved=goals,
             jumps=goals,
@@ -73,10 +73,10 @@ def episode_frame(outcomes: list[str], goals: list[int]) -> pd.DataFrame:
 
 
 class TablesTest(unittest.TestCase):
-    def test_summary_counts_right_and_converged_episodes(self) -> None:
+    def test_summary_counts_correct_and_converged_episodes(self) -> None:
         tables = {"a": episode_frame(["correct", "correct_mlh", "confused"], [0, 1, 2])}
         row = summary(tables).loc["a"]
-        self.assertEqual(row.parent_right, 2)
+        self.assertEqual(row.parent_correct, 2)
         self.assertEqual(row.parent_converged, 1)
         self.assertEqual(row.goals, 3)
 
