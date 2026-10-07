@@ -2,13 +2,14 @@ experiment:
   config:
     do_eval: true
     do_train: false
+    do_post_training_unsupervised_learning: false
+    n_post_training_unsupervised_epochs: 1
     monty_config:
       monty_class: ${monty.class:tbp.monty.frameworks.models.evidence_matching.model.MontyForEvidenceGraphMatching}
       monty_args:
         num_exploratory_steps: 1000
         min_eval_steps: ${constants.min_eval_steps}
         min_train_steps: 3
-        max_total_steps: 2500
       motor_system_config:
         _target_: tbp.monty.frameworks.models.motor_system.MotorSystem
         policy_selector:
@@ -92,13 +93,15 @@ experiment:
           num_model_voxels_per_dim: 100
           max_nodes_per_graph: 2000
           gsg:
-            _target_: tbp.monty.frameworks.models.goal_generation.EvidenceGoalGenerator
+            _target_: tbp.monty.frameworks.models.goal_generation.ChildObjectsGoalGenerator
             goal_tolerances:
               location: 0.015
             elapsed_steps_factor: 10
             min_post_goal_success_steps: 20
             x_percent_scale_factor: 0.75
             desired_object_distance: 0.03
+            num_spread_neighbors: 6
+            inhibition_decay_steps: 50
           region_proposers:
           - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
           telemetry:
@@ -213,6 +216,18 @@ experiment:
                 _target_: tbp.monty.frameworks.models.salience.strategies.vocus2.vocus2.NoOperatingLimits
           segmentation_strategy:
             _target_: tbp.monty.frameworks.models.salience.segmentation.strategies.slic_merge.SlicMerge
+          ior_weight: 1.0
+          return_inhibitor:
+            _target_: tbp.monty.frameworks.models.salience.return_inhibitor.ReturnInhibitor
+            decay_field:
+              _target_: tbp.monty.frameworks.models.salience.return_inhibitor.DecayField
+              pooling: sum
+              kernel_factory:
+                _target_: tbp.monty.frameworks.models.salience.return_inhibitor.DecayKernelFactory
+                tau_t: 10.0
+                tau_s: 0.003
+                spatial_cutoff: 0.006
+                w_t_min: 0.1
           snapshot_telemetry:
             _target_: tbp.monty.frameworks.models.salience.telemetry.NoopSalienceSMTelemetry
       sm_to_agent_dict:
@@ -315,23 +330,8 @@ experiment:
         use_semantic_sensor: false
     eval_env_interface_args:
       object_names:
-      - 001_cube
-      - 006_disk
-      - 002_cube_tbp
-      - 004_cube_numenta
-      - 007_disk_tbp
-      - 009_disk_numenta
-      - 011_cylinder
-      - 016_sphere
-      - 023_mug
-      - 012_cylinder_tbp_horz
-      - 014_cylinder_numenta_horz
-      - 017_sphere_tbp
-      - 019_sphere_numenta
       - 024_mug_tbp_horz
       - 026_mug_numenta_horz
-      - 013_cylinder_tbp_vert
-      - 015_cylinder_numenta_vert
       - 025_mug_tbp_vert
       - 027_mug_numenta_vert
       object_init_sampler:
@@ -449,6 +449,10 @@ constants:
   rotations_one:
   - - 0
     - 0
+    - 0
+  rotations_one_back:
+  - - 0
+    - 180
     - 0
   rotations_3_count: 3
   rotations_3:

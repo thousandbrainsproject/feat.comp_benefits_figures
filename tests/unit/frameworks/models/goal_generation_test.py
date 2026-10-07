@@ -27,6 +27,7 @@ from scipy.spatial.transform import Rotation
 
 from tbp.monty.context import RuntimeContext
 from tbp.monty.frameworks.models.goal_generation import (
+    ChildObjectsGoalGenerator,
     CubeViewGoalGenerator,
     EvidenceGoalGenerator,
     TraceGoalGenerator,
@@ -1008,6 +1009,289 @@ class CubeViewGoalGeneratorTest(unittest.TestCase):
         self.assertEqual(self.step_at(1), [])
         (goal,) = self.step_at(51)
         self.assertEqual(goal.info["view_index"], 0)
+
+
+WHEEL_ID = 573
+BODY_ID = 1099
+LOGO_ID = 1096
+NODE_SPACING = 0.002
+
+
+def car_line_graph():
+    """A line of nodes: a wheel, then the car body, then a second (disjoint) wheel.
+
+    Returns:
+        The LM-channel graph, with 10 wheel nodes, 15 body nodes and 10 wheel nodes.
+    """
+    object_ids = np.array([WHEEL_ID] * 10 + [BODY_ID] * 15 + [WHEEL_ID] * 10)
+    positions = np.zeros((len(object_ids), 3))
+    positions[:, 0] = np.arange(len(object_ids)) * NODE_SPACING
+    return FakeGraph(positions, {"object_id": object_ids})
+
+
+def logo_line_graph():
+    positions = np.zeros((5, 3))
+    positions[:, 0] = np.arange(5) * NODE_SPACING
+    positions[:, 1] = 0.05
+    return FakeGraph(positions, {"object_id": np.full(5, LOGO_ID)})
+
+
+def oriented_sensor_graph(positions):
+    pv = np.eye(3).flatten()
+    return FakeGraph(positions, {"pose_vectors": np.tile(pv, (len(positions), 1))})
+
+
+def lm_percept(sender_id, object_id):
+    return MagicMock(
+        sender_type="LM",
+        sender_id=sender_id,
+        non_morphological_features={"object_id": object_id},
+    )
+
+
+class ChildObjectsGoalGeneratorTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.car = car_line_graph()
+        self.logo = logo_line_graph()
+        self.graphs = {
+            TOP_ID: {
+                SENSOR_CHANNEL: oriented_sensor_graph(
+                    np.vstack([self.car.pos, self.logo.pos])
+                ),
+                "learning_module_0": self.car,
+                "learning_module_1": self.logo,
+            }
+        }
+        self.mlh = self.mlh_at_node(4)
+        self.sensor_percept = MagicMock(
+            sender_type="SM", sender_id=SENSOR_CHANNEL, location=np.zeros(3)
+        )
+
+        lm = MagicMock()
+        lm.learning_module_id = "learning_module_2"
+        lm.object_id_feature_names = {}
+        lm.max_match_distance = 0.01
+        lm.buffer.get_first_sensory_input_channel.return_value = SENSOR_CHANNEL
+        lm.buffer.get_previous_input_percepts.return_value = None
+        lm.buffer.get_num_matching_steps.return_value = 30
+        lm.buffer.get_num_steps_post_output_goal_generated.return_value = 30
+        lm.get_all_known_object_ids.side_effect = lambda: list(self.graphs.keys())
+        lm._get_current_mlh.side_effect = lambda: self.mlh
+        lm.get_output.return_value = MagicMock(confidence=1.0)
+        lm.get_graph.side_effect = lambda graph_id, input_channel=None: (
+            self.graphs[graph_id]
+            if input_channel is None
+            else self.graphs[graph_id][input_channel]
+        )
+        lm.get_input_channels_in_graph.side_effect = lambda graph_id: list(
+            self.graphs[graph_id].keys()
+        )
+        self.gsg = ChildObjectsGoalGenerator(
+            min_post_goal_success_steps=20,
+            elapsed_steps_factor=10,
+            num_spread_neighbors=6,
+            inhibition_decay_steps=50,
+        )
+        self.gsg.parent_lm = lm
+
+    def mlh_at_node(self, node_id, rotation=None):
+        return {
+            "graph_id": TOP_ID,
+            "mlh_id": 0,
+            "location": np.array(self.car.pos[node_id]),
+            "rotation": Rotation.identity() if rotation is None else rotation,
+        }
+
+    def car_inhibition(self) -> np.ndarray:
+        return self.gsg.get_inhibition_weights(TOP_ID, "learning_module_0")
+
+    def set_steps_since_goal(self, steps) -> None:
+        buffer = self.gsg.parent_lm.buffer
+        buffer.get_num_steps_post_output_goal_generated.return_value = steps
+
+    # ------------------------- Spreading -------------------------
+
+    def test_recognized_child_inhibits_only_its_contiguous_region(self) -> None:
+        self.gsg._spread_from_received_ids(
+            [self.sensor_percept, lm_percept("learning_module_0", WHEEL_ID)]
+        )
+
+        inhibited = np.nonzero(self.car_inhibition())[0]
+        nptest.assert_array_equal(
+            inhibited,
+            np.arange(10),
+            "Inhibition should cover the recognized wheel, but stop at the car "
+            "body and not reach the second, disjoint wheel.",
+        )
+
+    def test_spread_is_recorded_in_the_order_nodes_were_reached(self) -> None:
+        self.gsg._spread_from_received_ids([lm_percept("learning_module_0", WHEEL_ID)])
+
+        (record,) = self.gsg.spread_records
+        self.assertEqual(record.graph_id, TOP_ID)
+        self.assertEqual(record.input_channel, "learning_module_0")
+        self.assertEqual(record.object_id, WHEEL_ID)
+        nptest.assert_array_equal(np.sort(record.node_order), np.arange(10))
+        # The spread starts from the 6 nodes nearest the MLH (at node 4), so the
+        # ends of the wheel are reached last.
+        self.assertEqual(set(record.node_order[:6].tolist()) - set(range(1, 8)), set())
+        self.assertIn(0, record.node_order[6:])
+        self.assertIn(9, record.node_order[6:])
+
+    def test_spread_records_only_hold_the_current_steps_spreads(self) -> None:
+        self.gsg.step(
+            make_ctx(), [self.sensor_percept, lm_percept("learning_module_0", WHEEL_ID)]
+        )
+        self.assertEqual(len(self.gsg.spread_records), 1)
+
+        self.gsg.step(make_ctx(), [self.sensor_percept])
+        self.assertEqual(self.gsg.spread_records, [])
+
+    def test_no_spreading_when_received_id_is_not_predicted_by_mlh(self) -> None:
+        self.mlh = self.mlh_at_node(17)  # On the car body
+
+        self.gsg._spread_from_received_ids([lm_percept("learning_module_0", WHEEL_ID)])
+
+        self.assertFalse(np.any(self.car_inhibition()))
+
+    def test_no_spreading_when_seed_neighbors_store_different_ids(self) -> None:
+        # At the border between the wheel and the body, the nearest nodes store
+        # both IDs, even though the wheel is predicted at the MLH location.
+        self.mlh = self.mlh_at_node(9)
+
+        self.gsg._spread_from_received_ids([lm_percept("learning_module_0", WHEEL_ID)])
+
+        self.assertFalse(np.any(self.car_inhibition()))
+
+    def test_ids_from_channels_not_in_the_mlh_graph_are_ignored(self) -> None:
+        self.gsg._spread_from_received_ids([lm_percept("learning_module_5", WHEEL_ID)])
+
+        self.assertFalse(np.any(self.car_inhibition()))
+
+    def test_inhibition_decays_linearly_to_zero(self) -> None:
+        self.gsg._spread_from_received_ids([lm_percept("learning_module_0", WHEEL_ID)])
+        self.assertEqual(self.car_inhibition()[0], 1.0)
+
+        for _ in range(10):
+            self.gsg._decay_inhibition()
+        self.assertAlmostEqual(self.car_inhibition()[0], 0.8)
+
+        for _ in range(40):
+            self.gsg._decay_inhibition()
+        self.assertEqual(self.car_inhibition()[0], 0.0)
+
+    def test_reset_clears_inhibition(self) -> None:
+        self.gsg._spread_from_received_ids([lm_percept("learning_module_0", WHEEL_ID)])
+
+        self.gsg.reset()
+
+        self.assertFalse(np.any(self.car_inhibition()))
+
+    # ------------------------- Selection -------------------------
+
+    def test_selects_child_with_most_nodes_first(self) -> None:
+        channel, node_id, object_id = self.gsg._select_target(make_ctx(), TOP_ID)
+
+        self.assertEqual(channel, "learning_module_0")
+        self.assertEqual(object_id, WHEEL_ID)
+        self.assertEqual(self.car.x[node_id, 0], WHEEL_ID)
+
+    def test_selects_next_child_once_largest_is_inhibited(self) -> None:
+        self.gsg._get_inhibition_steps(TOP_ID, "learning_module_0", 35)[:10] = 1
+        self.gsg._get_inhibition_steps(TOP_ID, "learning_module_0", 35)[25:] = 1
+
+        channel, _, object_id = self.gsg._select_target(make_ctx(), TOP_ID)
+        self.assertEqual((channel, object_id), ("learning_module_0", BODY_ID))
+
+        self.gsg._get_inhibition_steps(TOP_ID, "learning_module_0", 35)[:] = 1
+        channel, _, object_id = self.gsg._select_target(make_ctx(), TOP_ID)
+        self.assertEqual((channel, object_id), ("learning_module_1", LOGO_ID))
+
+    def test_only_uninhibited_nodes_are_selected(self) -> None:
+        self.gsg._get_inhibition_steps(TOP_ID, "learning_module_0", 35)[:10] = 1
+
+        for seed in range(10):
+            ctx = RuntimeContext(rng=np.random.RandomState(seed))
+            _, node_id, _ = self.gsg._select_target(ctx, TOP_ID)
+            self.assertIn(node_id, range(25, 35))
+
+    def test_no_goal_when_all_children_are_inhibited(self) -> None:
+        self.gsg._get_inhibition_steps(TOP_ID, "learning_module_0", 35)[:] = 1
+        self.gsg._get_inhibition_steps(TOP_ID, "learning_module_1", 5)[:] = 1
+
+        goal = self.gsg._generate_goal(make_ctx(), [self.sensor_percept])
+
+        self.assertIsNone(goal)
+
+    def test_goal_targets_the_selected_child_node(self) -> None:
+        goal = self.gsg._generate_goal(make_ctx(), [self.sensor_percept])
+
+        node_id = goal.info["target_node_id"]
+        self.assertEqual(goal.info["model_frame_input_channel"], "learning_module_0")
+        self.assertEqual(goal.info["target_child_object_id"], WHEEL_ID)
+        nptest.assert_allclose(
+            goal.info["model_frame_target_loc"], self.car.pos[node_id]
+        )
+
+    # ------------------------- Triggering -------------------------
+
+    def test_step_spreads_then_targets_an_unexplained_child(self) -> None:
+        self.gsg.step(
+            make_ctx(),
+            [self.sensor_percept, lm_percept("learning_module_0", WHEEL_ID)],
+        )
+
+        (goal,) = self.gsg.output_goals()
+        self.assertIn(goal.info["target_node_id"], range(25, 35))
+
+    def test_no_goal_before_min_post_goal_success_steps(self) -> None:
+        self.set_steps_since_goal(20)
+
+        self.assertFalse(
+            self.gsg._check_need_new_output_goal(make_ctx(), output_goal_achieved=False)
+        )
+
+    def test_no_goal_when_previous_goal_was_achieved(self) -> None:
+        self.assertFalse(
+            self.gsg._check_need_new_output_goal(make_ctx(), output_goal_achieved=True)
+        )
+
+    def test_goal_when_mlh_changes_or_enough_steps_elapse(self) -> None:
+        self.gsg._generate_goal(make_ctx(), [self.sensor_percept])
+
+        self.set_steps_since_goal(21)
+        self.assertFalse(
+            self.gsg._check_need_new_output_goal(
+                make_ctx(), output_goal_achieved=False
+            ),
+            "No goal when the MLH is unchanged and the step interval isn't met.",
+        )
+
+        self.set_steps_since_goal(30)
+        self.assertTrue(
+            self.gsg._check_need_new_output_goal(make_ctx(), output_goal_achieved=False)
+        )
+
+        self.set_steps_since_goal(21)
+        self.mlh = self.mlh_at_node(
+            4, rotation=Rotation.from_euler("xyz", [0, 0, 90], degrees=True)
+        )
+        self.assertTrue(
+            self.gsg._check_need_new_output_goal(make_ctx(), output_goal_achieved=False)
+        )
+
+    def test_warns_once_and_outputs_no_goals_without_child_models(self) -> None:
+        self.graphs = {TOP_ID: {SENSOR_CHANNEL: oriented_sensor_graph(self.car.pos)}}
+
+        with self.assertLogs(
+            "tbp.monty.frameworks.models.goal_generation", level="WARNING"
+        ) as logs:
+            for _ in range(3):
+                self.gsg.step(make_ctx(), [self.sensor_percept])
+
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("requires compositional models", logs.output[0])
+        self.assertEqual(self.gsg.output_goals(), [])
 
 
 if __name__ == "__main__":

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import itertools
 import logging
+from collections import deque
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -27,11 +29,13 @@ if TYPE_CHECKING:
     from tbp.monty.frameworks.models.graph_matching import GraphLM
 
 __all__ = [
+    "ChildObjectsGoalGenerator",
     "CubeViewGoalGenerator",
     "EvidenceGoalGenerator",
     "GraphGoalGenerator",
     "ModelTargetGoalGenerator",
     "ParentLMNotProvided",
+    "SpreadRecord",
     "TraceGoalGenerator",
 ]
 
@@ -536,6 +540,7 @@ class ModelTargetGoalGenerator(GraphGoalGenerator):
             "hypothesis_to_test": mlh,
             "target_loc": target_loc,
             "target_surface_normal": target_surface_normal,
+            "input_channel": input_channel,
         }
 
     def _compute_goal_for_target_loc(
@@ -610,7 +615,9 @@ class ModelTargetGoalGenerator(GraphGoalGenerator):
         # they cannot be reconstructed later (the sensor location used to derive the
         # world-frame goal is not stored) and `hypothesis_to_test` is a live dict
         # whose graph_id may change after the goal is created; visualizers use them
-        # to mark the goal on the hypothesized object model.
+        # to mark the goal on the hypothesized object model. The input channel whose
+        # graph the target was selected from (None when the target was not a node of
+        # a stored graph) lets them draw the goal in that channel's model.
         # The hypothesis identity ('hypothesis_to_test_graph_id' / '..._mlh_id') is
         # snapshotted for the same reason: if the motor system attempts this goal,
         # the parent LM uses these to decrement the evidence of the hypothesis that
@@ -622,6 +629,7 @@ class ModelTargetGoalGenerator(GraphGoalGenerator):
             "proposed_surface_loc": proposed_surface_loc,
             "model_frame_target_loc": np.array(target_info["target_loc"]),
             "model_frame_graph_id": target_info["hypothesis_to_test"]["graph_id"],
+            "model_frame_input_channel": target_info.get("input_channel"),
             "hypothesis_to_test": target_info["hypothesis_to_test"],
             "hypothesis_to_test_graph_id": target_info["hypothesis_to_test"][
                 "graph_id"
@@ -677,6 +685,26 @@ class ModelTargetGoalGenerator(GraphGoalGenerator):
             an output Goal was generated.
         """
         return self.parent_lm.buffer.get_num_steps_post_output_goal_generated()
+
+    def _get_feature_object_id_names(self, object_id_features) -> list:
+        """Get the names of the objects encoded by "object_id" feature values.
+
+        Returns:
+            The name of each object, or the feature value itself if its name is
+            not known to the parent LM.
+        """
+        names = self.parent_lm.object_id_feature_names
+        return [names.get(int(feature), int(feature)) for feature in object_id_features]
+
+    @staticmethod
+    def _get_feature_values(graph, feature) -> np.ndarray:
+        """Get the values of a feature for all nodes of a graph.
+
+        Returns:
+            Array of shape (num_nodes, feature_dim) of the feature's values.
+        """
+        feature_idx = graph.feature_mapping[feature]
+        return np.asarray(graph.x[:, feature_idx[0] : feature_idx[1]])
 
 
 class EvidenceGoalGenerator(ModelTargetGoalGenerator):
@@ -1271,16 +1299,6 @@ class EvidenceGoalGenerator(ModelTargetGoalGenerator):
             novel_channels.append(channel)
         return novel_channels
 
-    def _get_feature_object_id_names(self, object_id_features) -> list:
-        """Get the names of the objects encoded by "object_id" feature values.
-
-        Returns:
-            The name of each object, or the feature value itself if its name is
-            not known to the parent LM.
-        """
-        names = self.parent_lm.object_id_feature_names
-        return [names.get(int(feature), int(feature)) for feature in object_id_features]
-
     def _get_graph_id_names(self, graph_ids) -> list:
         """Get the names of the objects modeled by the parent LM's graphs.
 
@@ -1440,16 +1458,6 @@ class EvidenceGoalGenerator(ModelTargetGoalGenerator):
         largest_cluster_label = unique_labels[np.argmax(counts)]
         return np.nonzero(cluster_labels == largest_cluster_label)[0]
 
-    @staticmethod
-    def _get_feature_values(graph, feature) -> np.ndarray:
-        """Get the values of a feature for all nodes of a graph.
-
-        Returns:
-            Array of shape (num_nodes, feature_dim) of the feature's values.
-        """
-        feature_idx = graph.feature_mapping[feature]
-        return np.asarray(graph.x[:, feature_idx[0] : feature_idx[1]])
-
     def _check_need_new_output_goal(
         self, ctx: RuntimeContext, output_goal_achieved
     ) -> bool:
@@ -1592,6 +1600,429 @@ class EvidenceGoalGenerator(ModelTargetGoalGenerator):
             return True
 
         return False
+
+
+@dataclass(frozen=True)
+class SpreadRecord:
+    """One spread of inhibition by a `ChildObjectsGoalGenerator`.
+
+    Attributes:
+        graph_id: The graph (the MLH object) the inhibition spread through.
+        input_channel: The input channel whose graph the inhibition spread through,
+            i.e. the channel the object ID was received on.
+        object_id: The "object_id" feature value that was received.
+        node_order: The inhibited nodes, in the order the spread reached them.
+    """
+
+    graph_id: str
+    input_channel: str
+    object_id: int
+    node_order: np.ndarray
+
+
+class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
+    """Generator of Goals that visit the child objects of a compositional model.
+
+    For LMs whose models are compositional (i.e. store "object_id" features on input
+    channels from lower-level LMs), the child objects stored in the model of the most
+    likely object hypothesis (MLH) are used to direct hypothesis tests. Each
+    (channel, object ID) pair of the MLH graph is ranked by the number of nodes
+    storing it, and a random node of the highest-ranked child object is selected
+    as the location to test.
+
+    Child objects that have already been recognized by a lower-level LM, and are
+    therefore "explained", are not tested again for a while: when a lower-level LM
+    sends an object ID that the MLH predicts at its current location, inhibition
+    spreads through the MLH graph from the MLH location. A node spreads to its
+    `num_spread_neighbors` nearest neighbors (regardless of their distance) only if
+    all of them store the received object ID, so spreading covers the contiguous
+    region of the child object, without jumping to disjoint instances of it (e.g.
+    separate wheels on a car). Inhibited nodes are not selected for testing until
+    their inhibition has linearly decayed to 0 over `inhibition_decay_steps` steps.
+
+    Spreading is only performed within the graph of the channel the object ID was
+    received on.
+    """
+
+    def __init__(
+        self,
+        goal_tolerances=None,
+        desired_object_distance=0.03,
+        elapsed_steps_factor=10,
+        min_post_goal_success_steps=np.inf,
+        num_spread_neighbors=6,
+        inhibition_decay_steps=50,
+        **kwargs,
+    ) -> None:
+        """Initialize the Child Objects GSG.
+
+        Args:
+            goal_tolerances: The tolerances for each attribute of the Goal that can be
+                used by the GSG when determining whether a Goal is achieved.
+            desired_object_distance: The desired distance between the agent and the
+                object surface at the target. Defaults to 0.03.
+            elapsed_steps_factor: Once min_post_goal_success_steps have elapsed, a
+                Goal is generated every elapsed_steps_factor steps, even if the MLH
+                has not changed. Defaults to 10.
+            min_post_goal_success_steps: Number of steps that must elapse since the
+                last Goal was generated before a new one is considered. Infinity by
+                default, resulting in no Goals being generated.
+            num_spread_neighbors: Number of nearest neighbors that must all store the
+                received object ID for inhibition to spread from a node. Defaults
+                to 6; with fewer, the nearest neighbors of nodes in the (grid-like)
+                learned models tend to form small closed groups, which prevents
+                spreading across the child object.
+            inhibition_decay_steps: Number of steps over which the inhibition of a
+                node linearly decays from 1 to 0. Defaults to 50.
+            **kwargs: Additional keyword arguments.
+        """
+        super().__init__(
+            goal_tolerances, desired_object_distance=desired_object_distance, **kwargs
+        )
+        self.elapsed_steps_factor = elapsed_steps_factor
+        self.min_post_goal_success_steps = min_post_goal_success_steps
+        self.num_spread_neighbors = num_spread_neighbors
+        self.inhibition_decay_steps = inhibition_decay_steps
+        self._warned_no_child_models = False
+
+    # ======================= Public ==========================
+
+    def reset(self):
+        """Reset the inhibition of all nodes, and the MLH at the last Goal."""
+        super().reset()
+        # Number of steps of inhibition remaining for each node, keyed by
+        # (graph_id, input_channel).
+        self._inhibition_steps: dict[tuple[str, str], np.ndarray] = {}
+        self._neighbor_cache: dict[tuple[str, str, int], np.ndarray] = {}
+        self._prev_goal_mlh: dict | None = None
+        self.spread_records: list[SpreadRecord] = []
+
+    def step(self, ctx: RuntimeContext, observations):
+        """Update the inhibition of explained child objects, then step the GSG.
+
+        A new `spread_records` list is created on every step, holding the spreads
+        that took place on that step.
+        """
+        self.spread_records = []
+        self._decay_inhibition()
+        self._spread_from_received_ids(observations)
+        super().step(ctx, observations)
+
+    def get_inhibition_weights(self, graph_id, input_channel) -> np.ndarray:
+        """Get the inhibition weight of each node of a graph.
+
+        Returns:
+            Array with one weight in [0, 1] per node of the graph of the given input
+            channel; nodes with a weight of 0 can be selected for testing.
+        """
+        num_nodes = len(self.parent_lm.get_graph(graph_id, input_channel).pos)
+        steps = self._get_inhibition_steps(graph_id, input_channel, num_nodes)
+        return steps / self.inhibition_decay_steps
+
+    # ======================= Private ==========================
+
+    # ------------------- Main Algorithm -----------------------
+
+    def _generate_goal(self, ctx: RuntimeContext, observations) -> Goal | None:
+        """Generate a Goal that moves the sensor to an unexplained child object.
+
+        Returns:
+            A Goal for the motor system, or a None-type Goal if the MLH object has
+            no child object with uninhibited nodes.
+        """
+        graph_id = self._get_mlh_graph_id()
+        if graph_id is None:
+            return self._generate_none_goal()
+
+        mlh = self.parent_lm._get_current_mlh()
+        self._prev_goal_mlh = {
+            "graph_id": mlh["graph_id"],
+            "rotation": mlh["rotation"],
+        }
+
+        target = self._select_target(ctx, graph_id)
+        if target is None:
+            logger.debug(f"All child objects of {graph_id} are inhibited; no goal")
+            return self._generate_none_goal()
+
+        input_channel, node_id, object_id = target
+        target_info = self._get_target_loc_info(node_id, input_channel)
+        goal = self._compute_goal_for_target_loc(
+            observations,
+            target_info,
+            goal_confidence=self.parent_lm.get_output().confidence,
+        )
+        goal.info["target_node_id"] = node_id
+        goal.info["target_child_object_id"] = object_id
+        (object_name,) = self._get_feature_object_id_names([object_id])
+        logger.debug(
+            f"Child objects goal: testing {object_name} on channel {input_channel} "
+            f"(node {node_id}) of {graph_id}"
+        )
+        return goal
+
+    def _select_target(self, ctx: RuntimeContext, graph_id):
+        """Select a random uninhibited node of the largest child object.
+
+        The (channel, object ID) pairs of the graph are ranked by the number of
+        nodes storing them; the highest-ranked pair with any uninhibited node is
+        selected.
+
+        Returns:
+            A tuple of (input_channel, node_id, object_id), or None if every node
+            storing an object ID is inhibited.
+        """
+        candidates = []
+        channel_object_ids = {}
+        for channel in self._get_object_id_channels(graph_id):
+            graph = self.parent_lm.get_graph(graph_id, input_channel=channel)
+            object_ids = self._get_feature_values(graph, "object_id")[:, 0]
+            channel_object_ids[channel] = object_ids
+            unique_ids, counts = np.unique(object_ids, return_counts=True)
+            candidates.extend(zip(counts, [channel] * len(counts), unique_ids))
+
+        candidates.sort(key=lambda candidate: -candidate[0])
+
+        for _, channel, object_id in candidates:
+            object_ids = channel_object_ids[channel]
+            inhibition = self._get_inhibition_steps(graph_id, channel, len(object_ids))
+            eligible = np.nonzero((object_ids == object_id) & (inhibition == 0))[0]
+            if len(eligible) > 0:
+                return channel, int(ctx.rng.choice(eligible)), int(object_id)
+
+        return None
+
+    def _spread_from_received_ids(self, observations) -> None:
+        """Inhibit the child objects that lower-level LMs have recognized.
+
+        Spreading is only performed for object IDs received on an object-ID channel
+        of the MLH graph.
+        """
+        graph_id = self._get_mlh_graph_id()
+        if graph_id is None:
+            return
+
+        channels = self._get_object_id_channels(graph_id)
+        mlh_location = np.asarray(self.parent_lm._get_current_mlh()["location"])
+        for percept in observations:
+            if percept.sender_type != "LM" or percept.sender_id not in channels:
+                continue
+            object_id = (percept.non_morphological_features or {}).get("object_id")
+            if object_id is None:
+                continue
+            self._spread_inhibition(
+                graph_id,
+                percept.sender_id,
+                int(np.asarray(object_id).flatten()[0]),
+                mlh_location,
+            )
+
+    def _spread_inhibition(
+        self, graph_id, input_channel, received_id, mlh_location
+    ) -> None:
+        """Spread inhibition from the MLH location through nodes storing an ID.
+
+        Spreading only begins if the received ID is predicted by the MLH, i.e. it
+        is stored by one of the nodes nearest the MLH location that lie within the
+        parent LM's max_match_distance. Beginning with the nodes nearest the MLH
+        location, a group of neighbors is inhibited if all of them store the
+        received ID, and inhibition then continues to spread from each of them.
+
+        Each spread is appended to `spread_records`, with the inhibited nodes in the
+        order they were reached.
+        """
+        graph = self.parent_lm.get_graph(graph_id, input_channel=input_channel)
+        stores_id = self._get_feature_values(graph, "object_id")[:, 0] == received_id
+        num_nodes = len(stores_id)
+
+        num_seeds = min(self.num_spread_neighbors, num_nodes)
+        query = np.atleast_2d(mlh_location)
+        seeds = np.asarray(
+            graph.find_nearest_neighbors(query, num_neighbors=num_seeds)
+        ).reshape(-1)
+        seed_distances = np.asarray(
+            graph.find_nearest_neighbors(
+                query, num_neighbors=num_seeds, return_distance=True
+            )
+        ).reshape(-1)
+
+        nearby = seed_distances <= self.parent_lm.max_match_distance
+        if not np.any(stores_id[seeds[nearby]]):
+            return
+        if not np.all(stores_id[seeds]):
+            return
+
+        neighbors = self._get_node_neighbors(graph_id, input_channel, graph)
+        inhibited = np.zeros(num_nodes, dtype=bool)
+        inhibited[seeds] = True
+        queue = deque(seeds)
+        order = seeds.tolist()
+        visited = set(order)
+        while queue:
+            node_neighbors = neighbors[queue.popleft()]
+            if len(node_neighbors) == 0 or not np.all(stores_id[node_neighbors]):
+                continue
+            inhibited[node_neighbors] = True
+            for neighbor in node_neighbors.tolist():
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    order.append(neighbor)
+                    queue.append(neighbor)
+
+        inhibition = self._get_inhibition_steps(graph_id, input_channel, num_nodes)
+        inhibition[inhibited] = self.inhibition_decay_steps
+        self.spread_records.append(
+            SpreadRecord(
+                graph_id=graph_id,
+                input_channel=input_channel,
+                object_id=received_id,
+                node_order=np.array(order, dtype=int),
+            )
+        )
+        (object_name,) = self._get_feature_object_id_names([received_id])
+        logger.debug(
+            f"Inhibited {np.count_nonzero(inhibited)} nodes storing {object_name} "
+            f"on channel {input_channel} of {graph_id}"
+        )
+
+    def _get_node_neighbors(self, graph_id, input_channel, graph) -> np.ndarray:
+        """Get the num_spread_neighbors nearest neighbors of every node of a graph.
+
+        Returns:
+            Array of shape (num_nodes, k) of node indices, excluding each node
+            itself, where k is num_spread_neighbors (or fewer for small graphs).
+        """
+        pos = np.asarray(graph.pos)
+        num_nodes = len(pos)
+        key = (graph_id, input_channel, num_nodes)
+        if key in self._neighbor_cache:
+            return self._neighbor_cache[key]
+
+        k = min(self.num_spread_neighbors, num_nodes - 1)
+        if k < 1:
+            neighbors = np.empty((num_nodes, 0), dtype=int)
+        else:
+            nearest = np.asarray(
+                graph.find_nearest_neighbors(pos, num_neighbors=k + 1)
+            ).reshape(num_nodes, k + 1)
+            # A node is usually its own nearest neighbor, but not necessarily
+            # when several nodes share a location.
+            neighbors = np.array(
+                [[n for n in row if n != node][:k] for node, row in enumerate(nearest)]
+            )
+        self._neighbor_cache[key] = neighbors
+        return neighbors
+
+    def _decay_inhibition(self) -> None:
+        for inhibition in self._inhibition_steps.values():
+            np.maximum(inhibition - 1, 0, out=inhibition)
+
+    def _check_need_new_output_goal(
+        self,
+        ctx: RuntimeContext,  # noqa: ARG002
+        output_goal_achieved,
+    ) -> bool:
+        """Determine whether the GSG should generate a new output Goal.
+
+        Success in achieving the Goal is not an indication to need a new one, as
+        the sensor should explore the tested child object for a while. Once
+        min_post_goal_success_steps have elapsed, a new Goal is generated if the
+        MLH (object or rotation) has changed since the last Goal, or every
+        elapsed_steps_factor steps.
+
+        Returns:
+            Whether the GSG should generate a new output Goal.
+        """
+        if output_goal_achieved:
+            return False
+
+        if not self._has_child_models():
+            if not self._warned_no_child_models:
+                logger.warning(
+                    "ChildObjectsGoalGenerator requires compositional models (i.e. "
+                    "with object IDs received from another LM), but "
+                    f"{self.parent_lm.learning_module_id} has none; no goals will "
+                    "be generated."
+                )
+                self._warned_no_child_models = True
+            return False
+
+        num_elapsed_steps = self._get_num_steps_post_output_goal_generated()
+        if num_elapsed_steps <= self.min_post_goal_success_steps:
+            return False
+
+        if self._get_mlh_graph_id() is None:
+            return False
+
+        if self._mlh_changed_since_last_goal():
+            logger.debug("Child objects goal indicated: MLH changed")
+            return True
+
+        if num_elapsed_steps % self.elapsed_steps_factor == 0:
+            logger.debug("Child objects goal indicated: sufficient steps elapsed")
+            return True
+
+        return False
+
+    def _mlh_changed_since_last_goal(self) -> bool:
+        """Check whether the MLH object or rotation changed since the last Goal.
+
+        Returns:
+            Whether the MLH changed; True if no Goal has been generated yet.
+        """
+        if self._prev_goal_mlh is None:
+            return True
+        mlh = self.parent_lm._get_current_mlh()
+        if mlh["graph_id"] != self._prev_goal_mlh["graph_id"]:
+            return True
+        return not np.allclose(
+            mlh["rotation"].as_matrix(), self._prev_goal_mlh["rotation"].as_matrix()
+        )
+
+    # ------------------ Getters & Setters ---------------------
+
+    def _get_mlh_graph_id(self) -> str | None:
+        """Get the graph ID of the MLH, if it is a known object.
+
+        Returns:
+            The graph ID, or None before the MLH has been determined.
+        """
+        graph_id = self.parent_lm._get_current_mlh()["graph_id"]
+        if graph_id not in self.parent_lm.get_all_known_object_ids():
+            return None
+        return graph_id
+
+    def _get_object_id_channels(self, graph_id) -> list[str]:
+        """Get the input channels of a graph that store "object_id" features.
+
+        Returns:
+            The input channels of the graph that receive object IDs from other LMs.
+        """
+        channels = []
+        for channel in self.parent_lm.get_input_channels_in_graph(graph_id):
+            graph = self.parent_lm.get_graph(graph_id, input_channel=channel)
+            if graph.feature_mapping and "object_id" in graph.feature_mapping:
+                channels.append(channel)
+        return channels
+
+    def _has_child_models(self) -> bool:
+        return any(
+            self._get_object_id_channels(graph_id)
+            for graph_id in self.parent_lm.get_all_known_object_ids()
+        )
+
+    def _get_inhibition_steps(self, graph_id, input_channel, num_nodes) -> np.ndarray:
+        """Get the remaining inhibition steps of each node of a graph.
+
+        Returns:
+            Array (stored, so modifiable in place) with one entry per node.
+        """
+        key = (graph_id, input_channel)
+        inhibition = self._inhibition_steps.get(key)
+        if inhibition is None or len(inhibition) != num_nodes:
+            inhibition = np.zeros(num_nodes, dtype=int)
+            self._inhibition_steps[key] = inhibition
+        return inhibition
 
 
 class TraceGoalGenerator(ModelTargetGoalGenerator):
