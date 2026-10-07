@@ -1124,6 +1124,22 @@ class ChildObjectsGoalGeneratorTest(unittest.TestCase):
             "body and not reach the second, disjoint wheel.",
         )
 
+    def test_spread_reaches_outlying_nodes(self) -> None:
+        # The outlier is 10 node spacings beyond the end of the line, so no node
+        # has it among its 6 nearest neighbors, but it has the end of the line
+        # among its own.
+        positions = np.zeros((21, 3))
+        positions[:20, 0] = np.arange(20) * NODE_SPACING
+        positions[20, 0] = -10 * NODE_SPACING
+        line = FakeGraph(positions, {"object_id": np.full(21, WHEEL_ID)})
+        self.graphs[TOP_ID]["learning_module_0"] = line
+        self.mlh = {**self.mlh_at_node(0), "location": positions[10]}
+
+        self.gsg._spread_from_received_ids([lm_percept("learning_module_0", WHEEL_ID)])
+
+        weights = self.gsg.get_inhibition_weights(TOP_ID, "learning_module_0")
+        self.assertTrue(np.all(weights > 0), "Every node should be inhibited.")
+
     def test_spread_is_recorded_in_the_order_nodes_were_reached(self) -> None:
         self.gsg._spread_from_received_ids([lm_percept("learning_module_0", WHEEL_ID)])
 

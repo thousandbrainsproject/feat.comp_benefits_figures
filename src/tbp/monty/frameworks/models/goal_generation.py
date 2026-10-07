@@ -1633,11 +1633,12 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
     Child objects that have already been recognized by a lower-level LM, and are
     therefore "explained", are not tested again for a while: when a lower-level LM
     sends an object ID that the MLH predicts at its current location, inhibition
-    spreads through the MLH graph from the MLH location. A node spreads to its
-    `num_spread_neighbors` nearest neighbors (regardless of their distance) only if
-    all of them store the received object ID, so spreading covers the contiguous
-    region of the child object, without jumping to disjoint instances of it (e.g.
-    separate wheels on a car). Inhibited nodes are not selected for testing until
+    spreads through the MLH graph from the MLH location. A node's neighbors are its
+    `num_spread_neighbors` nearest nodes (regardless of their distance), together
+    with the nodes that have it among their own nearest nodes, and it spreads to
+    them only if all of them store the received object ID. Spreading therefore
+    covers the contiguous region of the child object, including outlying nodes,
+    without jumping to disjoint instances of it (e.g. separate wheels on a car). Inhibited nodes are not selected for testing until
     their inhibition has linearly decayed to 0 over `inhibition_decay_steps` steps.
 
     Spreading is only performed within the graph of the channel the object ID was
@@ -1667,11 +1668,11 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
             min_post_goal_success_steps: Number of steps that must elapse since the
                 last Goal was generated before a new one is considered. Infinity by
                 default, resulting in no Goals being generated.
-            num_spread_neighbors: Number of nearest neighbors that must all store the
-                received object ID for inhibition to spread from a node. Defaults
-                to 6; with fewer, the nearest neighbors of nodes in the (grid-like)
-                learned models tend to form small closed groups, which prevents
-                spreading across the child object.
+            num_spread_neighbors: Number of nearest neighbors of each node that,
+                together with the nodes that have it among their own nearest
+                neighbors, must all store the received object ID for inhibition to
+                spread from the node. Also the number of nodes nearest the MLH
+                location that the spread begins from. Defaults to 6.
             inhibition_decay_steps: Number of steps over which the inhibition of a
                 node linearly decays from 1 to 0. Defaults to 50.
             **kwargs: Additional keyword arguments.
@@ -1693,7 +1694,7 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         # Number of steps of inhibition remaining for each node, keyed by
         # (graph_id, input_channel).
         self._inhibition_steps: dict[tuple[str, str], np.ndarray] = {}
-        self._neighbor_cache: dict[tuple[str, str, int], np.ndarray] = {}
+        self._neighbor_cache: dict[tuple[str, str, int], list[np.ndarray]] = {}
         self._prev_goal_mlh: dict | None = None
         self.spread_records: list[SpreadRecord] = []
 
@@ -1825,8 +1826,9 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         Spreading only begins if the received ID is predicted by the MLH, i.e. it
         is stored by one of the nodes nearest the MLH location that lie within the
         parent LM's max_match_distance. Beginning with the nodes nearest the MLH
-        location, a group of neighbors is inhibited if all of them store the
-        received ID, and inhibition then continues to spread from each of them.
+        location, a node's neighbors (see `_get_node_neighbors`) are inhibited if
+        all of them store the received ID, and inhibition then continues to spread
+        from each of them.
 
         Each spread is appended to `spread_records`, with the inhibited nodes in the
         order they were reached.
@@ -1885,12 +1887,19 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
             f"on channel {input_channel} of {graph_id}"
         )
 
-    def _get_node_neighbors(self, graph_id, input_channel, graph) -> np.ndarray:
-        """Get the num_spread_neighbors nearest neighbors of every node of a graph.
+    def _get_node_neighbors(self, graph_id, input_channel, graph) -> list[np.ndarray]:
+        """Get the two-way nearest-neighbor relations of every node of a graph.
+
+        A node's neighbors are its num_spread_neighbors nearest nodes, together
+        with every node that has it among their own num_spread_neighbors nearest
+        nodes. Nearest-neighbor relations are not mutual, so without the latter,
+        an outlying node (whose nearest nodes all have closer neighbors of their
+        own) could never be reached.
 
         Returns:
-            Array of shape (num_nodes, k) of node indices, excluding each node
-            itself, where k is num_spread_neighbors (or fewer for small graphs).
+            For each node, the indices of its neighbors (excluding the node itself):
+            its own nearest neighbors first, nearest first, then the nodes that
+            have it among their nearest neighbors.
         """
         pos = np.asarray(graph.pos)
         num_nodes = len(pos)
@@ -1900,16 +1909,25 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
 
         k = min(self.num_spread_neighbors, num_nodes - 1)
         if k < 1:
-            neighbors = np.empty((num_nodes, 0), dtype=int)
+            neighbors = [np.empty(0, dtype=int) for _ in range(num_nodes)]
         else:
             nearest = np.asarray(
                 graph.find_nearest_neighbors(pos, num_neighbors=k + 1)
             ).reshape(num_nodes, k + 1)
             # A node is usually its own nearest neighbor, but not necessarily
             # when several nodes share a location.
-            neighbors = np.array(
-                [[n for n in row if n != node][:k] for node, row in enumerate(nearest)]
-            )
+            forward = [
+                [n for n in row if n != node][:k]
+                for node, row in enumerate(nearest.tolist())
+            ]
+            reverse = [[] for _ in range(num_nodes)]
+            for node, node_neighbors in enumerate(forward):
+                for neighbor in node_neighbors:
+                    reverse[neighbor].append(node)
+            neighbors = [
+                np.array(list(dict.fromkeys(forward[node] + reverse[node])), dtype=int)
+                for node in range(num_nodes)
+            ]
         self._neighbor_cache[key] = neighbors
         return neighbors
 
