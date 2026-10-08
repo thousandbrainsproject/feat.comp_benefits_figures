@@ -698,10 +698,13 @@ def make_scrollable(fig, window_height=WINDOW_HEIGHT):
     full_height = fig.get_figheight()
     if full_height <= window_height:
         return
-    # Positions in inches from the bottom of the full-height figure.
+    # The original (rather than the active) positions, since 3D axes shrink their
+    # active position to fit their aspect within the original one on every draw.
+    # Vertical positions in inches from the bottom of the full-height figure.
+    axes = [(ax, ax.get_position(original=True)) for ax in fig.axes]
     axes = [
-        (ax, ax.get_position().y0 * full_height, ax.get_position().height * full_height)
-        for ax in fig.axes
+        (ax, box.x0, box.width, box.y0 * full_height, box.height * full_height)
+        for ax, box in axes
     ]
     texts = [(text, text.get_position()[1] * full_height) for text in fig.texts]
     fig.set_size_inches(fig.get_figwidth(), window_height, forward=True)
@@ -710,10 +713,9 @@ def make_scrollable(fig, window_height=WINDOW_HEIGHT):
 
     def layout():
         bottom = max_offset - state["offset"]
-        for ax, y0, height in axes:
-            box = ax.get_position()
+        for ax, x0, width, y0, height in axes:
             y = (y0 - bottom) / window_height
-            ax.set_position([box.x0, y, box.width, height / window_height])
+            ax.set_position([x0, y, width, height / window_height])
             ax.set_visible(y < 1 and y + height / window_height > 0)
         for text, y in texts:
             text.set_y((y - bottom) / window_height)

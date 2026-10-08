@@ -1708,7 +1708,30 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
             "nodes), which is then large enough (of at least 20 nodes) to keep.",
         )
 
-    def test_small_regions_do_not_merge_through_a_thin_wall(self) -> None:
+    def test_small_regions_merge_on_their_side_of_a_thin_wall(self) -> None:
+        outside = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 6, 10)
+        inside = plane_points([0, 0, -0.001], [1, 0, 0], [0, 1, 0], 10, 10)
+        x, y = np.round(inside[:, :2] / SURFACE_SPACING).astype(int).T
+        patch = (x >= 1) & (x < 4) & (y >= 3) & (y < 6)
+        self.graph = surface_graph(
+            np.vstack([outside, inside]),
+            np.vstack([np.tile([0, 0, 1], (60, 1)), np.tile([0, 0, -1], (100, 1))]),
+            hues=np.concatenate([np.zeros(60), np.where(patch, 0.5, 0.0)]),
+        )
+        self.gsg.min_region_fraction = 0.1
+
+        inhibited = self.spread_from(60 + np.flatnonzero(patch)[4])
+
+        nptest.assert_array_equal(
+            inhibited,
+            np.arange(160) >= 60,
+            "The patch on the inside merges into the rest of the inside, although "
+            "the outside, on the far side of the wall, is a smaller neighbor.",
+        )
+
+    def test_small_regions_merge_through_a_thin_wall_without_another_neighbor(
+        self,
+    ) -> None:
         outside = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
         inside = plane_points([0.008, 0.008, -0.001], [1, 0, 0], [0, 1, 0], 3, 3)
         self.graph = surface_graph(
@@ -1717,14 +1740,14 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
         )
         self.gsg.min_region_fraction = 0.1
 
-        inhibited = self.spread_from(55)
-
-        self.assertTrue(np.all(inhibited[:100]))
-        self.assertFalse(
-            np.any(inhibited[100:]),
+        self.assertTrue(
+            np.all(self.spread_from(55)),
             "The inside patch's only neighboring region is on the far side of the "
-            "wall, so it is not merged into it.",
+            "wall, so it is merged into it.",
         )
+
+        self.gsg.min_region_fraction = None
+        self.assertFalse(np.any(self.spread_from(55)[100:]))
 
     def test_noisy_nodes_surrounded_by_the_spread_are_inhibited(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)

@@ -1753,7 +1753,8 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
                 regions that spreads from each of their nodes reach, and each
                 region with fewer than this fraction of the graph's nodes (e.g. a
                 fragment of noisy features) is merged into the smallest
-                neighboring region on the same side of the surface (see
+                neighboring region on the same side of the surface, or the
+                smallest neighboring region if none is (see
                 `_merge_small_regions`). A spread then also inhibits the whole
                 region of the node at which the sensed features are predicted.
                 None to not divide graphs into regions. Defaults to 0.03.
@@ -2191,8 +2192,9 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
 
         The smallest region with fewer than min_region_fraction of the graph's
         nodes is merged into the smallest neighboring region on the same side of
-        the surface as it (see `_on_same_side`), then the next smallest, until
-        none is left that has such a neighbor. Small neighboring regions can
+        the surface as it (see `_on_same_side`), or if none is, into the smallest
+        neighboring region, then the next smallest, until none is left that has
+        a neighbor. Small neighboring regions can
         therefore merge into a region large enough to keep (e.g. the parts of a
         mug's handle), rather than each merging into the largest region nearby.
 
@@ -2212,7 +2214,7 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         if self.min_region_fraction:
             min_size = self.min_region_fraction * len(regions)
             sizes = np.bincount(regions)
-            # Regions that had no neighbor to merge into since the last merge.
+            # Regions without neighbors (which merging other regions cannot add).
             unmergeable = set()
             while True:
                 small = [
@@ -2233,7 +2235,6 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
                 regions[regions == region] = parent
                 sizes[parent] += sizes[region]
                 sizes[region] = 0
-                unmergeable.clear()
         _, regions, sizes = np.unique(regions, return_inverse=True, return_counts=True)
         rank = np.empty(len(sizes), dtype=int)
         rank[np.argsort(-sizes, kind="stable")] = np.arange(len(sizes))
@@ -2253,14 +2254,17 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
 
         Returns:
             The smallest neighboring region on the same side of the surface as the
-            region (see `_on_same_side`), or None if there is none.
+            region (see `_on_same_side`), or if there is none, the smallest
+            neighboring region; None if the region has no neighbors.
         """
-        neighbor_regions = np.unique(regions[target])
-        for parent in sorted(neighbor_regions, key=lambda region: sizes[region]):
+        neighbor_regions = sorted(
+            np.unique(regions[target]), key=lambda region: sizes[region]
+        )
+        for parent in neighbor_regions:
             to_parent = regions[target] == parent
             if self._on_same_side(features, source[to_parent], target[to_parent]):
                 return int(parent)
-        return None
+        return int(neighbor_regions[0]) if neighbor_regions else None
 
     @staticmethod
     def _on_same_side(features, source, target) -> bool:
