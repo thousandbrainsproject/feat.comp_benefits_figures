@@ -1609,41 +1609,58 @@ class SpreadRecord:
     Attributes:
         graph_id: The graph (the MLH object) the inhibition spread through.
         input_channel: The input channel whose graph the inhibition spread through,
-            i.e. the channel the object ID was received on.
-        object_id: The "object_id" feature value that was received.
+            i.e. the channel the input was received on.
+        object_id: The "object_id" feature value that was received, or None for a
+            spread of similar features from sensory input.
         node_order: The inhibited nodes, in the order the spread reached them.
     """
 
     graph_id: str
     input_channel: str
-    object_id: int
+    object_id: int | None
     node_order: np.ndarray
 
 
 class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
-    """Generator of Goals that visit the child objects of a compositional model.
+    """Generator of Goals that visit unexplained parts of the most likely object.
 
-    For LMs whose models are compositional (i.e. store "object_id" features on input
-    channels from lower-level LMs), the child objects stored in the model of the most
-    likely object hypothesis (MLH) are used to direct hypothesis tests. Each
-    (channel, object ID) pair of the MLH graph is ranked by the number of nodes
-    storing it, and a random node of the highest-ranked child object is selected
-    as the location to test.
+    Hypothesis tests are directed at the parts of the model of the most likely
+    object hypothesis (MLH) that the LM's input has not yet explained. Within the
+    MLH graph, each channel storing "object_id" features (input from lower-level
+    LMs, i.e. a compositional model) contributes one candidate per child object (the
+    nodes storing that object ID), and every other (sensory) channel contributes
+    one candidate made up of all of its nodes. Candidates are ranked by their
+    number of nodes, and a random uninhibited node of the highest-ranked candidate
+    with any uninhibited node is selected as the location to test.
 
-    Child objects that have already been recognized by a lower-level LM, and are
-    therefore "explained", are not tested again for a while: when a lower-level LM
-    sends an object ID that the MLH predicts at its current location, inhibition
-    spreads through the MLH graph from the MLH location. A node's neighbors are its
-    `num_spread_neighbors` nearest nodes (regardless of their distance), together
-    with the nodes that have it among their own nearest nodes, and it spreads to
-    them only if all of them store the received object ID. Spreading therefore
-    covers the contiguous region of the child object, including outlying nodes,
-    without jumping to disjoint instances of it (e.g. separate wheels on a car). Inhibited nodes are not selected for testing until
-    their inhibition has linearly decayed to 0 over `inhibition_decay_steps` steps.
+    Input that the MLH predicts at its current location "explains" part of the
+    model, which is then inhibited from being tested for a while, by spreading
+    through the graph of the channel the input was received on, starting from the
+    nodes nearest the MLH location:
+    - An object ID from a lower-level LM spreads through the nodes storing it.
+    - Sensory input spreads through nodes with similar features: similar hue,
+      similar principal curvatures, and surface normals pointing in a similar
+      direction. Spreading stops wherever any of these differ, so e.g. on a mug the
+      side of the cylinder is inhibited, but not its rim, bottom or handle, and on a
+      cube a single face is inhibited, but not the other faces.
 
-    Spreading is only performed within the graph of the channel the object ID was
-    received on.
+    A node's neighbors are its `num_spread_neighbors` nearest nodes (regardless of
+    their distance), together with the nodes that have it among their own nearest
+    nodes, and it spreads to them only if all of them store the received object ID
+    or, for sensory input, are similar to it (allowing for
+    `max_dissimilar_neighbors` noisy neighbors, which it does not spread to).
+    Spreading therefore covers a contiguous region, including outlying nodes,
+    without jumping to disjoint regions (e.g. separate wheels on a car).
+    Inhibition is tracked separately for the graph of each channel, so a location
+    inhibited in one channel's graph can still be tested in another's. Inhibited nodes are not selected for testing
+    until their inhibition has linearly decayed to 0 over `inhibition_decay_steps`
+    steps.
     """
+
+    # Stored surface normals are averaged over the observations in a voxel, so a
+    # voxel spanning both sides of a wall thinner than it (e.g. a mug's) stores a
+    # shortened normal of arbitrary direction, along with mixed curvatures.
+    MIN_RELIABLE_NORMAL_LENGTH = 0.9
 
     def __init__(
         self,
@@ -1653,6 +1670,13 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         min_post_goal_success_steps=np.inf,
         num_spread_neighbors=6,
         inhibition_decay_steps=50,
+        max_hue_difference: float | None = 0.05,
+        max_curvature_difference: float | None = 1.5,
+        max_normal_angle: float | None = 25.0,
+        min_far_side_angle=135.0,
+        max_dissimilar_neighbors=1,
+        min_hue_saturation=0.1,
+        min_hue_value=0.1,
         **kwargs,
     ) -> None:
         """Initialize the Child Objects GSG.
@@ -1670,11 +1694,43 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
                 default, resulting in no Goals being generated.
             num_spread_neighbors: Number of nearest neighbors of each node that,
                 together with the nodes that have it among their own nearest
-                neighbors, must all store the received object ID for inhibition to
-                spread from the node. Also the number of nodes nearest the MLH
-                location that the spread begins from. Defaults to 6.
+                neighbors, must all store the received object ID (or have similar
+                features) for inhibition to spread from the node. Also the number
+                of nodes nearest the MLH location that the spread begins from.
+                Defaults to 6.
             inhibition_decay_steps: Number of steps over which the inhibition of a
                 node linearly decays from 1 to 0. Defaults to 50.
+            max_hue_difference: Largest circular distance in hue (in [0, 0.5]) for
+                two features to be similar. Hue is only compared between chromatic
+                features (see min_hue_saturation and min_hue_value); two achromatic
+                features are similar, and a chromatic and an achromatic one are
+                not. None to not compare hue. Defaults to 0.05.
+            max_curvature_difference: Largest difference in curvature magnitude
+                (the larger of the two absolute "principal_curvatures_log" values)
+                for two features to be similar. The smaller principal curvature
+                is not compared, as it is noisy on e.g. a cylinder, where it is
+                close to 0. None to not compare curvature. Defaults to 1.5.
+            max_normal_angle: Largest angle (in degrees) between two surface
+                normals for them to be similar. Neighboring nodes on a smoothly
+                curved surface have similar normals, unlike neighbors either side
+                of an edge. None to not compare normals. Defaults to 25.
+            min_far_side_angle: Smallest angle (in degrees) between the surface
+                normals of two neighboring nodes for one to be on the far side of
+                a thin wall from the other (e.g. the inside and outside of a mug),
+                in which case it neither stops spreading nor is spread to. Only
+                applies when normals are compared. Defaults to 135.
+            max_dissimilar_neighbors: For sensory input, the number of a node's
+                neighbors whose features may differ from its own, without stopping
+                it from spreading to the others (which have similar features). The
+                features stored in learned models are noisy, so with 0 a single
+                noisy neighbor stops a node from spreading; more lets spreading
+                leak across boundaries (e.g. onto a mug's handle). Spreading
+                through object IDs always requires all neighbors to store the ID.
+                Defaults to 1.
+            min_hue_saturation: Minimum HSV saturation for a hue to be chromatic.
+                Defaults to 0.1.
+            min_hue_value: Minimum HSV value for a hue to be chromatic. Defaults to
+                0.1.
             **kwargs: Additional keyword arguments.
         """
         super().__init__(
@@ -1684,7 +1740,13 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         self.min_post_goal_success_steps = min_post_goal_success_steps
         self.num_spread_neighbors = num_spread_neighbors
         self.inhibition_decay_steps = inhibition_decay_steps
-        self._warned_no_child_models = False
+        self.max_hue_difference = max_hue_difference
+        self.max_curvature_difference = max_curvature_difference
+        self.max_normal_angle = max_normal_angle
+        self.min_far_side_angle = min_far_side_angle
+        self.max_dissimilar_neighbors = max_dissimilar_neighbors
+        self.min_hue_saturation = min_hue_saturation
+        self.min_hue_value = min_hue_value
 
     # ======================= Public ==========================
 
@@ -1695,18 +1757,24 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         # (graph_id, input_channel).
         self._inhibition_steps: dict[tuple[str, str], np.ndarray] = {}
         self._neighbor_cache: dict[tuple[str, str, int], list[np.ndarray]] = {}
+        # For sensory spreading: whether each node's neighbors all have features
+        # similar to its own, and each node's neighbors on the same side of the
+        # surface, keyed like the neighbor cache.
+        self._similar_neighbors_cache: dict[
+            tuple[str, str, int], tuple[np.ndarray, list[np.ndarray]]
+        ] = {}
         self._prev_goal_mlh: dict | None = None
         self.spread_records: list[SpreadRecord] = []
 
     def step(self, ctx: RuntimeContext, observations):
-        """Update the inhibition of explained child objects, then step the GSG.
+        """Update the inhibition of explained parts of the MLH, then step the GSG.
 
         A new `spread_records` list is created on every step, holding the spreads
         that took place on that step.
         """
         self.spread_records = []
         self._decay_inhibition()
-        self._spread_from_received_ids(observations)
+        self._spread_from_observations(observations)
         super().step(ctx, observations)
 
     def get_inhibition_weights(self, graph_id, input_channel) -> np.ndarray:
@@ -1725,11 +1793,11 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
     # ------------------- Main Algorithm -----------------------
 
     def _generate_goal(self, ctx: RuntimeContext, observations) -> Goal | None:
-        """Generate a Goal that moves the sensor to an unexplained child object.
+        """Generate a Goal that moves the sensor to an unexplained part of the MLH.
 
         Returns:
-            A Goal for the motor system, or a None-type Goal if the MLH object has
-            no child object with uninhibited nodes.
+            A Goal for the motor system, or a None-type Goal if every node of the
+            MLH object's graphs is inhibited.
         """
         graph_id = self._get_mlh_graph_id()
         if graph_id is None:
@@ -1743,7 +1811,7 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
 
         target = self._select_target(ctx, graph_id)
         if target is None:
-            logger.debug(f"All child objects of {graph_id} are inhibited; no goal")
+            logger.debug(f"All nodes of {graph_id} are inhibited; no goal")
             return self._generate_none_goal()
 
         input_channel, node_id, object_id = target
@@ -1755,115 +1823,185 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         )
         goal.info["target_node_id"] = node_id
         goal.info["target_child_object_id"] = object_id
-        (object_name,) = self._get_feature_object_id_names([object_id])
+        if object_id is None:
+            tested = "sensory features"
+        else:
+            (tested,) = self._get_feature_object_id_names([object_id])
         logger.debug(
-            f"Child objects goal: testing {object_name} on channel {input_channel} "
+            f"Child objects goal: testing {tested} on channel {input_channel} "
             f"(node {node_id}) of {graph_id}"
         )
         return goal
 
     def _select_target(self, ctx: RuntimeContext, graph_id):
-        """Select a random uninhibited node of the largest child object.
+        """Select a random uninhibited node of the largest candidate of the graph.
 
-        The (channel, object ID) pairs of the graph are ranked by the number of
-        nodes storing them; the highest-ranked pair with any uninhibited node is
-        selected.
+        Each object ID stored on an object-ID channel of the graph is one candidate
+        (the nodes storing it), and every other channel is one candidate (all of its
+        nodes). Candidates are ranked by their number of nodes; the highest-ranked
+        one with any uninhibited node is selected.
 
         Returns:
-            A tuple of (input_channel, node_id, object_id), or None if every node
-            storing an object ID is inhibited.
+            A tuple of (input_channel, node_id, object_id), where object_id is None
+            for a sensory channel, or None if every node is inhibited.
         """
         candidates = []
-        channel_object_ids = {}
-        for channel in self._get_object_id_channels(graph_id):
+        candidate_nodes = {}
+        object_id_channels = self._get_object_id_channels(graph_id)
+        for channel in self.parent_lm.get_input_channels_in_graph(graph_id):
             graph = self.parent_lm.get_graph(graph_id, input_channel=channel)
-            object_ids = self._get_feature_values(graph, "object_id")[:, 0]
-            channel_object_ids[channel] = object_ids
-            unique_ids, counts = np.unique(object_ids, return_counts=True)
-            candidates.extend(zip(counts, [channel] * len(counts), unique_ids))
+            num_nodes = len(graph.pos)
+            if channel in object_id_channels:
+                object_ids = self._get_feature_values(graph, "object_id")[:, 0]
+                for object_id in np.unique(object_ids):
+                    nodes = object_ids == object_id
+                    candidate_nodes[(channel, int(object_id))] = nodes
+                    candidates.append(
+                        (np.count_nonzero(nodes), channel, int(object_id))
+                    )
+            else:
+                candidate_nodes[(channel, None)] = np.ones(num_nodes, dtype=bool)
+                candidates.append((num_nodes, channel, None))
 
         candidates.sort(key=lambda candidate: -candidate[0])
 
         for _, channel, object_id in candidates:
-            object_ids = channel_object_ids[channel]
-            inhibition = self._get_inhibition_steps(graph_id, channel, len(object_ids))
-            eligible = np.nonzero((object_ids == object_id) & (inhibition == 0))[0]
+            nodes = candidate_nodes[(channel, object_id)]
+            inhibition = self._get_inhibition_steps(graph_id, channel, len(nodes))
+            eligible = np.nonzero(nodes & (inhibition == 0))[0]
             if len(eligible) > 0:
-                return channel, int(ctx.rng.choice(eligible)), int(object_id)
+                return channel, int(ctx.rng.choice(eligible)), object_id
 
         return None
 
-    def _spread_from_received_ids(self, observations) -> None:
-        """Inhibit the child objects that lower-level LMs have recognized.
+    def _spread_from_observations(self, observations) -> None:
+        """Inhibit the parts of the MLH graph explained by this step's input.
 
-        Spreading is only performed for object IDs received on an object-ID channel
-        of the MLH graph.
+        Object IDs received from lower-level LMs on an object-ID channel of the MLH
+        graph spread through the nodes storing them, and sensory input received on
+        any other channel of the MLH graph spreads through nodes with similar
+        features.
         """
         graph_id = self._get_mlh_graph_id()
         if graph_id is None:
             return
 
-        channels = self._get_object_id_channels(graph_id)
-        mlh_location = np.asarray(self.parent_lm._get_current_mlh()["location"])
+        mlh = self.parent_lm._get_current_mlh()
+        channels = self.parent_lm.get_input_channels_in_graph(graph_id)
+        object_id_channels = self._get_object_id_channels(graph_id)
         for percept in observations:
-            if percept.sender_type != "LM" or percept.sender_id not in channels:
+            channel = percept.sender_id
+            if channel not in channels:
                 continue
-            object_id = (percept.non_morphological_features or {}).get("object_id")
-            if object_id is None:
-                continue
-            self._spread_inhibition(
-                graph_id,
-                percept.sender_id,
-                int(np.asarray(object_id).flatten()[0]),
-                mlh_location,
-            )
+            if channel in object_id_channels:
+                object_id = (percept.non_morphological_features or {}).get("object_id")
+                if percept.sender_type != "LM" or object_id is None:
+                    continue
+                self._spread_object_id(
+                    graph_id,
+                    channel,
+                    int(np.asarray(object_id).flatten()[0]),
+                    mlh["location"],
+                )
+            elif percept.sender_type == "SM":
+                self._spread_similar_features(graph_id, channel, percept, mlh)
 
-    def _spread_inhibition(
+    def _spread_object_id(
         self, graph_id, input_channel, received_id, mlh_location
     ) -> None:
         """Spread inhibition from the MLH location through nodes storing an ID.
 
         Spreading only begins if the received ID is predicted by the MLH, i.e. it
         is stored by one of the nodes nearest the MLH location that lie within the
-        parent LM's max_match_distance. Beginning with the nodes nearest the MLH
-        location, a node's neighbors (see `_get_node_neighbors`) are inhibited if
-        all of them store the received ID, and inhibition then continues to spread
-        from each of them.
-
-        Each spread is appended to `spread_records`, with the inhibited nodes in the
-        order they were reached.
+        parent LM's max_match_distance, and all of the nodes nearest the MLH
+        location store it.
         """
         graph = self.parent_lm.get_graph(graph_id, input_channel=input_channel)
         stores_id = self._get_feature_values(graph, "object_id")[:, 0] == received_id
-        num_nodes = len(stores_id)
 
-        num_seeds = min(self.num_spread_neighbors, num_nodes)
-        query = np.atleast_2d(mlh_location)
-        seeds = np.asarray(
-            graph.find_nearest_neighbors(query, num_neighbors=num_seeds)
-        ).reshape(-1)
-        seed_distances = np.asarray(
-            graph.find_nearest_neighbors(
-                query, num_neighbors=num_seeds, return_distance=True
-            )
-        ).reshape(-1)
-
+        seeds, seed_distances = self._get_nodes_nearest_mlh(graph, mlh_location)
         nearby = seed_distances <= self.parent_lm.max_match_distance
-        if not np.any(stores_id[seeds[nearby]]):
-            return
-        if not np.all(stores_id[seeds]):
+        if not np.any(stores_id[seeds[nearby]]) or not np.all(stores_id[seeds]):
             return
 
         neighbors = self._get_node_neighbors(graph_id, input_channel, graph)
+        source, target = self._get_neighbor_edges(neighbors)
+        spreads = self._all_neighbors_satisfy(stores_id[target], source, len(stores_id))
+        self._spread_from_seeds(
+            graph_id, input_channel, seeds, neighbors, spreads, object_id=received_id
+        )
+
+    def _spread_similar_features(
+        self, graph_id, input_channel, percept: Message, mlh
+    ) -> None:
+        """Spread inhibition from the MLH location through nodes with similar features.
+
+        Spreading only begins if the sensed features are predicted by the MLH, i.e.
+        they are similar to the features of one of the nodes nearest the MLH
+        location that lie within the parent LM's max_match_distance (with the
+        sensed surface normal rotated into the model's frame by the MLH rotation).
+        Unlike for object IDs, stored features vary from node to node, so the
+        spread begins from those of the nodes nearest the MLH location that are
+        similar to the nearest such node, rather than requiring all of them to be.
+        Nodes on the far side of a thin wall (see min_far_side_angle) are ignored
+        throughout.
+        """
+        graph = self.parent_lm.get_graph(graph_id, input_channel=input_channel)
+        features = self._get_spread_features(graph)
+        if not features:
+            return
+        sensed = self._get_sensed_spread_features(percept, mlh["rotation"])
+
+        seeds, seed_distances = self._get_nodes_nearest_mlh(graph, mlh["location"])
+        nearby = seeds[seed_distances <= self.parent_lm.max_match_distance]
+        if "reliable" in features:
+            nearby = nearby[features["reliable"][nearby]]
+        predicted = nearby[self._similar_features(features, nearby, sensed)]
+        if len(predicted) == 0:
+            return
+        reference = {name: values[predicted[0]] for name, values in features.items()}
+        seeds = seeds[
+            ~self._far_side(features, seeds, reference)
+            & self._similar_features(features, seeds, reference)
+        ]
+
+        spreads, neighbors = self._get_similar_neighbors(
+            graph_id, input_channel, graph, features
+        )
+        self._spread_from_seeds(
+            graph_id, input_channel, seeds, neighbors, spreads, object_id=None
+        )
+
+    def _spread_from_seeds(
+        self, graph_id, input_channel, seeds, neighbors, spreads, object_id
+    ) -> None:
+        """Inhibit the seeds and spread inhibition from them through the graph.
+
+        Beginning with the seeds, every reached node that spreads inhibits all of
+        its neighbors, and inhibition then continues to spread from each of them.
+        The spread is appended to `spread_records`, with the inhibited nodes in the
+        order they were reached.
+
+        Args:
+            graph_id: The graph to spread through.
+            input_channel: The input channel whose graph to spread through.
+            seeds: The nodes to begin spreading from.
+            neighbors: The neighbors of each node of the graph (see
+                `_get_node_neighbors`).
+            spreads: Whether each node of the graph spreads to its neighbors.
+            object_id: The received object ID, or None for sensory input.
+        """
+        num_nodes = len(spreads)
         inhibited = np.zeros(num_nodes, dtype=bool)
         inhibited[seeds] = True
-        queue = deque(seeds)
+        queue = deque(seeds.tolist())
         order = seeds.tolist()
         visited = set(order)
         while queue:
-            node_neighbors = neighbors[queue.popleft()]
-            if len(node_neighbors) == 0 or not np.all(stores_id[node_neighbors]):
+            node = queue.popleft()
+            if not spreads[node]:
                 continue
+            node_neighbors = neighbors[node]
             inhibited[node_neighbors] = True
             for neighbor in node_neighbors.tolist():
                 if neighbor not in visited:
@@ -1877,15 +2015,262 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
             SpreadRecord(
                 graph_id=graph_id,
                 input_channel=input_channel,
-                object_id=received_id,
+                object_id=object_id,
                 node_order=np.array(order, dtype=int),
             )
         )
-        (object_name,) = self._get_feature_object_id_names([received_id])
+        if object_id is None:
+            explained = "similar features"
+        else:
+            (object_name,) = self._get_feature_object_id_names([object_id])
+            explained = f"storing {object_name}"
         logger.debug(
-            f"Inhibited {np.count_nonzero(inhibited)} nodes storing {object_name} "
-            f"on channel {input_channel} of {graph_id}"
+            f"Inhibited {np.count_nonzero(inhibited)} nodes {explained} on channel "
+            f"{input_channel} of {graph_id}"
         )
+
+    def _get_nodes_nearest_mlh(
+        self, graph, mlh_location
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Get the num_spread_neighbors nodes of a graph nearest the MLH location.
+
+        Returns:
+            The nodes, nearest first, and their distances from the MLH location.
+        """
+        num_seeds = min(self.num_spread_neighbors, len(graph.pos))
+        query = np.atleast_2d(np.asarray(mlh_location, dtype=float))
+        seeds = np.asarray(
+            graph.find_nearest_neighbors(query, num_neighbors=num_seeds)
+        ).reshape(-1)
+        distances = np.asarray(
+            graph.find_nearest_neighbors(
+                query, num_neighbors=num_seeds, return_distance=True
+            )
+        ).reshape(-1)
+        return seeds, distances
+
+    def _get_spread_features(self, graph) -> dict[str, np.ndarray]:
+        """Get the features of every node of a graph that sensory spreading compares.
+
+        Returns:
+            Arrays of each compared feature the graph stores, with one row per node:
+            "hsv" (hue, saturation and value), "curvature" (the curvature
+            magnitude, i.e. the larger of the two absolute
+            "principal_curvatures_log" values) and "normal" (the unit surface
+            normal). Features not compared (see the max_* thresholds) are omitted.
+        """
+        feature_mapping = graph.feature_mapping or {}
+        features = {}
+        if self.max_hue_difference is not None and "hsv" in feature_mapping:
+            features["hsv"] = self._get_feature_values(graph, "hsv")[:, :3]
+        if (
+            self.max_curvature_difference is not None
+            and "principal_curvatures_log" in feature_mapping
+        ):
+            features["curvature"] = np.abs(
+                self._get_feature_values(graph, "principal_curvatures_log")[:, :2]
+            ).max(axis=1)
+        if self.max_normal_angle is not None and "pose_vectors" in feature_mapping:
+            normals = self._get_feature_values(graph, "pose_vectors")[:, :3]
+            lengths = np.linalg.norm(normals, axis=1)
+            features["normal"] = normals / np.maximum(lengths, 1e-12)[:, None]
+            features["reliable"] = lengths >= self.MIN_RELIABLE_NORMAL_LENGTH
+        return features
+
+    @staticmethod
+    def _get_sensed_spread_features(percept: Message, rotation) -> dict:
+        """Get the sensed features that sensory spreading compares.
+
+        Args:
+            percept: The sensory input.
+            rotation: The MLH rotation, which rotates sensed (body-frame) pose
+                vectors into the model's frame.
+
+        Returns:
+            The sensed "hsv", "curvature" and "normal" (in the model's frame), for
+            those the percept carries.
+        """
+        non_morphological = percept.non_morphological_features or {}
+        morphological = percept.morphological_features or {}
+        sensed = {}
+        if non_morphological.get("hsv") is not None:
+            sensed["hsv"] = np.asarray(non_morphological["hsv"], dtype=float)[:3]
+        if non_morphological.get("principal_curvatures_log") is not None:
+            sensed["curvature"] = np.abs(
+                np.asarray(non_morphological["principal_curvatures_log"], dtype=float)
+            ).max()
+        if morphological.get("pose_vectors") is not None:
+            normal = rotation.apply(
+                np.asarray(morphological["pose_vectors"], dtype=float)[0]
+            )
+            sensed["normal"] = normal / np.linalg.norm(normal)
+        return sensed
+
+    def _similar_features(self, features, nodes, reference) -> np.ndarray:
+        """Check which of a set of nodes have features similar to a reference.
+
+        Only the features present in both `features` and `reference` are compared.
+
+        Args:
+            features: The compared features of every node (see
+                `_get_spread_features`).
+            nodes: The nodes to check.
+            reference: The features to compare them to, in the same format (one
+                value per feature).
+
+        Returns:
+            Whether each node's features are similar to the reference.
+        """
+        return self._similar_feature_pairs(
+            {name: values[nodes] for name, values in features.items()},
+            {
+                name: np.broadcast_to(value, (len(nodes), *np.shape(value)))
+                for name, value in reference.items()
+            },
+        )
+
+    def _similar_feature_pairs(self, features_a, features_b) -> np.ndarray:
+        """Check which pairs of features are similar.
+
+        Args:
+            features_a: Arrays of features, with one row per pair.
+            features_b: Arrays of the features to compare them to, likewise.
+
+        Returns:
+            Whether the features of each pair are similar in hue, curvature and
+            surface normal, comparing only the features present in both.
+        """
+        num_pairs = len(next(iter(features_a.values()), []))
+        similar = np.ones(num_pairs, dtype=bool)
+        if "hsv" in features_a and "hsv" in features_b:
+            hsv_a, hsv_b = features_a["hsv"], features_b["hsv"]
+            chromatic_a = (hsv_a[:, 1] >= self.min_hue_saturation) & (
+                hsv_a[:, 2] >= self.min_hue_value
+            )
+            chromatic_b = (hsv_b[:, 1] >= self.min_hue_saturation) & (
+                hsv_b[:, 2] >= self.min_hue_value
+            )
+            hue_difference = np.abs(hsv_a[:, 0] - hsv_b[:, 0])
+            hue_difference = np.minimum(hue_difference, 1.0 - hue_difference)
+            similar &= np.where(
+                chromatic_a & chromatic_b,
+                hue_difference <= self.max_hue_difference,
+                chromatic_a == chromatic_b,
+            )
+        if "curvature" in features_a and "curvature" in features_b:
+            curvature_difference = np.abs(
+                features_a["curvature"] - features_b["curvature"]
+            )
+            similar &= curvature_difference <= self.max_curvature_difference
+        if "normal" in features_a and "normal" in features_b:
+            cosine = np.sum(features_a["normal"] * features_b["normal"], axis=1)
+            similar &= cosine >= np.cos(np.radians(self.max_normal_angle))
+        return similar
+
+    def _far_side(self, features, nodes, reference) -> np.ndarray:
+        """Check which of a set of nodes are on the far side of a thin wall.
+
+        Args:
+            features: The compared features of every node (see
+                `_get_spread_features`).
+            nodes: The nodes to check.
+            reference: The features of the node on the near side.
+
+        Returns:
+            Whether each node's surface normal faces away from the reference's by
+            at least min_far_side_angle (never, if normals are not compared).
+        """
+        if "normal" not in features or "normal" not in reference:
+            return np.zeros(len(nodes), dtype=bool)
+        cosine = features["normal"][nodes] @ reference["normal"]
+        return cosine <= np.cos(np.radians(self.min_far_side_angle))
+
+    def _get_similar_neighbors(
+        self, graph_id, input_channel, graph, features
+    ) -> tuple[np.ndarray, list[np.ndarray]]:
+        """Get the neighbors of each node for spreading through similar features.
+
+        Neighbors on the far side of a thin wall from a node (see
+        min_far_side_angle) are not its neighbors here, as they are not part of the
+        same surface. A node spreads to the neighbors with features similar to its
+        own if at most max_dissimilar_neighbors of its neighbors are not. A node
+        with an unreliable stored normal (see MIN_RELIABLE_NORMAL_LENGTH) does not
+        spread, and does not stop its neighbors from spreading, but is inhibited
+        when a spread reaches it.
+
+        Returns:
+            For each node of the graph, whether it spreads, and the neighbors it
+            spreads to.
+        """
+        key = (graph_id, input_channel, len(graph.pos))
+        if key not in self._similar_neighbors_cache:
+            num_nodes = len(graph.pos)
+            reliable = features.get("reliable", np.ones(num_nodes, dtype=bool))
+            all_neighbors = self._get_node_neighbors(graph_id, input_channel, graph)
+            source, target = self._get_neighbor_edges(all_neighbors)
+            near_side = np.ones(len(source), dtype=bool)
+            if "normal" in features:
+                cosine = np.sum(
+                    features["normal"][source] * features["normal"][target], axis=1
+                )
+                near_side = (
+                    (cosine > np.cos(np.radians(self.min_far_side_angle)))
+                    | ~reliable[source]
+                    | ~reliable[target]
+                )
+            source, target = source[near_side], target[near_side]
+            similar = self._similar_feature_pairs(
+                {name: values[source] for name, values in features.items()},
+                {name: values[target] for name, values in features.items()},
+            )
+            reachable = similar | ~reliable[target]
+            num_dissimilar = np.bincount(source[~reachable], minlength=num_nodes)
+            spreads = (
+                reliable
+                & (np.bincount(source, minlength=num_nodes) > 0)
+                & (num_dissimilar <= self.max_dissimilar_neighbors)
+            )
+            source, target = source[reachable], target[reachable]
+            boundaries = np.searchsorted(source, np.arange(num_nodes + 1))
+            neighbors = [
+                target[boundaries[node] : boundaries[node + 1]]
+                for node in range(num_nodes)
+            ]
+            self._similar_neighbors_cache[key] = (spreads, neighbors)
+        return self._similar_neighbors_cache[key]
+
+    @staticmethod
+    def _all_neighbors_satisfy(satisfied, source, num_nodes) -> np.ndarray:
+        """Get whether each node has neighbors, and all of them satisfy a condition.
+
+        Args:
+            satisfied: Whether the condition is satisfied, for each neighbor edge.
+            source: The node each neighbor edge belongs to.
+            num_nodes: The number of nodes in the graph.
+
+        Returns:
+            For each node, whether it has neighbors that all satisfy the condition.
+        """
+        has_neighbors = np.bincount(source, minlength=num_nodes) > 0
+        unsatisfied = np.bincount(source[~satisfied], minlength=num_nodes) > 0
+        return has_neighbors & ~unsatisfied
+
+    @staticmethod
+    def _get_neighbor_edges(neighbors) -> tuple[np.ndarray, np.ndarray]:
+        """Get every (node, neighbor) pair of a graph.
+
+        Args:
+            neighbors: The neighbors of each node (see `_get_node_neighbors`).
+
+        Returns:
+            The node and the neighbor of each pair, ordered by node.
+        """
+        source = np.repeat(
+            np.arange(len(neighbors)),
+            [len(node_neighbors) for node_neighbors in neighbors],
+        )
+        target = np.concatenate(neighbors) if len(neighbors) else np.empty(0, dtype=int)
+        return source, target.astype(int)
 
     def _get_node_neighbors(self, graph_id, input_channel, graph) -> list[np.ndarray]:
         """Get the two-way nearest-neighbor relations of every node of a graph.
@@ -1943,7 +2328,7 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         """Determine whether the GSG should generate a new output Goal.
 
         Success in achieving the Goal is not an indication to need a new one, as
-        the sensor should explore the tested child object for a while. Once
+        the sensor should explore the tested location for a while. Once
         min_post_goal_success_steps have elapsed, a new Goal is generated if the
         MLH (object or rotation) has changed since the last Goal, or every
         elapsed_steps_factor steps.
@@ -1952,17 +2337,6 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
             Whether the GSG should generate a new output Goal.
         """
         if output_goal_achieved:
-            return False
-
-        if not self._has_child_models():
-            if not self._warned_no_child_models:
-                logger.warning(
-                    "ChildObjectsGoalGenerator requires compositional models (i.e. "
-                    "with object IDs received from another LM), but "
-                    f"{self.parent_lm.learning_module_id} has none; no goals will "
-                    "be generated."
-                )
-                self._warned_no_child_models = True
             return False
 
         num_elapsed_steps = self._get_num_steps_post_output_goal_generated()
@@ -2022,12 +2396,6 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
             if graph.feature_mapping and "object_id" in graph.feature_mapping:
                 channels.append(channel)
         return channels
-
-    def _has_child_models(self) -> bool:
-        return any(
-            self._get_object_id_channels(graph_id)
-            for graph_id in self.parent_lm.get_all_known_object_ids()
-        )
 
     def _get_inhibition_steps(self, graph_id, input_channel, num_nodes) -> np.ndarray:
         """Get the remaining inhibition steps of each node of a graph.

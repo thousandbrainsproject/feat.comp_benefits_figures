@@ -1053,18 +1053,23 @@ class ChildObjectsGoalGeneratorTest(unittest.TestCase):
     def setUp(self) -> None:
         self.car = car_line_graph()
         self.logo = logo_line_graph()
+        # The sensor channel has fewer nodes than any child object, so that child
+        # objects are ranked first when selecting a target.
+        self.sensor = oriented_sensor_graph(self.car.pos[::9])
         self.graphs = {
             TOP_ID: {
-                SENSOR_CHANNEL: oriented_sensor_graph(
-                    np.vstack([self.car.pos, self.logo.pos])
-                ),
+                SENSOR_CHANNEL: self.sensor,
                 "learning_module_0": self.car,
                 "learning_module_1": self.logo,
             }
         }
         self.mlh = self.mlh_at_node(4)
         self.sensor_percept = MagicMock(
-            sender_type="SM", sender_id=SENSOR_CHANNEL, location=np.zeros(3)
+            sender_type="SM",
+            sender_id=SENSOR_CHANNEL,
+            location=np.zeros(3),
+            morphological_features={"pose_vectors": np.eye(3)},
+            non_morphological_features={},
         )
 
         lm = MagicMock()
@@ -1112,7 +1117,7 @@ class ChildObjectsGoalGeneratorTest(unittest.TestCase):
     # ------------------------- Spreading -------------------------
 
     def test_recognized_child_inhibits_only_its_contiguous_region(self) -> None:
-        self.gsg._spread_from_received_ids(
+        self.gsg._spread_from_observations(
             [self.sensor_percept, lm_percept("learning_module_0", WHEEL_ID)]
         )
 
@@ -1135,13 +1140,13 @@ class ChildObjectsGoalGeneratorTest(unittest.TestCase):
         self.graphs[TOP_ID]["learning_module_0"] = line
         self.mlh = {**self.mlh_at_node(0), "location": positions[10]}
 
-        self.gsg._spread_from_received_ids([lm_percept("learning_module_0", WHEEL_ID)])
+        self.gsg._spread_from_observations([lm_percept("learning_module_0", WHEEL_ID)])
 
         weights = self.gsg.get_inhibition_weights(TOP_ID, "learning_module_0")
         self.assertTrue(np.all(weights > 0), "Every node should be inhibited.")
 
     def test_spread_is_recorded_in_the_order_nodes_were_reached(self) -> None:
-        self.gsg._spread_from_received_ids([lm_percept("learning_module_0", WHEEL_ID)])
+        self.gsg._spread_from_observations([lm_percept("learning_module_0", WHEEL_ID)])
 
         (record,) = self.gsg.spread_records
         self.assertEqual(record.graph_id, TOP_ID)
@@ -1155,18 +1160,21 @@ class ChildObjectsGoalGeneratorTest(unittest.TestCase):
         self.assertIn(9, record.node_order[6:])
 
     def test_spread_records_only_hold_the_current_steps_spreads(self) -> None:
+        def recorded_channels():
+            return [record.input_channel for record in self.gsg.spread_records]
+
         self.gsg.step(
             make_ctx(), [self.sensor_percept, lm_percept("learning_module_0", WHEEL_ID)]
         )
-        self.assertEqual(len(self.gsg.spread_records), 1)
+        self.assertEqual(recorded_channels(), [SENSOR_CHANNEL, "learning_module_0"])
 
         self.gsg.step(make_ctx(), [self.sensor_percept])
-        self.assertEqual(self.gsg.spread_records, [])
+        self.assertEqual(recorded_channels(), [SENSOR_CHANNEL])
 
     def test_no_spreading_when_received_id_is_not_predicted_by_mlh(self) -> None:
         self.mlh = self.mlh_at_node(17)  # On the car body
 
-        self.gsg._spread_from_received_ids([lm_percept("learning_module_0", WHEEL_ID)])
+        self.gsg._spread_from_observations([lm_percept("learning_module_0", WHEEL_ID)])
 
         self.assertFalse(np.any(self.car_inhibition()))
 
@@ -1175,17 +1183,17 @@ class ChildObjectsGoalGeneratorTest(unittest.TestCase):
         # both IDs, even though the wheel is predicted at the MLH location.
         self.mlh = self.mlh_at_node(9)
 
-        self.gsg._spread_from_received_ids([lm_percept("learning_module_0", WHEEL_ID)])
+        self.gsg._spread_from_observations([lm_percept("learning_module_0", WHEEL_ID)])
 
         self.assertFalse(np.any(self.car_inhibition()))
 
     def test_ids_from_channels_not_in_the_mlh_graph_are_ignored(self) -> None:
-        self.gsg._spread_from_received_ids([lm_percept("learning_module_5", WHEEL_ID)])
+        self.gsg._spread_from_observations([lm_percept("learning_module_5", WHEEL_ID)])
 
         self.assertFalse(np.any(self.car_inhibition()))
 
     def test_inhibition_decays_linearly_to_zero(self) -> None:
-        self.gsg._spread_from_received_ids([lm_percept("learning_module_0", WHEEL_ID)])
+        self.gsg._spread_from_observations([lm_percept("learning_module_0", WHEEL_ID)])
         self.assertEqual(self.car_inhibition()[0], 1.0)
 
         for _ in range(10):
@@ -1197,7 +1205,7 @@ class ChildObjectsGoalGeneratorTest(unittest.TestCase):
         self.assertEqual(self.car_inhibition()[0], 0.0)
 
     def test_reset_clears_inhibition(self) -> None:
-        self.gsg._spread_from_received_ids([lm_percept("learning_module_0", WHEEL_ID)])
+        self.gsg._spread_from_observations([lm_percept("learning_module_0", WHEEL_ID)])
 
         self.gsg.reset()
 
@@ -1223,6 +1231,17 @@ class ChildObjectsGoalGeneratorTest(unittest.TestCase):
         channel, _, object_id = self.gsg._select_target(make_ctx(), TOP_ID)
         self.assertEqual((channel, object_id), ("learning_module_1", LOGO_ID))
 
+        self.gsg._get_inhibition_steps(TOP_ID, "learning_module_1", 5)[:] = 1
+        channel, _, object_id = self.gsg._select_target(make_ctx(), TOP_ID)
+        self.assertEqual((channel, object_id), (SENSOR_CHANNEL, None))
+
+    def test_sensor_channel_is_ranked_by_its_number_of_nodes(self) -> None:
+        self.graphs[TOP_ID][SENSOR_CHANNEL] = oriented_sensor_graph(self.car.pos)
+
+        channel, _, object_id = self.gsg._select_target(make_ctx(), TOP_ID)
+
+        self.assertEqual((channel, object_id), (SENSOR_CHANNEL, None))
+
     def test_only_uninhibited_nodes_are_selected(self) -> None:
         self.gsg._get_inhibition_steps(TOP_ID, "learning_module_0", 35)[:10] = 1
 
@@ -1231,9 +1250,10 @@ class ChildObjectsGoalGeneratorTest(unittest.TestCase):
             _, node_id, _ = self.gsg._select_target(ctx, TOP_ID)
             self.assertIn(node_id, range(25, 35))
 
-    def test_no_goal_when_all_children_are_inhibited(self) -> None:
+    def test_no_goal_when_every_node_is_inhibited(self) -> None:
         self.gsg._get_inhibition_steps(TOP_ID, "learning_module_0", 35)[:] = 1
         self.gsg._get_inhibition_steps(TOP_ID, "learning_module_1", 5)[:] = 1
+        self.gsg._get_inhibition_steps(TOP_ID, SENSOR_CHANNEL, 4)[:] = 1
 
         goal = self.gsg._generate_goal(make_ctx(), [self.sensor_percept])
 
@@ -1296,18 +1316,269 @@ class ChildObjectsGoalGeneratorTest(unittest.TestCase):
             self.gsg._check_need_new_output_goal(make_ctx(), output_goal_achieved=False)
         )
 
-    def test_warns_once_and_outputs_no_goals_without_child_models(self) -> None:
+    def test_targets_sensor_nodes_without_compositional_models(self) -> None:
         self.graphs = {TOP_ID: {SENSOR_CHANNEL: oriented_sensor_graph(self.car.pos)}}
+        # A sensed normal the MLH does not predict, so nothing is inhibited.
+        self.sensor_percept.morphological_features = {
+            "pose_vectors": np.roll(np.eye(3), 1, axis=0)
+        }
 
-        with self.assertLogs(
-            "tbp.monty.frameworks.models.goal_generation", level="WARNING"
-        ) as logs:
-            for _ in range(3):
-                self.gsg.step(make_ctx(), [self.sensor_percept])
+        self.gsg.step(make_ctx(), [self.sensor_percept])
 
-        self.assertEqual(len(logs.records), 1)
-        self.assertIn("requires compositional models", logs.output[0])
-        self.assertEqual(self.gsg.output_goals(), [])
+        (goal,) = self.gsg.output_goals()
+        self.assertEqual(goal.info["model_frame_input_channel"], SENSOR_CHANNEL)
+        self.assertIsNone(goal.info["target_child_object_id"])
+
+
+SURFACE_SPACING = 0.002
+
+
+def plane_points(origin, u, v, nu, nv):
+    """A grid of nu x nv points spanning directions u and v from an origin.
+
+    Returns:
+        The points, shape (nu * nv, 3).
+    """
+    iu, iv = np.meshgrid(np.arange(nu), np.arange(nv), indexing="ij")
+    return (
+        np.asarray(origin, dtype=float)
+        + iu.reshape(-1, 1) * SURFACE_SPACING * np.asarray(u, dtype=float)
+        + iv.reshape(-1, 1) * SURFACE_SPACING * np.asarray(v, dtype=float)
+    )
+
+
+def surface_graph(positions, normals, hues=None, saturations=None, curvatures=None):
+    """A sensor-channel graph storing hue, curvature and surface normals.
+
+    Returns:
+        The graph.
+    """
+    num_nodes = len(positions)
+    normals = np.broadcast_to(np.asarray(normals, dtype=float), (num_nodes, 3))
+    pose_vectors = np.zeros((num_nodes, 9))
+    pose_vectors[:, :3] = normals
+    hsv = np.column_stack(
+        [
+            np.zeros(num_nodes) if hues is None else hues,
+            np.ones(num_nodes) if saturations is None else saturations,
+            np.ones(num_nodes),
+        ]
+    )
+    curvature = np.zeros((num_nodes, 2))
+    if curvatures is not None:
+        curvature[:, 1] = curvatures
+    return FakeGraph(
+        positions,
+        {
+            "pose_vectors": pose_vectors,
+            "hsv": hsv,
+            "principal_curvatures_log": curvature,
+        },
+    )
+
+
+class SensoryFeatureSpreadingTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.graph = None
+        self.mlh = None
+        lm = MagicMock()
+        lm.learning_module_id = "learning_module_0"
+        lm.object_id_feature_names = {}
+        lm.max_match_distance = 0.01
+        lm.get_all_known_object_ids.side_effect = lambda: [TOP_ID]
+        lm._get_current_mlh.side_effect = lambda: self.mlh
+        lm.get_graph.side_effect = lambda _graph_id, input_channel=None: (
+            {SENSOR_CHANNEL: self.graph} if input_channel is None else self.graph
+        )
+        lm.get_input_channels_in_graph.side_effect = lambda _graph_id: [SENSOR_CHANNEL]
+        self.gsg = ChildObjectsGoalGenerator()
+        self.gsg.parent_lm = lm
+
+    def spread_from(self, node, rotation=None, **sensed_overrides) -> np.ndarray:
+        """Spread from sensing the features stored at a node.
+
+        Args:
+            node: The node at the MLH location.
+            rotation: The MLH rotation; the sensed normal is the stored one rotated
+                into the body frame by its inverse. Identity if None.
+            **sensed_overrides: Sensed features replacing the stored ones.
+
+        Returns:
+            Whether each node is inhibited.
+        """
+        rotation = Rotation.identity() if rotation is None else rotation
+        mapping = self.graph.feature_mapping
+        features = {
+            name: self.graph.x[node, start:end]
+            for name, (start, end) in mapping.items()
+        }
+        pose_vectors = features["pose_vectors"].reshape(3, 3)
+        pose_vectors = rotation.inv().apply(pose_vectors)
+        sensed = {
+            "pose_vectors": pose_vectors,
+            "hsv": features["hsv"],
+            "principal_curvatures_log": features["principal_curvatures_log"],
+            **sensed_overrides,
+        }
+        percept = MagicMock(
+            sender_type="SM",
+            sender_id=SENSOR_CHANNEL,
+            morphological_features={"pose_vectors": sensed["pose_vectors"]},
+            non_morphological_features={
+                "hsv": sensed["hsv"],
+                "principal_curvatures_log": sensed["principal_curvatures_log"],
+            },
+        )
+        self.mlh = {
+            "graph_id": TOP_ID,
+            "mlh_id": 0,
+            "location": np.array(self.graph.pos[node]),
+            "rotation": rotation,
+        }
+        self.gsg.reset()
+        self.gsg._spread_from_observations([percept])
+        return self.gsg.get_inhibition_weights(TOP_ID, SENSOR_CHANNEL) > 0
+
+    def test_spreads_across_a_face_but_not_around_an_edge(self) -> None:
+        # Two faces of a cube meeting at an edge.
+        top = plane_points([0, 0, 0.02], [1, 0, 0], [0, 1, 0], 10, 10)
+        side = plane_points([0.02, 0, 0], [0, 0, 1], [0, 1, 0], 10, 10)
+        self.graph = surface_graph(
+            np.vstack([top, side]),
+            np.vstack([np.tile([0, 0, 1], (100, 1)), np.tile([1, 0, 0], (100, 1))]),
+        )
+
+        inhibited = self.spread_from(55)
+
+        self.assertTrue(np.all(inhibited[:100]), "The sensed face is inhibited.")
+        self.assertFalse(np.any(inhibited[100:]), "The adjacent face is not.")
+
+    def test_spreads_around_a_cylinder_but_not_onto_its_cap(self) -> None:
+        radius, num_around, num_along = 0.02, 60, 8
+        angles = np.arange(num_around) * 2 * np.pi / num_around
+        heights = np.arange(num_along) * SURFACE_SPACING
+        angle, height = np.meshgrid(angles, heights, indexing="ij")
+        normals = np.column_stack(
+            [np.cos(angle.ravel()), np.sin(angle.ravel()), np.zeros(angle.size)]
+        )
+        side = np.column_stack([radius * normals[:, :2], height.ravel()])
+        cap = plane_points([-0.019, -0.019, heights[-1]], [1, 0, 0], [0, 1, 0], 20, 20)
+        cap = cap[np.linalg.norm(cap[:, :2], axis=1) < radius - SURFACE_SPACING]
+        self.graph = surface_graph(
+            np.vstack([side, cap]),
+            np.vstack([normals, np.tile([0, 0, 1], (len(cap), 1))]),
+        )
+
+        inhibited = self.spread_from(4)
+
+        self.assertTrue(
+            np.all(inhibited[: len(side)]),
+            "The whole side is inhibited, as neighboring normals are similar even "
+            "though the normals around the cylinder are not.",
+        )
+        self.assertFalse(np.any(inhibited[len(side) :]), "The cap is not inhibited.")
+
+    def test_stops_where_hue_differs(self) -> None:
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
+        right = points[:, 0] >= 0.02
+        self.graph = surface_graph(points, [0, 0, 1], hues=np.where(right, 0.5, 0.0))
+
+        inhibited = self.spread_from(25)
+
+        nptest.assert_array_equal(inhibited, ~right)
+
+    def test_stops_where_one_side_is_achromatic(self) -> None:
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
+        right = points[:, 0] >= 0.02
+        self.graph = surface_graph(
+            points, [0, 0, 1], saturations=np.where(right, 0.0, 1.0)
+        )
+
+        inhibited = self.spread_from(25)
+
+        nptest.assert_array_equal(inhibited, ~right)
+
+    def test_stops_where_curvature_differs(self) -> None:
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
+        right = points[:, 0] >= 0.02
+        self.graph = surface_graph(
+            points, [0, 0, 1], curvatures=np.where(right, -3.0, 0.0)
+        )
+
+        inhibited = self.spread_from(25)
+
+        nptest.assert_array_equal(inhibited, ~right)
+
+    def test_far_side_of_a_thin_wall_neither_stops_nor_receives_spreading(
+        self,
+    ) -> None:
+        outside = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
+        inside = outside - [0, 0, 0.001]
+        self.graph = surface_graph(
+            np.vstack([outside, inside]),
+            np.vstack([np.tile([0, 0, 1], (100, 1)), np.tile([0, 0, -1], (100, 1))]),
+        )
+
+        inhibited = self.spread_from(55)
+
+        self.assertTrue(np.all(inhibited[:100]))
+        self.assertFalse(np.any(inhibited[100:]))
+
+    def test_nodes_with_unreliable_normals_are_inhibited_but_do_not_stop_it(
+        self,
+    ) -> None:
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
+        normals = np.tile([0.0, 0.0, 1.0], (100, 1))
+        # Averaging both sides of a thin wall shortens the stored normal.
+        unreliable = [33, 34, 66]
+        normals[unreliable] = [0.1, 0.05, 0.0]
+        self.graph = surface_graph(points, normals)
+
+        inhibited = self.spread_from(55)
+
+        self.assertTrue(np.all(inhibited))
+
+    def test_a_single_noisy_neighbor_does_not_stop_spreading(self) -> None:
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
+        normals = np.tile([0.0, 0.0, 1.0], (100, 1))
+        noisy = 44
+        normals[noisy] = [np.sin(np.radians(60)), 0.0, np.cos(np.radians(60))]
+        self.graph = surface_graph(points, normals)
+
+        inhibited = self.spread_from(55)
+
+        self.assertFalse(inhibited[noisy], "The noisy node is not spread to.")
+        self.assertTrue(np.all(np.delete(inhibited, noisy)))
+
+    def test_no_spreading_when_sensed_features_are_not_predicted(self) -> None:
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
+        self.graph = surface_graph(points, [0, 0, 1])
+
+        inhibited = self.spread_from(55, hsv=np.array([0.5, 1.0, 1.0]))
+
+        self.assertFalse(np.any(inhibited))
+
+    def test_sensed_normal_is_rotated_into_the_model_frame_by_the_mlh(self) -> None:
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
+        self.graph = surface_graph(points, [0, 0, 1])
+        rotation = Rotation.from_euler("x", 90, degrees=True)
+
+        self.assertTrue(np.all(self.spread_from(55, rotation=rotation)))
+        self.assertFalse(
+            np.any(self.spread_from(55, rotation=rotation, pose_vectors=np.eye(3))),
+            "The sensed normal, unrotated, is not the one the MLH predicts.",
+        )
+
+    def test_sensory_spread_is_recorded_without_an_object_id(self) -> None:
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
+        self.graph = surface_graph(points, [0, 0, 1])
+
+        self.spread_from(55)
+
+        (record,) = self.gsg.spread_records
+        self.assertEqual(record.input_channel, SENSOR_CHANNEL)
+        self.assertIsNone(record.object_id)
+        nptest.assert_array_equal(np.sort(record.node_order), np.arange(100))
 
 
 if __name__ == "__main__":
