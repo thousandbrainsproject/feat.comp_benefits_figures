@@ -1638,11 +1638,13 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
     through the graph of the channel the input was received on, starting from the
     nodes nearest the MLH location:
     - An object ID from a lower-level LM spreads through the nodes storing it.
-    - Sensory input spreads through nodes with similar features: similar hue,
-      similar principal curvatures, and surface normals pointing in a similar
-      direction. Spreading stops wherever any of these differ, so e.g. on a mug the
-      side of the cylinder is inhibited, but not its rim, bottom or handle, and on a
-      cube a single face is inhibited, but not the other faces.
+    - Sensory input spreads through nodes with a similar hue on a continuous
+      surface. Two neighboring nodes are on a continuous surface if either one's
+      local model of the surface (see `_surface_continuity_errors`) predicts the
+      other's surface normal and location. Spreading stops wherever the hue
+      differs or the surface is discontinuous, so e.g. on a mug the side of the
+      cylinder is inhibited, but not its rim, bottom or handle, and on a cube a
+      single face is inhibited, but not the other faces.
 
     A node's neighbors are its `num_spread_neighbors` nearest nodes (regardless of
     their distance), together with the nodes that have it among their own nearest
@@ -1652,9 +1654,9 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
     Spreading therefore covers a contiguous region, including outlying nodes,
     without jumping to disjoint regions (e.g. separate wheels on a car).
     Inhibition is tracked separately for the graph of each channel, so a location
-    inhibited in one channel's graph can still be tested in another's. Inhibited nodes are not selected for testing
-    until their inhibition has linearly decayed to 0 over `inhibition_decay_steps`
-    steps.
+    inhibited in one channel's graph can still be tested in another's. Inhibited
+    nodes are not selected for testing until their inhibition has linearly decayed
+    to 0 over `inhibition_decay_steps` steps.
     """
 
     # Stored surface normals are averaged over the observations in a voxel, so a
@@ -1671,8 +1673,8 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         num_spread_neighbors=6,
         inhibition_decay_steps=50,
         max_hue_difference: float | None = 0.05,
-        max_curvature_difference: float | None = 1.5,
-        max_normal_angle: float | None = 25.0,
+        max_continuity_normal_error: float | None = 30.0,
+        max_continuity_location_error: float | None = 20.0,
         min_far_side_angle=135.0,
         max_dissimilar_neighbors=1,
         min_hue_saturation=0.1,
@@ -1705,20 +1707,21 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
                 features (see min_hue_saturation and min_hue_value); two achromatic
                 features are similar, and a chromatic and an achromatic one are
                 not. None to not compare hue. Defaults to 0.05.
-            max_curvature_difference: Largest difference in curvature magnitude
-                (the larger of the two absolute "principal_curvatures_log" values)
-                for two features to be similar. The smaller principal curvature
-                is not compared, as it is noisy on e.g. a cylinder, where it is
-                close to 0. None to not compare curvature. Defaults to 1.5.
-            max_normal_angle: Largest angle (in degrees) between two surface
-                normals for them to be similar. Neighboring nodes on a smoothly
-                curved surface have similar normals, unlike neighbors either side
-                of an edge. None to not compare normals. Defaults to 25.
+            max_continuity_normal_error: Largest angle (in degrees) between a
+                node's surface normal and the normal predicted for it by its
+                neighbor's local model of the surface, for the two to be on a
+                continuous surface (see `_surface_continuity_errors`). None to not
+                compare normals. Defaults to 30.
+            max_continuity_location_error: Largest error (as an angle in degrees,
+                see `_surface_continuity_errors`) in a node's location predicted
+                by its neighbor's local model of the surface, for the two to be on
+                a continuous surface. None to not compare locations. Defaults to
+                20.
             min_far_side_angle: Smallest angle (in degrees) between the surface
                 normals of two neighboring nodes for one to be on the far side of
                 a thin wall from the other (e.g. the inside and outside of a mug),
-                in which case it neither stops spreading nor is spread to. Only
-                applies when normals are compared. Defaults to 135.
+                in which case it neither stops spreading nor is spread to.
+                Defaults to 135.
             max_dissimilar_neighbors: For sensory input, the number of a node's
                 neighbors whose features may differ from its own, without stopping
                 it from spreading to the others (which have similar features). The
@@ -1741,8 +1744,8 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         self.num_spread_neighbors = num_spread_neighbors
         self.inhibition_decay_steps = inhibition_decay_steps
         self.max_hue_difference = max_hue_difference
-        self.max_curvature_difference = max_curvature_difference
-        self.max_normal_angle = max_normal_angle
+        self.max_continuity_normal_error = max_continuity_normal_error
+        self.max_continuity_location_error = max_continuity_location_error
         self.min_far_side_angle = min_far_side_angle
         self.max_dissimilar_neighbors = max_dissimilar_neighbors
         self.min_hue_saturation = min_hue_saturation
@@ -1939,7 +1942,8 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         Spreading only begins if the sensed features are predicted by the MLH, i.e.
         they are similar to the features of one of the nodes nearest the MLH
         location that lie within the parent LM's max_match_distance (with the
-        sensed surface normal rotated into the model's frame by the MLH rotation).
+        sensed features located at the MLH location, and the sensed pose vectors
+        rotated into the model's frame by the MLH rotation).
         Unlike for object IDs, stored features vary from node to node, so the
         spread begins from those of the nodes nearest the MLH location that are
         similar to the nearest such node, rather than requiring all of them to be.
@@ -1950,7 +1954,9 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         features = self._get_spread_features(graph)
         if not features:
             return
-        sensed = self._get_sensed_spread_features(percept, mlh["rotation"])
+        sensed = self._get_sensed_spread_features(
+            percept, mlh["rotation"], mlh["location"]
+        )
 
         seeds, seed_distances = self._get_nodes_nearest_mlh(graph, mlh["location"])
         nearby = seeds[seed_distances <= self.parent_lm.max_match_distance]
@@ -2054,57 +2060,83 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
 
         Returns:
             Arrays of each compared feature the graph stores, with one row per node:
-            "hsv" (hue, saturation and value), "curvature" (the curvature
-            magnitude, i.e. the larger of the two absolute
-            "principal_curvatures_log" values) and "normal" (the unit surface
-            normal). Features not compared (see the max_* thresholds) are omitted.
+            "hsv" (hue, saturation and value), and the surface geometry: "location",
+            "normal" (the unit surface normal), "curvature_directions" (the two
+            unit principal curvature directions), "curvatures" (the two signed
+            principal curvatures, in 1/m; 0, i.e. flat, when not stored) and
+            "reliable" (whether the stored normal is reliable, see
+            MIN_RELIABLE_NORMAL_LENGTH). Hue is omitted when not compared.
         """
         feature_mapping = graph.feature_mapping or {}
         features = {}
         if self.max_hue_difference is not None and "hsv" in feature_mapping:
             features["hsv"] = self._get_feature_values(graph, "hsv")[:, :3]
-        if (
-            self.max_curvature_difference is not None
-            and "principal_curvatures_log" in feature_mapping
-        ):
-            features["curvature"] = np.abs(
-                self._get_feature_values(graph, "principal_curvatures_log")[:, :2]
-            ).max(axis=1)
-        if self.max_normal_angle is not None and "pose_vectors" in feature_mapping:
-            normals = self._get_feature_values(graph, "pose_vectors")[:, :3]
-            lengths = np.linalg.norm(normals, axis=1)
-            features["normal"] = normals / np.maximum(lengths, 1e-12)[:, None]
+        if "pose_vectors" in feature_mapping:
+            pose_vectors = self._get_feature_values(graph, "pose_vectors").reshape(
+                -1, 3, 3
+            )
+            lengths = np.linalg.norm(pose_vectors[:, 0], axis=1)
+            features["location"] = np.asarray(graph.pos, dtype=float)
+            features["normal"] = (
+                pose_vectors[:, 0] / np.maximum(lengths, 1e-12)[:, None]
+            )
+            features["curvature_directions"] = pose_vectors[:, 1:]
+            features["curvatures"] = np.zeros((len(lengths), 2))
+            if "principal_curvatures_log" in feature_mapping:
+                features["curvatures"] = self._curvatures_from_log(
+                    self._get_feature_values(graph, "principal_curvatures_log")[:, :2]
+                )
             features["reliable"] = lengths >= self.MIN_RELIABLE_NORMAL_LENGTH
         return features
 
-    @staticmethod
-    def _get_sensed_spread_features(percept: Message, rotation) -> dict:
+    def _get_sensed_spread_features(self, percept: Message, rotation, location) -> dict:
         """Get the sensed features that sensory spreading compares.
 
         Args:
             percept: The sensory input.
             rotation: The MLH rotation, which rotates sensed (body-frame) pose
                 vectors into the model's frame.
+            location: The MLH location, i.e. the sensed location in the model's
+                frame.
 
         Returns:
-            The sensed "hsv", "curvature" and "normal" (in the model's frame), for
-            those the percept carries.
+            The sensed features, in the format of `_get_spread_features` (with one
+            value per feature, and pose vectors in the model's frame), for those
+            the percept carries.
         """
         non_morphological = percept.non_morphological_features or {}
         morphological = percept.morphological_features or {}
         sensed = {}
-        if non_morphological.get("hsv") is not None:
+        if (
+            self.max_hue_difference is not None
+            and non_morphological.get("hsv") is not None
+        ):
             sensed["hsv"] = np.asarray(non_morphological["hsv"], dtype=float)[:3]
-        if non_morphological.get("principal_curvatures_log") is not None:
-            sensed["curvature"] = np.abs(
-                np.asarray(non_morphological["principal_curvatures_log"], dtype=float)
-            ).max()
         if morphological.get("pose_vectors") is not None:
-            normal = rotation.apply(
-                np.asarray(morphological["pose_vectors"], dtype=float)[0]
+            pose_vectors = rotation.apply(
+                np.asarray(morphological["pose_vectors"], dtype=float).reshape(3, 3)
             )
-            sensed["normal"] = normal / np.linalg.norm(normal)
+            sensed["location"] = np.asarray(location, dtype=float)
+            sensed["normal"] = pose_vectors[0] / np.linalg.norm(pose_vectors[0])
+            sensed["curvature_directions"] = pose_vectors[1:]
+            sensed["curvatures"] = np.zeros(2)
+            if non_morphological.get("principal_curvatures_log") is not None:
+                sensed["curvatures"] = self._curvatures_from_log(
+                    np.asarray(
+                        non_morphological["principal_curvatures_log"], dtype=float
+                    )
+                )
         return sensed
+
+    @staticmethod
+    def _curvatures_from_log(log_curvatures) -> np.ndarray:
+        """Invert the sign-preserving log of "principal_curvatures_log" features.
+
+        Returns:
+            The signed principal curvatures (in 1/m).
+        """
+        log_curvatures = np.asarray(log_curvatures, dtype=float)
+        return np.sign(log_curvatures) * np.expm1(np.abs(log_curvatures))
 
     def _similar_features(self, features, nodes, reference) -> np.ndarray:
         """Check which of a set of nodes have features similar to a reference.
@@ -2137,8 +2169,9 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
             features_b: Arrays of the features to compare them to, likewise.
 
         Returns:
-            Whether the features of each pair are similar in hue, curvature and
-            surface normal, comparing only the features present in both.
+            Whether the features of each pair are similar in hue and lie on a
+            continuous surface (as predicted from at least one of the two),
+            comparing only the features present in both.
         """
         num_pairs = len(next(iter(features_a.values()), []))
         similar = np.ones(num_pairs, dtype=bool)
@@ -2157,15 +2190,102 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
                 hue_difference <= self.max_hue_difference,
                 chromatic_a == chromatic_b,
             )
-        if "curvature" in features_a and "curvature" in features_b:
-            curvature_difference = np.abs(
-                features_a["curvature"] - features_b["curvature"]
-            )
-            similar &= curvature_difference <= self.max_curvature_difference
         if "normal" in features_a and "normal" in features_b:
-            cosine = np.sum(features_a["normal"] * features_b["normal"], axis=1)
-            similar &= cosine >= np.cos(np.radians(self.max_normal_angle))
+            # A single node's stored normal and curvatures can be noisy, whereas a
+            # discontinuity in the surface is not predicted from either side of it.
+            similar &= self._predicts_continuous_surface(
+                features_a, features_b
+            ) | self._predicts_continuous_surface(features_b, features_a)
         return similar
+
+    def _predicts_continuous_surface(self, from_features, to_features) -> np.ndarray:
+        """Check which nodes' local surfaces predict other nodes' normals and locations.
+
+        Args:
+            from_features: Features of the nodes whose local surface predicts
+                (see `_get_spread_features`), with one row per pair.
+            to_features: Features of the nodes being predicted, likewise.
+
+        Returns:
+            Whether the errors of each prediction (see `_surface_continuity_errors`)
+            are within max_continuity_normal_error and
+            max_continuity_location_error.
+        """
+        normal_error, location_error = self._surface_continuity_errors(
+            from_features, to_features
+        )
+        continuous = np.ones(len(normal_error), dtype=bool)
+        if self.max_continuity_normal_error is not None:
+            continuous &= normal_error <= self.max_continuity_normal_error
+        if self.max_continuity_location_error is not None:
+            continuous &= location_error <= self.max_continuity_location_error
+        return continuous
+
+    @staticmethod
+    def _surface_continuity_errors(
+        from_features, to_features
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Predict nodes' surface normals and locations from others' local surfaces.
+
+        The surface around the "from" node is modeled by its normal, principal
+        curvatures and their directions, i.e. as the ellipsoid (or, for curvatures
+        of different signs, the saddle) with those curvatures that touches the
+        surface there. Along the direction of the "to" node in the tangent plane,
+        this surface curves with the normal curvature given by Euler's formula,
+        and so locally follows a circle with that curvature (or, for a curvature
+        of 0, a straight line, in which case the predicted normal is simply the
+        "from" node's own). From the "to" node's distance along the tangent plane,
+        the circle predicts both its normal and its height above the tangent
+        plane.
+
+        Args:
+            from_features: Features of the nodes whose local surface predicts
+                (see `_get_spread_features`), with one row per pair.
+            to_features: Features of the nodes being predicted, likewise.
+
+        Returns:
+            For each pair: the angle (in degrees) between the "to" node's normal and
+            the predicted one, and the location error as an angle (in degrees),
+            namely the angle subtended at the "from" node by the difference
+            between the "to" node's height above the tangent plane and the
+            predicted height. Both are infinite when the "to" node lies further
+            along the tangent plane than the radius of the circle, i.e. beyond the
+            modeled surface.
+        """
+        normal = from_features["normal"]
+        displacement = to_features["location"] - from_features["location"]
+        height = np.sum(displacement * normal, axis=1)
+        tangential = displacement - height[:, None] * normal
+        tangential_distance = np.linalg.norm(tangential, axis=1)
+        direction = tangential / np.maximum(tangential_distance, 1e-12)[:, None]
+
+        cosines = np.einsum(
+            "pj,pij->pi", direction, from_features["curvature_directions"]
+        )
+        curvature = np.sum(from_features["curvatures"] * cosines**2, axis=1)
+
+        # The sine of the angle the normal turns through along the circle.
+        sine = curvature * tangential_distance
+        beyond = np.abs(sine) > 1
+        sine = np.clip(sine, -1.0, 1.0)
+        cosine = np.sqrt(1.0 - sine**2)
+        predicted_normal = cosine[:, None] * normal - sine[:, None] * direction
+        predicted_height = sine * tangential_distance / (1.0 + cosine)
+
+        normal_error = np.degrees(
+            np.arccos(
+                np.clip(np.sum(predicted_normal * to_features["normal"], axis=1), -1, 1)
+            )
+        )
+        location_error = np.degrees(
+            np.arctan2(
+                np.abs(height - predicted_height),
+                np.maximum(np.linalg.norm(displacement, axis=1), 1e-12),
+            )
+        )
+        normal_error[beyond] = np.inf
+        location_error[beyond] = np.inf
+        return normal_error, location_error
 
     def _far_side(self, features, nodes, reference) -> np.ndarray:
         """Check which of a set of nodes are on the far side of a thin wall.

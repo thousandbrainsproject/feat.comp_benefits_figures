@@ -33,6 +33,7 @@ from tbp.monty.frameworks.models.goal_generation import (
     TraceGoalGenerator,
 )
 from tbp.monty.frameworks.models.object_model import GridObjectModel
+from tbp.monty.frameworks.utils.sensor_processing import log_sign
 
 SKIP_ID_CHANNEL_HYPOTHESIS_TESTING = (
     "Object-ID channel hypothesis testing is under active development"
@@ -1036,8 +1037,12 @@ def logo_line_graph():
     return FakeGraph(positions, {"object_id": np.full(5, LOGO_ID)})
 
 
+# Surface normal (first row) perpendicular to the line the car's nodes lie along.
+LINE_POSE_VECTORS = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+
+
 def oriented_sensor_graph(positions):
-    pv = np.eye(3).flatten()
+    pv = LINE_POSE_VECTORS.flatten()
     return FakeGraph(positions, {"pose_vectors": np.tile(pv, (len(positions), 1))})
 
 
@@ -1068,7 +1073,7 @@ class ChildObjectsGoalGeneratorTest(unittest.TestCase):
             sender_type="SM",
             sender_id=SENSOR_CHANNEL,
             location=np.zeros(3),
-            morphological_features={"pose_vectors": np.eye(3)},
+            morphological_features={"pose_vectors": LINE_POSE_VECTORS},
             non_morphological_features={},
         )
 
@@ -1319,9 +1324,7 @@ class ChildObjectsGoalGeneratorTest(unittest.TestCase):
     def test_targets_sensor_nodes_without_compositional_models(self) -> None:
         self.graphs = {TOP_ID: {SENSOR_CHANNEL: oriented_sensor_graph(self.car.pos)}}
         # A sensed normal the MLH does not predict, so nothing is inhibited.
-        self.sensor_percept.morphological_features = {
-            "pose_vectors": np.roll(np.eye(3), 1, axis=0)
-        }
+        self.sensor_percept.morphological_features = {"pose_vectors": np.eye(3)}
 
         self.gsg.step(make_ctx(), [self.sensor_percept])
 
@@ -1347,16 +1350,42 @@ def plane_points(origin, u, v, nu, nv):
     )
 
 
-def surface_graph(positions, normals, hues=None, saturations=None, curvatures=None):
-    """A sensor-channel graph storing hue, curvature and surface normals.
+def surface_graph(
+    positions,
+    normals,
+    hues=None,
+    saturations=None,
+    curvatures=None,
+    curvature_directions=None,
+):
+    """A sensor-channel graph storing hue and surface geometry.
+
+    Args:
+        positions: The node locations.
+        normals: The surface normal of every node (or one for all).
+        hues: The hue of every node; 0 if None.
+        saturations: The saturation of every node; 1 if None.
+        curvatures: The two signed principal curvatures (in 1/m) of every node (or
+            one pair for all); flat if None.
+        curvature_directions: The two principal curvature directions of every node
+            (or one pair for all); only used with curvatures.
 
     Returns:
         The graph.
     """
     num_nodes = len(positions)
-    normals = np.broadcast_to(np.asarray(normals, dtype=float), (num_nodes, 3))
-    pose_vectors = np.zeros((num_nodes, 9))
-    pose_vectors[:, :3] = normals
+    pose_vectors = np.zeros((num_nodes, 3, 3))
+    pose_vectors[:, 0] = np.broadcast_to(
+        np.asarray(normals, dtype=float), (num_nodes, 3)
+    )
+    log_curvatures = np.zeros((num_nodes, 2))
+    if curvatures is not None:
+        log_curvatures[:] = log_sign(
+            np.broadcast_to(np.asarray(curvatures, dtype=float), (num_nodes, 2))
+        )
+        pose_vectors[:, 1:] = np.broadcast_to(
+            np.asarray(curvature_directions, dtype=float), (num_nodes, 2, 3)
+        )
     hsv = np.column_stack(
         [
             np.zeros(num_nodes) if hues is None else hues,
@@ -1364,17 +1393,30 @@ def surface_graph(positions, normals, hues=None, saturations=None, curvatures=No
             np.ones(num_nodes),
         ]
     )
-    curvature = np.zeros((num_nodes, 2))
-    if curvatures is not None:
-        curvature[:, 1] = curvatures
     return FakeGraph(
         positions,
         {
-            "pose_vectors": pose_vectors,
+            "pose_vectors": pose_vectors.reshape(num_nodes, 9),
             "hsv": hsv,
-            "principal_curvatures_log": curvature,
+            "principal_curvatures_log": log_curvatures,
         },
     )
+
+
+def cylinder_surface(radius, num_around, num_along):
+    """Points around a cylinder along z, with outward normals.
+
+    Returns:
+        The points, their normals, and the unit tangents around the cylinder.
+    """
+    angles = np.arange(num_around) * 2 * np.pi / num_around
+    heights = np.arange(num_along) * SURFACE_SPACING
+    angle, height = np.meshgrid(angles, heights, indexing="ij")
+    angle, height = angle.ravel(), height.ravel()
+    normals = np.column_stack([np.cos(angle), np.sin(angle), np.zeros(angle.size)])
+    tangents = np.column_stack([-np.sin(angle), np.cos(angle), np.zeros(angle.size)])
+    points = np.column_stack([radius * normals[:, :2], height])
+    return points, normals, tangents
 
 
 class SensoryFeatureSpreadingTest(unittest.TestCase):
@@ -1454,19 +1496,22 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
         self.assertFalse(np.any(inhibited[100:]), "The adjacent face is not.")
 
     def test_spreads_around_a_cylinder_but_not_onto_its_cap(self) -> None:
-        radius, num_around, num_along = 0.02, 60, 8
-        angles = np.arange(num_around) * 2 * np.pi / num_around
-        heights = np.arange(num_along) * SURFACE_SPACING
-        angle, height = np.meshgrid(angles, heights, indexing="ij")
-        normals = np.column_stack(
-            [np.cos(angle.ravel()), np.sin(angle.ravel()), np.zeros(angle.size)]
-        )
-        side = np.column_stack([radius * normals[:, :2], height.ravel()])
-        cap = plane_points([-0.019, -0.019, heights[-1]], [1, 0, 0], [0, 1, 0], 20, 20)
+        radius = 0.02
+        side, normals, tangents = cylinder_surface(radius, 60, 8)
+        top = side[:, 2].max()
+        cap = plane_points([-0.019, -0.019, top], [1, 0, 0], [0, 1, 0], 20, 20)
         cap = cap[np.linalg.norm(cap[:, :2], axis=1) < radius - SURFACE_SPACING]
+        side_directions = np.stack(
+            [np.tile([0.0, 0.0, 1.0], (len(side), 1)), tangents], axis=1
+        )
+        cap_directions = np.tile([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], (len(cap), 1, 1))
         self.graph = surface_graph(
             np.vstack([side, cap]),
             np.vstack([normals, np.tile([0, 0, 1], (len(cap), 1))]),
+            curvatures=np.vstack(
+                [np.tile([0.0, -1 / radius], (len(side), 1)), np.zeros((len(cap), 2))]
+            ),
+            curvature_directions=np.vstack([side_directions, cap_directions]),
         )
 
         inhibited = self.spread_from(4)
@@ -1498,16 +1543,82 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
 
         nptest.assert_array_equal(inhibited, ~right)
 
-    def test_stops_where_curvature_differs(self) -> None:
+    def test_curvature_predicts_normals_around_a_tightly_curved_surface(self) -> None:
+        # Around a cylinder of radius 3.5mm, neighboring normals differ by more than
+        # max_continuity_normal_error, but are as its curvature predicts.
+        radius = 0.0035
+        points, normals, tangents = cylinder_surface(radius, 11, 8)
+        directions = np.stack(
+            [np.tile([0.0, 0.0, 1.0], (len(points), 1)), tangents], axis=1
+        )
+        self.graph = surface_graph(
+            points,
+            normals,
+            curvatures=[0.0, -1 / radius],
+            curvature_directions=directions,
+        )
+
+        self.assertTrue(np.all(self.spread_from(4)))
+
+        self.graph = surface_graph(points, normals)
+        self.assertLess(
+            self.spread_from(4).mean(),
+            0.5,
+            "Without curvature, the surface is modeled as flat, so the normals of "
+            "neighbors around the cylinder are not predicted.",
+        )
+
+    def test_stops_at_a_step_between_parallel_surfaces(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
         right = points[:, 0] >= 0.02
-        self.graph = surface_graph(
-            points, [0, 0, 1], curvatures=np.where(right, -3.0, 0.0)
-        )
+        points[right, 2] += 0.004
+        self.graph = surface_graph(points, [0, 0, 1])
 
         inhibited = self.spread_from(25)
 
-        nptest.assert_array_equal(inhibited, ~right)
+        nptest.assert_array_equal(
+            inhibited,
+            ~right,
+            "The normals agree across the step, but the locations beyond it are not "
+            "on the surface the nodes before it predict.",
+        )
+
+    def test_stops_at_a_tightly_rounded_edge(self) -> None:
+        # A face, rounded over an edge of radius 2mm into a perpendicular face.
+        radius = 0.002
+        top = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
+        edge_x = top[:, 0].max()
+        angles = np.radians([30, 60])
+        arc_normals = np.column_stack([np.sin(angles), np.zeros(2), np.cos(angles)])
+        arc = np.vstack(
+            [
+                [edge_x, y, -radius] + radius * normal
+                for y in np.unique(top[:, 1])
+                for normal in arc_normals
+            ]
+        )
+        side = plane_points(
+            [edge_x + radius, 0, -radius - SURFACE_SPACING],
+            [0, 0, -1],
+            [0, 1, 0],
+            5,
+            10,
+        )
+        self.graph = surface_graph(
+            np.vstack([top, arc, side]),
+            np.vstack(
+                [
+                    np.tile([0, 0, 1], (len(top), 1)),
+                    np.tile(arc_normals, (10, 1)),
+                    np.tile([1, 0, 0], (len(side), 1)),
+                ]
+            ),
+        )
+
+        inhibited = self.spread_from(44)
+
+        self.assertTrue(np.all(inhibited[: len(top)]))
+        self.assertFalse(np.any(inhibited[len(top) + len(arc) :]))
 
     def test_far_side_of_a_thin_wall_neither_stops_nor_receives_spreading(
         self,
