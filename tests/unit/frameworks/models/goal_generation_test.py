@@ -1532,22 +1532,28 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
 
         nptest.assert_array_equal(inhibited, ~right)
 
-    def test_stops_where_one_side_is_achromatic(self) -> None:
+    def test_achromatic_nodes_do_not_stop_spreading(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
         right = points[:, 0] >= 0.02
         self.graph = surface_graph(
-            points, [0, 0, 1], saturations=np.where(right, 0.0, 1.0)
+            points,
+            [0, 0, 1],
+            hues=np.where(right, 0.5, 0.0),
+            saturations=np.where(right, 0.0, 1.0),
         )
 
         inhibited = self.spread_from(25)
 
-        nptest.assert_array_equal(inhibited, ~right)
+        self.assertTrue(
+            np.all(inhibited),
+            "The hue of the achromatic nodes is undefined, so is not compared.",
+        )
 
     def test_curvature_predicts_normals_around_a_tightly_curved_surface(self) -> None:
         # Around a cylinder of radius 3.5mm, neighboring normals differ by more than
         # max_continuity_normal_error, but are as its curvature predicts.
         radius = 0.0035
-        points, normals, tangents = cylinder_surface(radius, 11, 8)
+        points, normals, tangents = cylinder_surface(radius, 7, 8)
         directions = np.stack(
             [np.tile([0.0, 0.0, 1.0], (len(points), 1)), tangents], axis=1
         )
@@ -1649,17 +1655,91 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
 
         self.assertTrue(np.all(inhibited))
 
-    def test_a_single_noisy_neighbor_does_not_stop_spreading(self) -> None:
+    def test_noisy_neighbors_do_not_stop_spreading(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
         normals = np.tile([0.0, 0.0, 1.0], (100, 1))
-        noisy = 44
+        noisy = [44, 45]
+        normals[noisy] = [np.sin(np.radians(60)), 0.0, np.cos(np.radians(60))]
+        self.graph = surface_graph(points, normals)
+        self.gsg.min_inhibited_neighbor_fraction = None
+        self.gsg.min_region_fraction = None
+
+        inhibited = self.spread_from(55)
+
+        self.assertFalse(np.any(inhibited[noisy]), "The noisy nodes are not spread to.")
+        self.assertTrue(np.all(np.delete(inhibited, noisy)))
+
+    def test_a_small_region_is_inhibited_with_the_region_it_merges_into(
+        self,
+    ) -> None:
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
+        x, y = np.round(points[:, :2] / SURFACE_SPACING).astype(int).T
+        patch = (x >= 8) & (x < 11) & (y >= 3) & (y < 6)
+        self.graph = surface_graph(points, [0, 0, 1], hues=np.where(patch, 0.5, 0.0))
+        self.gsg.min_inhibited_neighbor_fraction = None
+
+        self.gsg.min_region_fraction = None
+        nptest.assert_array_equal(self.spread_from(0), ~patch)
+        nptest.assert_array_equal(self.spread_from(np.flatnonzero(patch)[4]), patch)
+
+        self.gsg.min_region_fraction = 0.05
+        self.assertTrue(
+            np.all(self.spread_from(0)),
+            "The patch, of 9 of 200 nodes, is merged into the plane around it.",
+        )
+        self.assertTrue(np.all(self.spread_from(np.flatnonzero(patch)[4])))
+
+    def test_small_regions_merge_into_the_smallest_neighboring_region(self) -> None:
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
+        x, y = np.round(points[:, :2] / SURFACE_SPACING).astype(int).T
+        medium = (x >= 17) & (y < 4)
+        small = (x >= 14) & (x < 17) & (y < 3)
+        hues = np.select([medium, small], [0.5, 0.25], default=0.0)
+        self.graph = surface_graph(points, [0, 0, 1], hues=hues)
+        self.gsg.min_inhibited_neighbor_fraction = None
+        self.gsg.min_region_fraction = 0.1
+
+        inhibited = self.spread_from(np.flatnonzero(small)[4])
+
+        nptest.assert_array_equal(
+            inhibited,
+            medium | small,
+            "The small region (9 nodes) merges into its smallest neighbor (12 "
+            "nodes), which is then large enough (of at least 20 nodes) to keep.",
+        )
+
+    def test_small_regions_do_not_merge_through_a_thin_wall(self) -> None:
+        outside = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
+        inside = plane_points([0.008, 0.008, -0.001], [1, 0, 0], [0, 1, 0], 3, 3)
+        self.graph = surface_graph(
+            np.vstack([outside, inside]),
+            np.vstack([np.tile([0, 0, 1], (100, 1)), np.tile([0, 0, -1], (9, 1))]),
+        )
+        self.gsg.min_region_fraction = 0.1
+
+        inhibited = self.spread_from(55)
+
+        self.assertTrue(np.all(inhibited[:100]))
+        self.assertFalse(
+            np.any(inhibited[100:]),
+            "The inside patch's only neighboring region is on the far side of the "
+            "wall, so it is not merged into it.",
+        )
+
+    def test_noisy_nodes_surrounded_by_the_spread_are_inhibited(self) -> None:
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
+        normals = np.tile([0.0, 0.0, 1.0], (100, 1))
+        noisy = [44, 45]
         normals[noisy] = [np.sin(np.radians(60)), 0.0, np.cos(np.radians(60))]
         self.graph = surface_graph(points, normals)
 
         inhibited = self.spread_from(55)
 
-        self.assertFalse(inhibited[noisy], "The noisy node is not spread to.")
-        self.assertTrue(np.all(np.delete(inhibited, noisy)))
+        self.assertTrue(np.all(inhibited))
+        (record,) = self.gsg.spread_records
+        self.assertCountEqual(
+            record.node_order[-2:], noisy, "Surrounded nodes are inhibited last."
+        )
 
     def test_no_spreading_when_sensed_features_are_not_predicted(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)

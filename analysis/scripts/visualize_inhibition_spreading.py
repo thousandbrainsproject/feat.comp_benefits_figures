@@ -14,7 +14,8 @@ a similar hue on a continuous surface (as predicted from the surface normals,
 principal curvatures and curvature directions of neighboring nodes) on the sensor
 channel graphs of one learning module (LM) of a pretrained model, sensing the
 features stored at a chosen seed node with the most likely hypothesis (MLH) at
-that node. Saves (or, with --interactive, shows), prefixed with lm<ID>_:
+that node. Saves (or, with --interactive, shows), prefixed with the model and
+LM (e.g. comp_models_mujoco_lm2_):
 
 - <object>_seeds.png: for the mug, the region inhibited by a spread from seeds
   on its side, next to its handle, on its rim, bottom, handle and inside wall,
@@ -24,6 +25,8 @@ that node. Saves (or, with --interactive, shows), prefixed with lm<ID>_:
   every node is assigned to the compartment of the first spread that reached it.
 - <object>_tolerance.png: for the mug, spreads from the same seeds with
   different max_dissimilar_neighbors.
+- regions.png: for each object, the regions the goal generator divides its
+  model into, before and after merging small regions (see min_region_fraction).
 
 The sensor channel is the one channel of the LM's graphs that receives input from
 a sensor module (e.g. patch_2 for LM 2, patch_0 for LM 0). Objects the LM has no
@@ -32,18 +35,29 @@ model of are skipped, e.g. LM 0 only models the objects without stickers.
 Usage:
     python analysis/scripts/visualize_inhibition_spreading.py [MODEL_PATH] [options]
 
-MODEL_PATH points at a trained model: either model.pt itself, its pretrained
-directory, or the experiment directory containing it. Defaults to the
-supervised_pre_training_objects_with_stickers_comp_models_mujoco experiment in
-~/tbp/results/monty/pretrained_models/my_trained_models.
-
 Options:
-    --lm ID           Which learning module's models to use (default: 2; e.g. 0
-                      to compare the models of LM 0).
+    --model NAME      Which pretrained model to use (default: comp_models_mujoco):
+                      - comp_models_mujoco: the compositional objects with stickers
+                        (supervised_pre_training_objects_with_stickers_comp_models_
+                        mujoco), LM 2, sensed by a distant agent.
+                      - surf_agent_77obj: the 77 YCB objects learned by a surface
+                        agent (pretrained_ycb_v13/surf_agent_1lm_77obj), which
+                        senses the surface from close by, looking straight down at
+                        it. Its 10 "distinct" objects are drawn, including the YCB
+                        mug.
+    MODEL_PATH        Overrides the model's checkpoint: either model.pt itself, its
+                      pretrained directory, or the experiment directory.
+    --lm ID           Overrides which learning module's models to use (e.g. 0 to
+                      compare the models of LM 0 of comp_models_mujoco).
+    --min-region-fraction F
+                      Overrides the goal generator's min_region_fraction in all
+                      figures (0 to not merge small regions).
     --output-dir DIR  Where to save the figures (default:
                       ~/tbp/results/comp_benefits_figures/inhibition_spreading).
     --interactive     Show the figures in interactive windows (e.g. to rotate
-                      the 3D views) instead of saving them.
+                      the 3D views) instead of saving them. Figures taller than the
+                      window scroll with the mouse wheel, the arrow keys, or page
+                      up / page down.
 """
 
 from __future__ import annotations
@@ -61,26 +75,54 @@ from scipy.spatial.transform import Rotation
 
 from tbp.monty.frameworks.models.goal_generation import ChildObjectsGoalGenerator
 
-DEFAULT_MODEL_PATH = (
-    "~/tbp/results/monty/pretrained_models/my_trained_models/"
-    "supervised_pre_training_objects_with_stickers_comp_models_mujoco"
-)
 DEFAULT_OUTPUT_DIR = "~/tbp/results/comp_benefits_figures/inhibition_spreading"
-MUG = "023_mug"
-COMPARTMENT_OBJECTS = [
-    "023_mug",
-    "024_mug_tbp_horz",
-    "025_mug_tbp_vert",
-    "001_cube",
-    "002_cube_tbp",
-    "011_cylinder",
-    "016_sphere",
-]
+MODELS = {
+    "comp_models_mujoco": SimpleNamespace(
+        path="~/tbp/results/monty/pretrained_models/my_trained_models/"
+        "supervised_pre_training_objects_with_stickers_comp_models_mujoco",
+        lm=2,
+        mug="023_mug",
+        objects=[
+            "023_mug",
+            "024_mug_tbp_horz",
+            "025_mug_tbp_vert",
+            "001_cube",
+            "002_cube_tbp",
+            "011_cylinder",
+            "016_sphere",
+        ],
+    ),
+    "surf_agent_77obj": SimpleNamespace(
+        path="~/tbp/results/monty/pretrained_models/pretrained_ycb_v13/"
+        "surf_agent_1lm_77obj",
+        lm=0,
+        mug="mug",
+        # The objects of eval_distinctobj_random
+        objects=[
+            "mug",
+            "bowl",
+            "potted_meat_can",
+            "spoon",
+            "strawberry",
+            "mustard_bottle",
+            "dice",
+            "golf_ball",
+            "c_lego_duplo",
+            "banana",
+        ],
+    ),
+}
+# The height (in inches) of an interactive window; taller figures scroll.
+WINDOW_HEIGHT = 9.0
+# How far (in inches) one step of the mouse wheel or arrow keys scrolls.
+SCROLL_STEP = 0.6
 # Viewpoints (elevation, azimuth) of the three views of each model.
 VIEWS = [(20, 30), (20, 210), (-60, 30)]
 # Compartments with fewer nodes are drawn in grey rather than their own color.
 MIN_COMPARTMENT_NODES = 2
 PART_NAMES = ["side", "rim", "bottom", "handle", "inside"]
+# Overrides of the goal generator's parameters, for every figure.
+GSG_KWARGS: dict = {}
 
 
 def parse_args() -> argparse.Namespace:
@@ -89,10 +131,25 @@ def parse_args() -> argparse.Namespace:
         "model_path",
         type=Path,
         nargs="?",
-        default=Path(DEFAULT_MODEL_PATH),
-        help="model.pt, its pretrained directory, or the experiment directory",
+        default=None,
+        help="overrides the model's checkpoint: model.pt, its pretrained "
+        "directory, or the experiment directory",
     )
-    parser.add_argument("--lm", type=int, default=2, help="LM whose models to use")
+    parser.add_argument(
+        "--model",
+        choices=sorted(MODELS),
+        default="comp_models_mujoco",
+        help="which pretrained model to use",
+    )
+    parser.add_argument(
+        "--lm", type=int, default=None, help="overrides the LM whose models to use"
+    )
+    parser.add_argument(
+        "--min-region-fraction",
+        type=float,
+        default=None,
+        help="overrides the goal generator's min_region_fraction (0 to not merge)",
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -116,16 +173,37 @@ def resolve_checkpoint(model_path: Path) -> Path:
     raise FileNotFoundError(f"Model checkpoint not found under: {path}")
 
 
+class SearchableGraph:
+    """A stored graph with the nearest-neighbor search the goal generator uses.
+
+    GridObjectModels (e.g. of the compositional objects) provide this search, but
+    the GraphObjectModels of older models (e.g. of the surface agent) do not.
+    """
+
+    def __init__(self, graph):
+        self.pos = np.asarray(graph.pos)
+        self.x = np.asarray(graph.x)
+        self.feature_mapping = graph.feature_mapping
+        self._tree = KDTree(self.pos)
+
+    def find_nearest_neighbors(
+        self, search_locations, num_neighbors, return_distance=False
+    ):
+        distances, node_ids = self._tree.query(search_locations, k=num_neighbors)
+        return distances if return_distance else node_ids
+
+
 def load_lm_memory(checkpoint: Path, lm_id: int) -> dict:
-    """Load one LM's graph memory, with a location tree for every graph."""
+    """Load one LM's graph memory, with nearest-neighbor search for every graph."""
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
     lm_dict = state["lm_dict"]
     memory = lm_dict[lm_id if lm_id in lm_dict else str(lm_id)]["graph_memory"]
-    for channels in memory.values():
-        for graph in channels.values():
-            if getattr(graph, "_location_tree", None) is None:
-                graph._location_tree = KDTree(np.asarray(graph.pos))
-    return memory
+    return {
+        graph_id: {
+            channel: SearchableGraph(graph) for channel, graph in channels.items()
+        }
+        for graph_id, channels in memory.items()
+    }
 
 
 def sensor_channel(memory: dict) -> str:
@@ -183,8 +261,9 @@ class Spreader:
     def __init__(self, memory: dict, **gsg_kwargs):
         self.lm = FakeParentLM(memory)
         self.channel = sensor_channel(memory)
-        self.gsg = ChildObjectsGoalGenerator(**gsg_kwargs)
+        self.gsg = ChildObjectsGoalGenerator(**{**GSG_KWARGS, **gsg_kwargs})
         self.gsg.parent_lm = self.lm
+        self.gsg.reset()
 
     def spread(self, graph_id: str, node: int) -> tuple[np.ndarray, np.ndarray]:
         """Spread from a node, sensing the features stored there.
@@ -215,7 +294,9 @@ class Spreader:
             "location": np.asarray(graph.pos[node]),
             "rotation": Rotation.identity(),
         }
-        self.gsg.reset()
+        # Only the inhibition is reset, keeping the cached neighbors and regions.
+        self.gsg._inhibition_steps = {}
+        self.gsg.spread_records = []
         self.gsg._spread_from_observations([percept])
         num_nodes = len(graph.pos)
         order = np.full(num_nodes, -1)
@@ -227,6 +308,19 @@ class Spreader:
     def reliable(self, graph_id: str) -> np.ndarray:
         graph = self.lm.get_graph(graph_id, self.channel)
         return self.gsg._get_spread_features(graph)["reliable"]
+
+    def regions(self, graph_id: str) -> tuple[np.ndarray, np.ndarray]:
+        """Get the regions the goal generator divides a graph into.
+
+        Returns:
+            The region of each node before and after merging small regions.
+        """
+        graph = self.lm.get_graph(graph_id, self.channel)
+        features = self.gsg._get_spread_features(graph)
+        unmerged = self.gsg._get_unmerged_regions(
+            graph_id, self.channel, graph, features
+        )
+        return unmerged, self.gsg._get_regions(graph_id, self.channel, graph, features)
 
 
 def _fit_circle(points_2d: np.ndarray) -> tuple[np.ndarray, float]:
@@ -252,7 +346,9 @@ def label_mug_parts(memory: dict, graph_id: str, channel: str) -> np.ndarray:
     pos = np.asarray(graph.pos, dtype=np.float64)
     start, _ = graph.feature_mapping["pose_vectors"]
     normals = np.asarray(graph.x[:, start : start + 3], dtype=np.float64)
-    normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
+    normals = normals / np.maximum(
+        np.linalg.norm(normals, axis=1, keepdims=True), 1e-12
+    )
     _, vectors = np.linalg.eigh(normals.T @ normals)
     axis, u, v = vectors[:, 0], vectors[:, 1], vectors[:, 2]
     height = pos @ axis
@@ -354,7 +450,7 @@ def coverage_text(inhibited, parts) -> str:
     )
 
 
-def choose_mug_seeds(memory, parts, spreader, num_candidates=10):
+def choose_mug_seeds(memory, mug, parts, spreader, num_candidates=10):
     """Pick a representative seed on each part of the mug.
 
     Spreads from a node's own neighborhood vary with the noise in the stored
@@ -365,8 +461,8 @@ def choose_mug_seeds(memory, parts, spreader, num_candidates=10):
     Returns:
         (description, node) pairs.
     """
-    pos = np.asarray(memory[MUG][spreader.channel].pos)
-    reliable = spreader.reliable(MUG)
+    pos = np.asarray(memory[mug][spreader.channel].pos)
+    reliable = spreader.reliable(mug)
     handle_distance = KDTree(pos[parts == "handle"]).query(pos)[0]
     side = parts == "side"
     regions = [
@@ -384,22 +480,22 @@ def choose_mug_seeds(memory, parts, spreader, num_candidates=10):
         candidates = rng.choice(
             candidates, min(num_candidates, len(candidates)), replace=False
         )
-        sizes = [spreader.spread(MUG, int(node))[0].sum() for node in candidates]
+        sizes = [spreader.spread(mug, int(node))[0].sum() for node in candidates]
         median = candidates[np.argsort(sizes)[len(sizes) // 2]]
         seeds.append((description, int(median)))
     return seeds
 
 
-def plot_mug_seeds(memory):
+def plot_mug_seeds(memory, mug, _objects):
     spreader = Spreader(memory)
     channel = spreader.channel
-    parts = label_mug_parts(memory, MUG, channel)
-    pos = np.asarray(memory[MUG][channel].pos)
-    seeds = choose_mug_seeds(memory, parts, spreader)
+    parts = label_mug_parts(memory, mug, channel)
+    pos = np.asarray(memory[mug][channel].pos)
+    seeds = choose_mug_seeds(memory, mug, parts, spreader)
     num_cols = len(VIEWS) + 1
     fig = plt.figure(figsize=(4 * num_cols, 3.6 * len(seeds)))
     for row, (description, seed) in enumerate(seeds):
-        inhibited, order = spreader.spread(MUG, seed)
+        inhibited, order = spreader.spread(mug, seed)
         draw_views(
             fig,
             row,
@@ -429,13 +525,13 @@ def plot_mug_seeds(memory):
     ax_parts.set_title("Mug parts (for coverage)", fontsize=9, loc="left")
     ax_parts.legend(fontsize=7, loc="lower left", markerscale=3)
     fig.suptitle(
-        f"{MUG} ({channel} graph): inhibition spread from sensing one location "
+        f"{mug} ({channel} graph): inhibition spread from sensing one location "
         "on each part of the mug\n(the seed with the median spread out of 10 random "
         "seeds per part; percentages: share of each part inhibited)",
         fontsize=12,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.97))
-    return fig, f"{MUG}_seeds.png"
+    return fig, f"{mug}_seeds.png"
 
 
 def compartments(spreader, graph_id, rng):
@@ -461,10 +557,10 @@ def compartments(spreader, graph_id, rng):
     return labels, seeds
 
 
-def plot_compartments(memory):
+def plot_compartments(memory, _mug, objects):
     spreader = Spreader(memory)
     channel = spreader.channel
-    objects = [graph_id for graph_id in COMPARTMENT_OBJECTS if graph_id in memory]
+    objects = [graph_id for graph_id in objects if graph_id in memory]
     fig = plt.figure(figsize=(4 * len(VIEWS), 3.6 * len(objects)))
     rng = np.random.default_rng(0)
     for row, graph_id in enumerate(objects):
@@ -504,18 +600,73 @@ def plot_compartments(memory):
     return fig, "compartments.png"
 
 
-def plot_tolerance(memory):
+def region_layers(labels):
+    """Color the regions of a graph with at least MIN_COMPARTMENT_NODES nodes.
+
+    Returns:
+        The draw_views layers (smaller regions in grey, the others in one color
+        each, largest first), and the number of colored regions.
+    """
+    ids, counts = np.unique(labels, return_counts=True)
+    large = ids[counts >= MIN_COMPARTMENT_NODES]
+    large = large[np.argsort(-counts[counts >= MIN_COMPARTMENT_NODES], kind="stable")]
+    cmap = plt.get_cmap("tab10")
+    node_colors = np.zeros((len(labels), 4))
+    for rank, region in enumerate(large):
+        node_colors[labels == region] = cmap(rank % cmap.N)
+    in_large = np.isin(labels, large)
+    return [(~in_large, "0.75", 3, None), (in_large, node_colors, 5, None)], len(large)
+
+
+def plot_regions(memory, _mug, objects):
+    spreader = Spreader(memory)
+    channel = spreader.channel
+    fraction = spreader.gsg.min_region_fraction or 0
+    objects = [graph_id for graph_id in objects if graph_id in memory]
+    num_cols = 2 * len(VIEWS)
+    fig = plt.figure(figsize=(3.4 * num_cols, 3.6 * len(objects)))
+    for row, graph_id in enumerate(objects):
+        pos = np.asarray(memory[graph_id][channel].pos)
+        for col, labels in enumerate(spreader.regions(graph_id)):
+            layers, num_large = region_layers(labels)
+            counts = np.sort(np.bincount(np.unique(labels, return_inverse=True)[1]))
+            sizes = ", ".join(str(int(size)) for size in counts[::-1][:6])
+            stage = "before merging" if col == 0 else "after merging"
+            draw_views(
+                fig,
+                row,
+                pos,
+                layers,
+                f"{graph_id}, {stage}: {len(counts)} regions of {len(pos)} nodes, "
+                f"{num_large} of at least {MIN_COMPARTMENT_NODES}\n"
+                f"largest: {sizes} nodes (grey: smaller regions)",
+                len(objects),
+                num_cols,
+                col_offset=col * len(VIEWS),
+            )
+    fig.suptitle(
+        f"Regions of the {channel} graphs, before and after merging regions with "
+        f"fewer than {fraction:.0%} of a graph's nodes into their smallest "
+        "neighboring region on the same side of the surface\n(one color per "
+        "region, largest first)",
+        fontsize=12,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    return fig, "regions.png"
+
+
+def plot_tolerance(memory, mug, _objects):
     channel = sensor_channel(memory)
-    parts = label_mug_parts(memory, MUG, channel)
-    pos = np.asarray(memory[MUG][channel].pos)
-    seeds = choose_mug_seeds(memory, parts, Spreader(memory))[:2]
-    tolerances = [0, 1, 2]
+    parts = label_mug_parts(memory, mug, channel)
+    pos = np.asarray(memory[mug][channel].pos)
+    seeds = choose_mug_seeds(memory, mug, parts, Spreader(memory))[:2]
+    tolerances = [1, 2, 3]
     num_cols = len(VIEWS) * len(seeds)
     fig = plt.figure(figsize=(3.4 * num_cols, 3.6 * len(tolerances)))
     for row, tolerance in enumerate(tolerances):
         spreader = Spreader(memory, max_dissimilar_neighbors=tolerance)
         for col, (description, seed) in enumerate(seeds):
-            inhibited, order = spreader.spread(MUG, seed)
+            inhibited, order = spreader.spread(mug, seed)
             draw_views(
                 fig,
                 row,
@@ -528,12 +679,68 @@ def plot_tolerance(memory):
                 col_offset=col * len(VIEWS),
             )
     fig.suptitle(
-        f"{MUG}: spreads from the same seeds with different max_dissimilar_neighbors"
-        " (the default is 1)",
+        f"{mug}: spreads from the same seeds with different max_dissimilar_neighbors"
+        " (the default is 2)",
         fontsize=12,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    return fig, f"{MUG}_tolerance.png"
+    return fig, f"{mug}_tolerance.png"
+
+
+def make_scrollable(fig, window_height=WINDOW_HEIGHT):
+    """Show a tall figure in a window of a fixed height that scrolls through it.
+
+    The figure keeps the layout of its full height; the window shows a slice of it,
+    which the mouse wheel, the up / down arrow keys, and page up / page down move.
+    Works with any interactive backend, by moving the axes and texts within the
+    window rather than relying on the backend's own scroll bars.
+    """
+    full_height = fig.get_figheight()
+    if full_height <= window_height:
+        return
+    # Positions in inches from the bottom of the full-height figure.
+    axes = [
+        (ax, ax.get_position().y0 * full_height, ax.get_position().height * full_height)
+        for ax in fig.axes
+    ]
+    texts = [(text, text.get_position()[1] * full_height) for text in fig.texts]
+    fig.set_size_inches(fig.get_figwidth(), window_height, forward=True)
+    max_offset = full_height - window_height
+    state = {"offset": 0.0}  # How far (in inches) the window is from the top.
+
+    def layout():
+        bottom = max_offset - state["offset"]
+        for ax, y0, height in axes:
+            box = ax.get_position()
+            y = (y0 - bottom) / window_height
+            ax.set_position([box.x0, y, box.width, height / window_height])
+            ax.set_visible(y < 1 and y + height / window_height > 0)
+        for text, y in texts:
+            text.set_y((y - bottom) / window_height)
+        fig.canvas.draw_idle()
+
+    def scroll(inches):
+        state["offset"] = float(np.clip(state["offset"] + inches, 0, max_offset))
+        layout()
+
+    def on_scroll(event):
+        scroll(-event.step * SCROLL_STEP)
+
+    def on_key(event):
+        steps = {
+            "down": SCROLL_STEP,
+            "up": -SCROLL_STEP,
+            "pagedown": window_height * 0.9,
+            "pageup": -window_height * 0.9,
+        }
+        if event.key in steps:
+            scroll(steps[event.key])
+
+    fig.canvas.mpl_connect("scroll_event", on_scroll)
+    fig.canvas.mpl_connect("key_press_event", on_key)
+    # Keep references to the callbacks for as long as the figure lives.
+    fig._scroll_callbacks = (on_scroll, on_key)
+    layout()
 
 
 def main():
@@ -545,15 +752,21 @@ def main():
     output_dir = args.output_dir.expanduser()
     if not args.interactive:
         output_dir.mkdir(parents=True, exist_ok=True)
-    memory = load_lm_memory(resolve_checkpoint(args.model_path), args.lm)
-    plots = [plot_compartments]
-    if MUG in memory:
-        plots = [plot_mug_seeds, plot_compartments, plot_tolerance]
+    model = MODELS[args.model]
+    model_path = Path(model.path) if args.model_path is None else args.model_path
+    lm_id = model.lm if args.lm is None else args.lm
+    memory = load_lm_memory(resolve_checkpoint(model_path), lm_id)
+    if args.min_region_fraction is not None:
+        GSG_KWARGS["min_region_fraction"] = args.min_region_fraction or None
+    plots = [plot_compartments, plot_regions]
+    if model.mug in memory:
+        plots = [plot_mug_seeds, plot_compartments, plot_regions, plot_tolerance]
     for plot in plots:
-        fig, filename = plot(memory)
+        fig, filename = plot(memory, model.mug, model.objects)
         if args.interactive:
+            make_scrollable(fig)
             continue
-        path = output_dir / f"lm{args.lm}_{filename}"
+        path = output_dir / f"{args.model}_lm{lm_id}_{filename}"
         fig.savefig(path, dpi=110)
         plt.close(fig)
         print(f"Saved {path}")
