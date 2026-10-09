@@ -25,8 +25,10 @@ LM (e.g. comp_models_mujoco_lm2_):
   every node is assigned to the compartment of the first spread that reached it.
 - <object>_tolerance.png: for the mug, spreads from the same seeds with
   different max_dissimilar_neighbors.
-- regions.png: for each object, the regions the goal generator divides its
-  model into, before and after merging small regions (see min_region_fraction).
+- visits.png: for each object, the online visits inference would make to it:
+  starting from a seed on the side of the mug (or a random node of other
+  objects), the next seed is sampled uniformly from the nodes not yet
+  inhibited, until all are, colored by the visit that first inhibited each.
 
 The sensor channel is the one channel of the LM's graphs that receives input from
 a sensor module (e.g. patch_2 for LM 2, patch_0 for LM 0). Objects the LM has no
@@ -49,9 +51,9 @@ Options:
                       pretrained directory, or the experiment directory.
     --lm ID           Overrides which learning module's models to use (e.g. 0 to
                       compare the models of LM 0 of comp_models_mujoco).
-    --min-region-fraction F
-                      Overrides the goal generator's min_region_fraction in all
-                      figures (0 to not merge small regions).
+    --min-spread-fraction F
+                      Overrides the goal generator's min_spread_fraction in all
+                      figures (0 to not push spreading through).
     --output-dir DIR  Where to save the figures (default:
                       ~/tbp/results/comp_benefits_figures/inhibition_spreading).
     --interactive     Show the figures in interactive windows (e.g. to rotate
@@ -67,9 +69,11 @@ import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
+import matplotlib.colors as mpl_colors
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.patches import Patch
 from scipy.spatial import KDTree
 from scipy.spatial.transform import Rotation
 
@@ -82,15 +86,8 @@ MODELS = {
         "supervised_pre_training_objects_with_stickers_comp_models_mujoco",
         lm=2,
         mug="023_mug",
-        objects=[
-            "023_mug",
-            "024_mug_tbp_horz",
-            "025_mug_tbp_vert",
-            "001_cube",
-            "002_cube_tbp",
-            "011_cylinder",
-            "016_sphere",
-        ],
+        # The base objects, without stickers
+        objects=["023_mug", "001_cube", "006_disk", "011_cylinder", "016_sphere"],
     ),
     "surf_agent_77obj": SimpleNamespace(
         path="~/tbp/results/monty/pretrained_models/pretrained_ycb_v13/"
@@ -120,6 +117,8 @@ SCROLL_STEP = 0.6
 VIEWS = [(20, 30), (20, 210), (-60, 30)]
 # Compartments with fewer nodes are drawn in grey rather than their own color.
 MIN_COMPARTMENT_NODES = 2
+# Visits newly inhibiting fewer than this fraction of nodes are drawn in grey.
+MIN_VISIT_FRACTION = 0.01
 PART_NAMES = ["side", "rim", "bottom", "handle", "inside"]
 # Overrides of the goal generator's parameters, for every figure.
 GSG_KWARGS: dict = {}
@@ -145,10 +144,11 @@ def parse_args() -> argparse.Namespace:
         "--lm", type=int, default=None, help="overrides the LM whose models to use"
     )
     parser.add_argument(
-        "--min-region-fraction",
+        "--min-spread-fraction",
         type=float,
         default=None,
-        help="overrides the goal generator's min_region_fraction (0 to not merge)",
+        help="overrides the goal generator's min_spread_fraction (0 to not push "
+        "spreading through)",
     )
     parser.add_argument(
         "--output-dir",
@@ -284,8 +284,9 @@ class Spreader:
                 "pose_vectors": features["pose_vectors"].reshape(3, 3)
             },
             non_morphological_features={
-                "hsv": features["hsv"],
-                "principal_curvatures_log": features["principal_curvatures_log"],
+                name: value
+                for name, value in features.items()
+                if name != "pose_vectors"
             },
         )
         self.lm.mlh = {
@@ -294,7 +295,7 @@ class Spreader:
             "location": np.asarray(graph.pos[node]),
             "rotation": Rotation.identity(),
         }
-        # Only the inhibition is reset, keeping the cached neighbors and regions.
+        # Only the inhibition is reset, keeping the cached neighbors.
         self.gsg._inhibition_steps = {}
         self.gsg.spread_records = []
         self.gsg._spread_from_observations([percept])
@@ -304,23 +305,6 @@ class Spreader:
             order[record.node_order] = np.arange(len(record.node_order))
         inhibited = self.gsg.get_inhibition_weights(graph_id, self.channel) > 0
         return inhibited, order
-
-    def reliable(self, graph_id: str) -> np.ndarray:
-        graph = self.lm.get_graph(graph_id, self.channel)
-        return self.gsg._get_spread_features(graph)["reliable"]
-
-    def regions(self, graph_id: str) -> tuple[np.ndarray, np.ndarray]:
-        """Get the regions the goal generator divides a graph into.
-
-        Returns:
-            The region of each node before and after merging small regions.
-        """
-        graph = self.lm.get_graph(graph_id, self.channel)
-        features = self.gsg._get_spread_features(graph)
-        unmerged = self.gsg._get_unmerged_regions(
-            graph_id, self.channel, graph, features
-        )
-        return unmerged, self.gsg._get_regions(graph_id, self.channel, graph, features)
 
 
 def _fit_circle(points_2d: np.ndarray) -> tuple[np.ndarray, float]:
@@ -455,14 +439,13 @@ def choose_mug_seeds(memory, mug, parts, spreader, num_candidates=10):
 
     Spreads from a node's own neighborhood vary with the noise in the stored
     features, so rather than picking a single node, spreads are run from
-    num_candidates random (reliable) nodes of each part, and the seed whose
+    num_candidates random nodes of each part, and the seed whose
     spread inhibits the median number of nodes is chosen.
 
     Returns:
         (description, node) pairs.
     """
     pos = np.asarray(memory[mug][spreader.channel].pos)
-    reliable = spreader.reliable(mug)
     handle_distance = KDTree(pos[parts == "handle"]).query(pos)[0]
     side = parts == "side"
     regions = [
@@ -476,7 +459,7 @@ def choose_mug_seeds(memory, mug, parts, spreader, num_candidates=10):
     rng = np.random.default_rng(0)
     seeds = []
     for description, region in regions:
-        candidates = np.nonzero(region & reliable)[0]
+        candidates = np.nonzero(region)[0]
         candidates = rng.choice(
             candidates, min(num_candidates, len(candidates)), replace=False
         )
@@ -542,11 +525,10 @@ def compartments(spreader, graph_id, rng):
         seed of each compartment.
     """
     num_nodes = len(spreader.lm.get_graph(graph_id, spreader.channel).pos)
-    reliable = spreader.reliable(graph_id)
     labels = np.full(num_nodes, -1)
     seeds = []
     for node in rng.permutation(num_nodes):
-        if labels[node] >= 0 or not reliable[node]:
+        if labels[node] >= 0:
             continue
         inhibited, _ = spreader.spread(graph_id, int(node))
         new = inhibited & (labels < 0)
@@ -600,59 +582,108 @@ def plot_compartments(memory, _mug, objects):
     return fig, "compartments.png"
 
 
-def region_layers(labels):
-    """Color the regions of a graph with at least MIN_COMPARTMENT_NODES nodes.
+def simulate_visits(spreader, graph_id, first_seed, rng):
+    """Visit every node of a graph as inference would, without inhibition decaying.
+
+    Beginning with the first seed, the sensed features of a seed node spread
+    inhibition, and the next seed is sampled uniformly from the nodes not yet
+    inhibited, until every node has been inhibited (or been a seed).
 
     Returns:
-        The draw_views layers (smaller regions in grey, the others in one color
-        each, largest first), and the number of colored regions.
+        The visit (numbered from 0) that first inhibited each node, and for each
+        visit, its seed and the number of nodes its spread reached.
     """
-    ids, counts = np.unique(labels, return_counts=True)
-    large = ids[counts >= MIN_COMPARTMENT_NODES]
-    large = large[np.argsort(-counts[counts >= MIN_COMPARTMENT_NODES], kind="stable")]
-    cmap = plt.get_cmap("tab10")
-    node_colors = np.zeros((len(labels), 4))
-    for rank, region in enumerate(large):
-        node_colors[labels == region] = cmap(rank % cmap.N)
-    in_large = np.isin(labels, large)
-    return [(~in_large, "0.75", 3, None), (in_large, node_colors, 5, None)], len(large)
+    num_nodes = len(spreader.lm.get_graph(graph_id, spreader.channel).pos)
+    visit = np.full(num_nodes, -1)
+    visits = []
+    seed = first_seed
+    while seed is not None:
+        inhibited, _ = spreader.spread(graph_id, seed)
+        inhibited[seed] = True
+        visit[inhibited & (visit < 0)] = len(visits)
+        visits.append((seed, int(inhibited.sum())))
+        remaining = np.flatnonzero(visit < 0)
+        seed = int(rng.choice(remaining)) if len(remaining) else None
+    return visit, visits
 
 
-def plot_regions(memory, _mug, objects):
+def first_mug_seed(memory, mug, channel, rng):
+    """Sample a node on the side of a mug, away from its handle."""
+    parts = label_mug_parts(memory, mug, channel)
+    pos = np.asarray(memory[mug][channel].pos)
+    handle_distance = KDTree(pos[parts == "handle"]).query(pos)[0]
+    return int(rng.choice(np.flatnonzero((parts == "side") & (handle_distance > 0.02))))
+
+
+def plot_visits(memory, mug, objects):
     spreader = Spreader(memory)
     channel = spreader.channel
-    fraction = spreader.gsg.min_region_fraction or 0
+    fraction = spreader.gsg.min_spread_fraction or 0
     objects = [graph_id for graph_id in objects if graph_id in memory]
-    num_cols = 2 * len(VIEWS)
-    fig = plt.figure(figsize=(3.4 * num_cols, 3.6 * len(objects)))
+    num_cols = len(VIEWS) + 1
+    fig = plt.figure(figsize=(3.6 * num_cols, 3.6 * len(objects)))
+    cmap = plt.get_cmap("tab20")
     for row, graph_id in enumerate(objects):
+        rng = np.random.default_rng(0)
         pos = np.asarray(memory[graph_id][channel].pos)
-        for col, labels in enumerate(spreader.regions(graph_id)):
-            layers, num_large = region_layers(labels)
-            counts = np.sort(np.bincount(np.unique(labels, return_inverse=True)[1]))
-            sizes = ", ".join(str(int(size)) for size in counts[::-1][:6])
-            stage = "before merging" if col == 0 else "after merging"
-            draw_views(
-                fig,
-                row,
-                pos,
-                layers,
-                f"{graph_id}, {stage}: {len(counts)} regions of {len(pos)} nodes, "
-                f"{num_large} of at least {MIN_COMPARTMENT_NODES}\n"
-                f"largest: {sizes} nodes (grey: smaller regions)",
-                len(objects),
-                num_cols,
-                col_offset=col * len(VIEWS),
+        num_nodes = len(pos)
+        parts = None
+        if graph_id == mug:
+            parts = label_mug_parts(memory, mug, channel)
+            first_seed = first_mug_seed(memory, mug, channel, rng)
+        else:
+            first_seed = int(rng.integers(num_nodes))
+        visit, visits = simulate_visits(spreader, graph_id, first_seed, rng)
+        new_counts = np.bincount(visit, minlength=len(visits))
+        shown = np.flatnonzero(new_counts >= MIN_VISIT_FRACTION * num_nodes)
+        shown = shown[: cmap.N]
+        node_colors = np.tile(mpl_colors.to_rgba("0.75"), (num_nodes, 1))
+        legend = []
+        for rank, index in enumerate(shown):
+            color = cmap(rank)
+            node_colors[visit == index] = color
+            label = (
+                f"{index + 1}: {new_counts[index] / num_nodes:.0%} new"
+                f" (spread {visits[index][1] / num_nodes:.0%})"
             )
+            if parts is not None:
+                new_parts = parts[visit == index]
+                names, counts = np.unique(new_parts, return_counts=True)
+                label += f", {names[np.argmax(counts)]}"
+            legend.append(Patch(color=color, label=label))
+        rest = np.isin(visit, shown, invert=True)
+        legend.append(
+            Patch(
+                color="0.75",
+                label=f"{len(visits) - len(shown)} other visits: "
+                f"{rest.mean():.0%} of nodes",
+            )
+        )
+        cumulative = np.cumsum(new_counts) / num_nodes
+        draw_views(
+            fig,
+            row,
+            pos,
+            [(np.ones(num_nodes, dtype=bool), node_colors, 4, None)],
+            f"{graph_id}: {len(visits)} visits to inhibit all {num_nodes} nodes; "
+            f"the first 5 inhibit {cumulative[min(4, len(visits) - 1)]:.0%}",
+            len(objects),
+            num_cols,
+        )
+        ax = fig.add_subplot(len(objects), num_cols, (row + 1) * num_cols)
+        ax.set_axis_off()
+        ax.legend(handles=legend, loc="center left", fontsize=7, frameon=False)
     fig.suptitle(
-        f"Regions of the {channel} graphs, before and after merging regions with "
-        f"fewer than {fraction:.0%} of a graph's nodes into their smallest "
-        "neighboring region on the same side of the surface\n(one color per "
-        "region, largest first)",
-        fontsize=12,
+        f"Online visits to the {channel} graphs, each spreading from a seed sampled "
+        "from the nodes not yet inhibited (the first on the side of the mug)\n"
+        "colored by the visit that first inhibited each node; legend: the order of "
+        "the visit, the nodes it newly inhibited, and the nodes its spread reached\n"
+        f"min_spread_fraction={fraction:.0%}; grey: visits newly inhibiting fewer "
+        f"than {MIN_VISIT_FRACTION:.0%} of nodes",
+        fontsize=10,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
-    return fig, "regions.png"
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    return fig, "visits.png"
 
 
 def plot_tolerance(memory, mug, _objects):
@@ -758,11 +789,11 @@ def main():
     model_path = Path(model.path) if args.model_path is None else args.model_path
     lm_id = model.lm if args.lm is None else args.lm
     memory = load_lm_memory(resolve_checkpoint(model_path), lm_id)
-    if args.min_region_fraction is not None:
-        GSG_KWARGS["min_region_fraction"] = args.min_region_fraction or None
-    plots = [plot_compartments, plot_regions]
+    if args.min_spread_fraction is not None:
+        GSG_KWARGS["min_spread_fraction"] = args.min_spread_fraction or None
+    plots = [plot_compartments, plot_visits]
     if model.mug in memory:
-        plots = [plot_mug_seeds, plot_compartments, plot_regions, plot_tolerance]
+        plots = [plot_mug_seeds, plot_compartments, plot_visits, plot_tolerance]
     for plot in plots:
         fig, filename = plot(memory, model.mug, model.objects)
         if args.interactive:

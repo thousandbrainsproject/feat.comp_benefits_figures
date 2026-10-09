@@ -1638,16 +1638,14 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
     through the graph of the channel the input was received on, starting from the
     nodes nearest the MLH location:
     - An object ID from a lower-level LM spreads through the nodes storing it.
-    - Sensory input spreads through nodes with a similar hue on a continuous
-      surface. Two neighboring nodes are on a continuous surface if either one's
-      local model of the surface (see `_surface_continuity_errors`) predicts the
-      other's surface normal and location. Spreading stops wherever the hue
-      differs or the surface is discontinuous, so e.g. on a mug the side of the
-      cylinder is inhibited, but not its rim, bottom or handle, and on a cube a
-      single face is inhibited, but not the other faces. As the features stored
-      in learned models are noisy, a spread also inhibits the whole region of
-      the graph it begins in, with small regions (fragments of noisy features)
-      merged into their neighbors (see `min_region_fraction`).
+    - Sensory input spreads through neighboring nodes with a similar hue and
+      surface normal. Spreading stops wherever the hue or the surface normal
+      changes abruptly, so e.g. on a mug the side of the cylinder (whose normal
+      changes gradually from node to node) is inhibited, but not its rim, bottom
+      or handle, and on a cube a single face is inhibited, but not the other
+      faces. A spread that stops
+      before reaching `min_spread_fraction` of the graph's nodes is pushed
+      through to the neighbors whose features differ.
 
     A node's neighbors are its `num_spread_neighbors` (or, for sensory input,
     `num_feature_spread_neighbors`) nearest nodes (regardless of their distance),
@@ -1663,11 +1661,6 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
     to 0 over `inhibition_decay_steps` steps.
     """
 
-    # Stored surface normals are averaged over the observations in a voxel, so a
-    # voxel spanning both sides of a wall thinner than it (e.g. a mug's) stores a
-    # shortened normal of arbitrary direction, along with mixed curvatures.
-    MIN_RELIABLE_NORMAL_LENGTH = 0.9
-
     def __init__(
         self,
         goal_tolerances=None,
@@ -1678,12 +1671,10 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         num_feature_spread_neighbors=10,
         inhibition_decay_steps=50,
         max_hue_difference: float | None = 0.05,
-        max_continuity_normal_error: float | None = 40.0,
-        max_continuity_location_error: float | None = 30.0,
+        max_normal_angle: float | None = 40.0,
         min_far_side_angle=135.0,
         max_dissimilar_neighbors=2,
-        min_inhibited_neighbor_fraction: float | None = 0.75,
-        min_region_fraction: float | None = 0.03,
+        min_spread_fraction: float | None = 0.05,
         min_hue_saturation=0.1,
         min_hue_value=0.1,
         **kwargs,
@@ -1720,16 +1711,9 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
                 dark, colored surface appear achromatic, so a chromatic and an
                 achromatic feature are not treated as different. None to not
                 compare hue. Defaults to 0.05.
-            max_continuity_normal_error: Largest angle (in degrees) between a
-                node's surface normal and the normal predicted for it by its
-                neighbor's local model of the surface, for the two to be on a
-                continuous surface (see `_surface_continuity_errors`). None to not
-                compare normals. Defaults to 40.
-            max_continuity_location_error: Largest error (as an angle in degrees,
-                see `_surface_continuity_errors`) in a node's location predicted
-                by its neighbor's local model of the surface, for the two to be on
-                a continuous surface. None to not compare locations. Defaults to
-                30.
+            max_normal_angle: Largest angle (in degrees) between the surface
+                normals of two neighboring nodes for their features to be similar.
+                None to not compare normals. Defaults to 40.
             min_far_side_angle: Smallest angle (in degrees) between the surface
                 normals of two neighboring nodes for one to be on the far side of
                 a thin wall from the other (e.g. the inside and outside of a mug),
@@ -1743,21 +1727,13 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
                 leak across boundaries (e.g. onto a mug's handle). Spreading
                 through object IDs always requires all neighbors to store the ID.
                 Defaults to 2.
-            min_inhibited_neighbor_fraction: For sensory input, once a spread has
-                finished, a node it did not reach (e.g. because the node's own
-                stored features are noisy) is inhibited anyway if at least this
-                fraction of its neighbors were, as it is surrounded by the region
-                the spread inhibited. This is done once, so the region does not
-                creep along its boundary. None to not do this. Defaults to 0.75.
-            min_region_fraction: For sensory input, the graph is divided into
-                regions that spreads from each of their nodes reach, and each
-                region with fewer than this fraction of the graph's nodes (e.g. a
-                fragment of noisy features) is merged into the smallest
-                neighboring region on the same side of the surface, or the
-                smallest neighboring region if none is (see
-                `_merge_small_regions`). A spread then also inhibits the whole
-                region of the node at which the sensed features are predicted.
-                None to not divide graphs into regions. Defaults to 0.03.
+            min_spread_fraction: For sensory input, the fraction of the graph's
+                nodes a spread must reach: when spreading stops before reaching
+                them, it is pushed through to the neighbors whose features differ
+                (see `_get_spread_order`). This keeps fragments of noisy features,
+                and small parts like a mug's handle, from being inhibited a few
+                nodes at a time. None to not push spreading through. Defaults to
+                0.05.
             min_hue_saturation: Minimum HSV saturation for a hue to be chromatic.
                 Defaults to 0.1.
             min_hue_value: Minimum HSV value for a hue to be chromatic. Defaults to
@@ -1773,12 +1749,10 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         self.num_feature_spread_neighbors = num_feature_spread_neighbors
         self.inhibition_decay_steps = inhibition_decay_steps
         self.max_hue_difference = max_hue_difference
-        self.max_continuity_normal_error = max_continuity_normal_error
-        self.max_continuity_location_error = max_continuity_location_error
+        self.max_normal_angle = max_normal_angle
         self.min_far_side_angle = min_far_side_angle
         self.max_dissimilar_neighbors = max_dissimilar_neighbors
-        self.min_inhibited_neighbor_fraction = min_inhibited_neighbor_fraction
-        self.min_region_fraction = min_region_fraction
+        self.min_spread_fraction = min_spread_fraction
         self.min_hue_saturation = min_hue_saturation
         self.min_hue_value = min_hue_value
 
@@ -1798,9 +1772,6 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
             tuple[str, str, int],
             tuple[np.ndarray, list[np.ndarray], tuple[np.ndarray, np.ndarray]],
         ] = {}
-        # The region of each node (see `_get_regions`), keyed like the similar
-        # neighbors cache.
-        self._region_cache: dict[tuple[str, str, int], np.ndarray] = {}
         self._prev_goal_mlh: dict | None = None
         self.spread_records: list[SpreadRecord] = []
 
@@ -1977,8 +1948,8 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         Spreading only begins if the sensed features are predicted by the MLH, i.e.
         they are similar to the features of one of the nodes nearest the MLH
         location that lie within the parent LM's max_match_distance (with the
-        sensed features located at the MLH location, and the sensed pose vectors
-        rotated into the model's frame by the MLH rotation).
+        sensed surface normal rotated into the model's frame by the MLH
+        rotation).
         Unlike for object IDs, stored features vary from node to node, so the
         spread begins from those of the nodes nearest the MLH location that are
         similar to the nearest such node, rather than requiring all of them to be.
@@ -1989,14 +1960,10 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         features = self._get_spread_features(graph)
         if not features:
             return
-        sensed = self._get_sensed_spread_features(
-            percept, mlh["rotation"], mlh["location"]
-        )
+        sensed = self._get_sensed_spread_features(percept, mlh["rotation"])
 
         seeds, seed_distances = self._get_nodes_nearest_mlh(graph, mlh["location"])
         nearby = seeds[seed_distances <= self.parent_lm.max_match_distance]
-        if "reliable" in features:
-            nearby = nearby[features["reliable"][nearby]]
         predicted = nearby[self._similar_features(features, nearby, sensed)]
         if len(predicted) == 0:
             return
@@ -2009,10 +1976,6 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         spreads, neighbors, surface_edges = self._get_similar_neighbors(
             graph_id, input_channel, graph, features
         )
-        region = None
-        if self.min_region_fraction:
-            regions = self._get_regions(graph_id, input_channel, graph, features)
-            region = regions == regions[predicted[0]]
         self._spread_from_seeds(
             graph_id,
             input_channel,
@@ -2020,8 +1983,7 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
             neighbors,
             spreads,
             object_id=None,
-            surrounding_edges=surface_edges,
-            region=region,
+            surface_edges=surface_edges,
         )
 
     def _spread_from_seeds(
@@ -2032,14 +1994,12 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         neighbors,
         spreads,
         object_id,
-        surrounding_edges=None,
-        region=None,
+        surface_edges=None,
     ) -> None:
         """Inhibit the seeds and spread inhibition from them through the graph.
 
         The spread (see `_get_spread_order`) is appended to `spread_records`, with
-        the inhibited nodes in the order they were reached, followed by the
-        nodes of `region` it did not reach.
+        the inhibited nodes in the order they were reached.
 
         Args:
             graph_id: The graph to spread through.
@@ -2049,21 +2009,13 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
                 `_get_node_neighbors`).
             spreads: Whether each node of the graph spreads to its neighbors.
             object_id: The received object ID, or None for sensory input.
-            surrounding_edges: The (node, neighbor) pairs by which to find the
-                nodes surrounded by the spread, or None to not look for them.
-            region: Whether each node is inhibited along with the spread, or None
-                for no other nodes.
+            surface_edges: For sensory input, every (node, neighbor) pair on the
+                same side of the surface (see `_get_spread_order`); None for
+                object IDs.
         """
-        num_nodes = len(spreads)
-        order = self._get_spread_order(seeds, neighbors, spreads, surrounding_edges)
-        inhibited = np.zeros(num_nodes, dtype=bool)
-        inhibited[order] = True
-        if region is not None:
-            order = np.concatenate([order, np.flatnonzero(region & ~inhibited)])
-            inhibited |= region
-
-        inhibition = self._get_inhibition_steps(graph_id, input_channel, num_nodes)
-        inhibition[inhibited] = self.inhibition_decay_steps
+        order = self._get_spread_order(seeds, neighbors, spreads, surface_edges)
+        inhibition = self._get_inhibition_steps(graph_id, input_channel, len(spreads))
+        inhibition[order] = self.inhibition_decay_steps
         self.spread_records.append(
             SpreadRecord(
                 graph_id=graph_id,
@@ -2078,229 +2030,67 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
             (object_name,) = self._get_feature_object_id_names([object_id])
             explained = f"storing {object_name}"
         logger.debug(
-            f"Inhibited {np.count_nonzero(inhibited)} nodes {explained} on channel "
+            f"Inhibited {len(order)} nodes {explained} on channel "
             f"{input_channel} of {graph_id}"
         )
 
     def _get_spread_order(
-        self, seeds, neighbors, spreads, surrounding_edges=None
+        self, seeds, neighbors, spreads, surface_edges=None
     ) -> np.ndarray:
         """Spread from seeds through a graph, without inhibiting the reached nodes.
 
         Beginning with the seeds, every reached node that spreads reaches all of
-        its neighbors, and spreading then continues from each of them. Then, if
-        `surrounding_edges` are given, every node the spread did not reach but that
-        has at least min_inhibited_neighbor_fraction of its neighbors (by these
-        edges) reached is reached too.
+        its neighbors, and spreading then continues from each of them. For
+        sensory input, whenever spreading stops having reached fewer than
+        min_spread_fraction of the graph's nodes (e.g. on a fragment of noisy
+        features, or a small part like a mug's handle), it is pushed through: every
+        reached node reaches all of its neighbors on the same side of the surface
+        (`surface_edges`), whether or not their features are similar, and
+        spreading continues from them, but only until it has reached
+        min_spread_fraction of the nodes (so e.g. a spread pushed from the handle
+        onto the side of a mug does not go on to cover the side).
 
         Args:
             seeds: The nodes to begin spreading from.
             neighbors: The neighbors of each node of the graph (see
                 `_get_node_neighbors`).
             spreads: Whether each node of the graph spreads to its neighbors.
-            surrounding_edges: The (node, neighbor) pairs by which to find the
-                nodes surrounded by the spread, or None to not look for them.
+            surface_edges: The (node, neighbor) pairs on the same side of the
+                surface, or None to not push spreading through.
 
         Returns:
-            The reached nodes, in the order they were reached (the surrounded
-            nodes last).
+            The reached nodes, in the order they were reached.
         """
         num_nodes = len(spreads)
         reached = np.zeros(num_nodes, dtype=bool)
         reached[seeds] = True
-        queue = deque(seeds.tolist())
         order = seeds.tolist()
-        while queue:
-            node = queue.popleft()
-            if not spreads[node]:
-                continue
-            for neighbor in neighbors[node].tolist():
-                if not reached[neighbor]:
-                    reached[neighbor] = True
-                    order.append(neighbor)
-                    queue.append(neighbor)
-
-        if surrounding_edges is not None and self.min_inhibited_neighbor_fraction:
-            source, target = surrounding_edges
-            num_neighbors = np.bincount(source, minlength=num_nodes)
-            num_reached = np.bincount(source[reached[target]], minlength=num_nodes)
-            surrounded = (
-                ~reached
-                & (num_neighbors > 0)
-                & (num_reached >= self.min_inhibited_neighbor_fraction * num_neighbors)
-            )
-            order.extend(np.flatnonzero(surrounded).tolist())
-        return np.array(order, dtype=int)
-
-    def _get_regions(self, graph_id, input_channel, graph, features) -> np.ndarray:
-        """Divide a graph into regions of similar features, merging small ones.
-
-        The graph is first divided into regions (see `_get_unmerged_regions`), and
-        then each region with fewer than min_region_fraction of the graph's nodes
-        is merged into a neighboring region (see `_merge_small_regions`).
-
-        Returns:
-            The region of each node of the graph.
-        """
-        key = (graph_id, input_channel, len(graph.pos))
-        if key not in self._region_cache:
-            regions = self._get_unmerged_regions(
-                graph_id, input_channel, graph, features
-            )
-            source, target = self._get_neighbor_edges(
-                self._get_node_neighbors(
-                    graph_id,
-                    input_channel,
-                    graph,
-                    num_neighbors=self.num_feature_spread_neighbors,
-                )
-            )
-            self._region_cache[key] = self._merge_small_regions(
-                regions, features, source, target
-            )
-        return self._region_cache[key]
-
-    def _get_unmerged_regions(
-        self, graph_id, input_channel, graph, features
-    ) -> np.ndarray:
-        """Divide a graph into the regions that spreads from its nodes reach.
-
-        Taking the nodes in turn, each node not yet in a region begins a spread of
-        similar features from it alone, and the nodes it reaches that are not yet
-        in a region form a new region.
-
-        Returns:
-            The region of each node of the graph, numbered from 0.
-        """
-        spreads, neighbors, surface_edges = self._get_similar_neighbors(
-            graph_id, input_channel, graph, features
-        )
-        regions = np.full(len(spreads), -1)
-        num_regions = 0
-        for node in range(len(spreads)):
-            if regions[node] >= 0:
-                continue
-            order = self._get_spread_order(
-                np.array([node]), neighbors, spreads, surface_edges
-            )
-            regions[order[regions[order] < 0]] = num_regions
-            num_regions += 1
-        return regions
-
-    def _merge_small_regions(self, regions, features, source, target) -> np.ndarray:
-        """Merge each region with too few nodes into a neighboring region.
-
-        The smallest region with fewer than min_region_fraction of the graph's
-        nodes is merged into the smallest neighboring region on the same side of
-        the surface as it (see `_on_same_side`), or if none is, into the smallest
-        neighboring region, then the next smallest, until none is left that has
-        a neighbor. Small neighboring regions can
-        therefore merge into a region large enough to keep (e.g. the parts of a
-        mug's handle), rather than each merging into the largest region nearby.
-
-        Args:
-            regions: The region of each node.
-            features: The compared features of each node (see
-                `_get_spread_features`).
-            source: The node of each (node, neighbor) pair by which regions
-                neighbor one another.
-            target: The neighbor of each pair.
-
-        Returns:
-            The region of each node after merging, numbered from 0 by the size of
-            the region, largest first.
-        """
-        regions = regions.copy()
-        if self.min_region_fraction:
-            min_size = self.min_region_fraction * len(regions)
-            sizes = np.bincount(regions)
-            # Regions without neighbors (which merging other regions cannot add).
-            unmergeable = set()
-            while True:
-                small = [
-                    region
-                    for region in np.flatnonzero((sizes > 0) & (sizes < min_size))
-                    if region not in unmergeable
-                ]
-                if not small:
-                    break
-                region = min(small, key=lambda region: sizes[region])
-                boundary = (regions[source] == region) & (regions[target] != region)
-                parent = self._get_merge_parent(
-                    regions, sizes, features, source[boundary], target[boundary]
-                )
-                if parent is None:
-                    unmergeable.add(region)
+        queue = deque(order)
+        min_size = 0
+        if surface_edges is not None and self.min_spread_fraction:
+            min_size = self.min_spread_fraction * num_nodes
+        pushed = False
+        while True:
+            while queue and not (pushed and len(order) >= min_size):
+                node = queue.popleft()
+                if not spreads[node]:
                     continue
-                regions[regions == region] = parent
-                sizes[parent] += sizes[region]
-                sizes[region] = 0
-        _, regions, sizes = np.unique(regions, return_inverse=True, return_counts=True)
-        rank = np.empty(len(sizes), dtype=int)
-        rank[np.argsort(-sizes, kind="stable")] = np.arange(len(sizes))
-        return rank[regions]
-
-    def _get_merge_parent(self, regions, sizes, features, source, target):
-        """Get the region to merge a region into.
-
-        Args:
-            regions: The region of each node.
-            sizes: The number of nodes in each region.
-            features: The compared features of each node (see
-                `_get_spread_features`).
-            source: The node in the region of each (node, neighbor) pair that
-                crosses its boundary.
-            target: The neighbor in another region of each pair.
-
-        Returns:
-            The smallest neighboring region on the same side of the surface as the
-            region (see `_on_same_side`), or if there is none, the smallest
-            neighboring region; None if the region has no neighbors.
-        """
-        neighbor_regions = sorted(
-            np.unique(regions[target]), key=lambda region: sizes[region]
-        )
-        for parent in neighbor_regions:
-            to_parent = regions[target] == parent
-            if self._on_same_side(features, source[to_parent], target[to_parent]):
-                return int(parent)
-        return int(neighbor_regions[0]) if neighbor_regions else None
-
-    @staticmethod
-    def _on_same_side(features, source, target) -> bool:
-        """Get whether a region's boundary nodes are on the same side as a neighbor's.
-
-        On a thin wall (e.g. a bowl's), the nearest nodes of a region on one side
-        of the wall include nodes on the far side, so a node of the region's
-        boundary is on the same side of the surface as a neighboring region if any
-        of its neighbors in that region has a normal in the same hemisphere as its
-        own. Nodes with unreliable normals (see MIN_RELIABLE_NORMAL_LENGTH) are
-        not compared.
-
-        Args:
-            features: The compared features of each node (see
-                `_get_spread_features`).
-            source: The node in the region of each (node, neighbor) pair between
-                the two regions.
-            target: The neighbor in the other region of each pair.
-
-        Returns:
-            Whether at least half of the region's compared boundary nodes are on
-            the same side as the neighboring region (true if none are compared).
-        """
-        if "normal" not in features:
-            return True
-        reliable = features["reliable"]
-        compared = reliable[source] & reliable[target]
-        source, target = source[compared], target[compared]
-        if len(source) == 0:
-            return True
-        same_hemisphere = (
-            np.sum(features["normal"][source] * features["normal"][target], axis=1) > 0
-        )
-        boundary_nodes = np.unique(source)
-        same_side_nodes = np.unique(source[same_hemisphere])
-        return len(same_side_nodes) >= 0.5 * len(boundary_nodes)
+                for neighbor in neighbors[node].tolist():
+                    if not reached[neighbor]:
+                        reached[neighbor] = True
+                        order.append(neighbor)
+                        queue.append(neighbor)
+            if len(order) >= min_size:
+                break
+            pushed = True
+            source, target = surface_edges
+            frontier = np.unique(target[reached[source] & ~reached[target]])
+            if len(frontier) == 0:
+                break
+            reached[frontier] = True
+            order.extend(frontier.tolist())
+            queue.extend(frontier.tolist())
+        return np.array(order, dtype=int)
 
     def _get_nodes_nearest_mlh(
         self, graph, mlh_location
@@ -2327,49 +2117,32 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
 
         Returns:
             Arrays of each compared feature the graph stores, with one row per node:
-            "hsv" (hue, saturation and value), and the surface geometry: "location",
-            "normal" (the unit surface normal), "curvature_directions" (the two
-            unit principal curvature directions), "curvatures" (the two signed
-            principal curvatures, in 1/m; 0, i.e. flat, when not stored) and
-            "reliable" (whether the stored normal is reliable, see
-            MIN_RELIABLE_NORMAL_LENGTH). Hue is omitted when not compared.
+            "hsv" (hue, saturation and value) and "normal" (the unit surface
+            normal). Hue is omitted when not compared.
         """
         feature_mapping = graph.feature_mapping or {}
         features = {}
         if self.max_hue_difference is not None and "hsv" in feature_mapping:
             features["hsv"] = self._get_feature_values(graph, "hsv")[:, :3]
         if "pose_vectors" in feature_mapping:
-            pose_vectors = self._get_feature_values(graph, "pose_vectors").reshape(
-                -1, 3, 3
+            normals = self._get_feature_values(graph, "pose_vectors")[:, :3]
+            features["normal"] = normals / np.maximum(
+                np.linalg.norm(normals, axis=1, keepdims=True), 1e-12
             )
-            lengths = np.linalg.norm(pose_vectors[:, 0], axis=1)
-            features["location"] = np.asarray(graph.pos, dtype=float)
-            features["normal"] = (
-                pose_vectors[:, 0] / np.maximum(lengths, 1e-12)[:, None]
-            )
-            features["curvature_directions"] = pose_vectors[:, 1:]
-            features["curvatures"] = np.zeros((len(lengths), 2))
-            if "principal_curvatures_log" in feature_mapping:
-                features["curvatures"] = self._curvatures_from_log(
-                    self._get_feature_values(graph, "principal_curvatures_log")[:, :2]
-                )
-            features["reliable"] = lengths >= self.MIN_RELIABLE_NORMAL_LENGTH
         return features
 
-    def _get_sensed_spread_features(self, percept: Message, rotation, location) -> dict:
+    def _get_sensed_spread_features(self, percept: Message, rotation) -> dict:
         """Get the sensed features that sensory spreading compares.
 
         Args:
             percept: The sensory input.
-            rotation: The MLH rotation, which rotates sensed (body-frame) pose
-                vectors into the model's frame.
-            location: The MLH location, i.e. the sensed location in the model's
-                frame.
+            rotation: The MLH rotation, which rotates the sensed (body-frame)
+                surface normal into the model's frame.
 
         Returns:
             The sensed features, in the format of `_get_spread_features` (with one
-            value per feature, and pose vectors in the model's frame), for those
-            the percept carries.
+            value per feature, and the normal in the model's frame), for those the
+            percept carries.
         """
         non_morphological = percept.non_morphological_features or {}
         morphological = percept.morphological_features or {}
@@ -2380,30 +2153,11 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         ):
             sensed["hsv"] = np.asarray(non_morphological["hsv"], dtype=float)[:3]
         if morphological.get("pose_vectors") is not None:
-            pose_vectors = rotation.apply(
-                np.asarray(morphological["pose_vectors"], dtype=float).reshape(3, 3)
+            normal = rotation.apply(
+                np.asarray(morphological["pose_vectors"], dtype=float).reshape(3, 3)[0]
             )
-            sensed["location"] = np.asarray(location, dtype=float)
-            sensed["normal"] = pose_vectors[0] / np.linalg.norm(pose_vectors[0])
-            sensed["curvature_directions"] = pose_vectors[1:]
-            sensed["curvatures"] = np.zeros(2)
-            if non_morphological.get("principal_curvatures_log") is not None:
-                sensed["curvatures"] = self._curvatures_from_log(
-                    np.asarray(
-                        non_morphological["principal_curvatures_log"], dtype=float
-                    )
-                )
+            sensed["normal"] = normal / np.linalg.norm(normal)
         return sensed
-
-    @staticmethod
-    def _curvatures_from_log(log_curvatures) -> np.ndarray:
-        """Invert the sign-preserving log of "principal_curvatures_log" features.
-
-        Returns:
-            The signed principal curvatures (in 1/m).
-        """
-        log_curvatures = np.asarray(log_curvatures, dtype=float)
-        return np.sign(log_curvatures) * np.expm1(np.abs(log_curvatures))
 
     def _similar_features(self, features, nodes, reference) -> np.ndarray:
         """Check which of a set of nodes have features similar to a reference.
@@ -2436,9 +2190,8 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
             features_b: Arrays of the features to compare them to, likewise.
 
         Returns:
-            Whether the features of each pair are similar in hue and lie on a
-            continuous surface (as predicted from at least one of the two),
-            comparing only the features present in both.
+            Whether the features of each pair are similar in hue and surface
+            normal, comparing only the features present in both.
         """
         num_pairs = len(next(iter(features_a.values()), []))
         similar = np.ones(num_pairs, dtype=bool)
@@ -2455,102 +2208,14 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
             similar &= ~(chromatic_a & chromatic_b) | (
                 hue_difference <= self.max_hue_difference
             )
-        if "normal" in features_a and "normal" in features_b:
-            # A single node's stored normal and curvatures can be noisy, whereas a
-            # discontinuity in the surface is not predicted from either side of it.
-            similar &= self._predicts_continuous_surface(
-                features_a, features_b
-            ) | self._predicts_continuous_surface(features_b, features_a)
+        if (
+            self.max_normal_angle is not None
+            and "normal" in features_a
+            and "normal" in features_b
+        ):
+            cosine = np.sum(features_a["normal"] * features_b["normal"], axis=1)
+            similar &= cosine >= np.cos(np.radians(self.max_normal_angle))
         return similar
-
-    def _predicts_continuous_surface(self, from_features, to_features) -> np.ndarray:
-        """Check which nodes' local surfaces predict other nodes' normals and locations.
-
-        Args:
-            from_features: Features of the nodes whose local surface predicts
-                (see `_get_spread_features`), with one row per pair.
-            to_features: Features of the nodes being predicted, likewise.
-
-        Returns:
-            Whether the errors of each prediction (see `_surface_continuity_errors`)
-            are within max_continuity_normal_error and
-            max_continuity_location_error.
-        """
-        normal_error, location_error = self._surface_continuity_errors(
-            from_features, to_features
-        )
-        continuous = np.ones(len(normal_error), dtype=bool)
-        if self.max_continuity_normal_error is not None:
-            continuous &= normal_error <= self.max_continuity_normal_error
-        if self.max_continuity_location_error is not None:
-            continuous &= location_error <= self.max_continuity_location_error
-        return continuous
-
-    @staticmethod
-    def _surface_continuity_errors(
-        from_features, to_features
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Predict nodes' surface normals and locations from others' local surfaces.
-
-        The surface around the "from" node is modeled by its normal, principal
-        curvatures and their directions, i.e. as the ellipsoid (or, for curvatures
-        of different signs, the saddle) with those curvatures that touches the
-        surface there. Along the direction of the "to" node in the tangent plane,
-        this surface curves with the normal curvature given by Euler's formula,
-        and so locally follows a circle with that curvature (or, for a curvature
-        of 0, a straight line, in which case the predicted normal is simply the
-        "from" node's own). From the "to" node's distance along the tangent plane,
-        the circle predicts both its normal and its height above the tangent
-        plane.
-
-        Args:
-            from_features: Features of the nodes whose local surface predicts
-                (see `_get_spread_features`), with one row per pair.
-            to_features: Features of the nodes being predicted, likewise.
-
-        Returns:
-            For each pair: the angle (in degrees) between the "to" node's normal and
-            the predicted one, and the location error as an angle (in degrees),
-            namely the angle subtended at the "from" node by the difference
-            between the "to" node's height above the tangent plane and the
-            predicted height. Both are infinite when the "to" node lies further
-            along the tangent plane than the radius of the circle, i.e. beyond the
-            modeled surface.
-        """
-        normal = from_features["normal"]
-        displacement = to_features["location"] - from_features["location"]
-        height = np.sum(displacement * normal, axis=1)
-        tangential = displacement - height[:, None] * normal
-        tangential_distance = np.linalg.norm(tangential, axis=1)
-        direction = tangential / np.maximum(tangential_distance, 1e-12)[:, None]
-
-        cosines = np.einsum(
-            "pj,pij->pi", direction, from_features["curvature_directions"]
-        )
-        curvature = np.sum(from_features["curvatures"] * cosines**2, axis=1)
-
-        # The sine of the angle the normal turns through along the circle.
-        sine = curvature * tangential_distance
-        beyond = np.abs(sine) > 1
-        sine = np.clip(sine, -1.0, 1.0)
-        cosine = np.sqrt(1.0 - sine**2)
-        predicted_normal = cosine[:, None] * normal - sine[:, None] * direction
-        predicted_height = sine * tangential_distance / (1.0 + cosine)
-
-        normal_error = np.degrees(
-            np.arccos(
-                np.clip(np.sum(predicted_normal * to_features["normal"], axis=1), -1, 1)
-            )
-        )
-        location_error = np.degrees(
-            np.arctan2(
-                np.abs(height - predicted_height),
-                np.maximum(np.linalg.norm(displacement, axis=1), 1e-12),
-            )
-        )
-        normal_error[beyond] = np.inf
-        location_error[beyond] = np.inf
-        return normal_error, location_error
 
     def _far_side(self, features, nodes, reference) -> np.ndarray:
         """Check which of a set of nodes are on the far side of a thin wall.
@@ -2578,10 +2243,7 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         Neighbors on the far side of a thin wall from a node (see
         min_far_side_angle) are not its neighbors here, as they are not part of the
         same surface. A node spreads to the neighbors with features similar to its
-        own if at most max_dissimilar_neighbors of its neighbors are not. A node
-        with an unreliable stored normal (see MIN_RELIABLE_NORMAL_LENGTH) does not
-        spread, and does not stop its neighbors from spreading, but is inhibited
-        when a spread reaches it.
+        own if at most max_dissimilar_neighbors of its neighbors are not.
 
         Returns:
             For each node of the graph, whether it spreads, and the neighbors it
@@ -2591,7 +2253,6 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
         key = (graph_id, input_channel, len(graph.pos))
         if key not in self._similar_neighbors_cache:
             num_nodes = len(graph.pos)
-            reliable = features.get("reliable", np.ones(num_nodes, dtype=bool))
             all_neighbors = self._get_node_neighbors(
                 graph_id,
                 input_channel,
@@ -2604,25 +2265,18 @@ class ChildObjectsGoalGenerator(ModelTargetGoalGenerator):
                 cosine = np.sum(
                     features["normal"][source] * features["normal"][target], axis=1
                 )
-                near_side = (
-                    (cosine > np.cos(np.radians(self.min_far_side_angle)))
-                    | ~reliable[source]
-                    | ~reliable[target]
-                )
+                near_side = cosine > np.cos(np.radians(self.min_far_side_angle))
             source, target = source[near_side], target[near_side]
             surface_edges = (source, target)
             similar = self._similar_feature_pairs(
                 {name: values[source] for name, values in features.items()},
                 {name: values[target] for name, values in features.items()},
             )
-            reachable = similar | ~reliable[target]
-            num_dissimilar = np.bincount(source[~reachable], minlength=num_nodes)
-            spreads = (
-                reliable
-                & (np.bincount(source, minlength=num_nodes) > 0)
-                & (num_dissimilar <= self.max_dissimilar_neighbors)
+            num_dissimilar = np.bincount(source[~similar], minlength=num_nodes)
+            spreads = (np.bincount(source, minlength=num_nodes) > 0) & (
+                num_dissimilar <= self.max_dissimilar_neighbors
             )
-            source, target = source[reachable], target[reachable]
+            source, target = source[similar], target[similar]
             boundaries = np.searchsorted(source, np.arange(num_nodes + 1))
             neighbors = [
                 target[boundaries[node] : boundaries[node + 1]]

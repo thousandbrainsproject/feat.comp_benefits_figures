@@ -33,7 +33,6 @@ from tbp.monty.frameworks.models.goal_generation import (
     TraceGoalGenerator,
 )
 from tbp.monty.frameworks.models.object_model import GridObjectModel
-from tbp.monty.frameworks.utils.sensor_processing import log_sign
 
 SKIP_ID_CHANNEL_HYPOTHESIS_TESTING = (
     "Object-ID channel hypothesis testing is under active development"
@@ -1350,25 +1349,14 @@ def plane_points(origin, u, v, nu, nv):
     )
 
 
-def surface_graph(
-    positions,
-    normals,
-    hues=None,
-    saturations=None,
-    curvatures=None,
-    curvature_directions=None,
-):
-    """A sensor-channel graph storing hue and surface geometry.
+def surface_graph(positions, normals, hues=None, saturations=None):
+    """A sensor-channel graph storing hue and surface normals.
 
     Args:
         positions: The node locations.
         normals: The surface normal of every node (or one for all).
         hues: The hue of every node; 0 if None.
         saturations: The saturation of every node; 1 if None.
-        curvatures: The two signed principal curvatures (in 1/m) of every node (or
-            one pair for all); flat if None.
-        curvature_directions: The two principal curvature directions of every node
-            (or one pair for all); only used with curvatures.
 
     Returns:
         The graph.
@@ -1378,14 +1366,6 @@ def surface_graph(
     pose_vectors[:, 0] = np.broadcast_to(
         np.asarray(normals, dtype=float), (num_nodes, 3)
     )
-    log_curvatures = np.zeros((num_nodes, 2))
-    if curvatures is not None:
-        log_curvatures[:] = log_sign(
-            np.broadcast_to(np.asarray(curvatures, dtype=float), (num_nodes, 2))
-        )
-        pose_vectors[:, 1:] = np.broadcast_to(
-            np.asarray(curvature_directions, dtype=float), (num_nodes, 2, 3)
-        )
     hsv = np.column_stack(
         [
             np.zeros(num_nodes) if hues is None else hues,
@@ -1394,12 +1374,7 @@ def surface_graph(
         ]
     )
     return FakeGraph(
-        positions,
-        {
-            "pose_vectors": pose_vectors.reshape(num_nodes, 9),
-            "hsv": hsv,
-            "principal_curvatures_log": log_curvatures,
-        },
+        positions, {"pose_vectors": pose_vectors.reshape(num_nodes, 9), "hsv": hsv}
     )
 
 
@@ -1407,16 +1382,15 @@ def cylinder_surface(radius, num_around, num_along):
     """Points around a cylinder along z, with outward normals.
 
     Returns:
-        The points, their normals, and the unit tangents around the cylinder.
+        The points and their normals.
     """
     angles = np.arange(num_around) * 2 * np.pi / num_around
     heights = np.arange(num_along) * SURFACE_SPACING
     angle, height = np.meshgrid(angles, heights, indexing="ij")
     angle, height = angle.ravel(), height.ravel()
     normals = np.column_stack([np.cos(angle), np.sin(angle), np.zeros(angle.size)])
-    tangents = np.column_stack([-np.sin(angle), np.cos(angle), np.zeros(angle.size)])
     points = np.column_stack([radius * normals[:, :2], height])
-    return points, normals, tangents
+    return points, normals
 
 
 class SensoryFeatureSpreadingTest(unittest.TestCase):
@@ -1459,17 +1433,13 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
         sensed = {
             "pose_vectors": pose_vectors,
             "hsv": features["hsv"],
-            "principal_curvatures_log": features["principal_curvatures_log"],
             **sensed_overrides,
         }
         percept = MagicMock(
             sender_type="SM",
             sender_id=SENSOR_CHANNEL,
             morphological_features={"pose_vectors": sensed["pose_vectors"]},
-            non_morphological_features={
-                "hsv": sensed["hsv"],
-                "principal_curvatures_log": sensed["principal_curvatures_log"],
-            },
+            non_morphological_features={"hsv": sensed["hsv"]},
         )
         self.mlh = {
             "graph_id": TOP_ID,
@@ -1497,21 +1467,13 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
 
     def test_spreads_around_a_cylinder_but_not_onto_its_cap(self) -> None:
         radius = 0.02
-        side, normals, tangents = cylinder_surface(radius, 60, 8)
+        side, normals = cylinder_surface(radius, 60, 8)
         top = side[:, 2].max()
         cap = plane_points([-0.019, -0.019, top], [1, 0, 0], [0, 1, 0], 20, 20)
         cap = cap[np.linalg.norm(cap[:, :2], axis=1) < radius - SURFACE_SPACING]
-        side_directions = np.stack(
-            [np.tile([0.0, 0.0, 1.0], (len(side), 1)), tangents], axis=1
-        )
-        cap_directions = np.tile([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], (len(cap), 1, 1))
         self.graph = surface_graph(
             np.vstack([side, cap]),
             np.vstack([normals, np.tile([0, 0, 1], (len(cap), 1))]),
-            curvatures=np.vstack(
-                [np.tile([0.0, -1 / radius], (len(side), 1)), np.zeros((len(cap), 2))]
-            ),
-            curvature_directions=np.vstack([side_directions, cap_directions]),
         )
 
         inhibited = self.spread_from(4)
@@ -1547,46 +1509,6 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
         self.assertTrue(
             np.all(inhibited),
             "The hue of the achromatic nodes is undefined, so is not compared.",
-        )
-
-    def test_curvature_predicts_normals_around_a_tightly_curved_surface(self) -> None:
-        # Around a cylinder of radius 3.5mm, neighboring normals differ by more than
-        # max_continuity_normal_error, but are as its curvature predicts.
-        radius = 0.0035
-        points, normals, tangents = cylinder_surface(radius, 7, 8)
-        directions = np.stack(
-            [np.tile([0.0, 0.0, 1.0], (len(points), 1)), tangents], axis=1
-        )
-        self.graph = surface_graph(
-            points,
-            normals,
-            curvatures=[0.0, -1 / radius],
-            curvature_directions=directions,
-        )
-
-        self.assertTrue(np.all(self.spread_from(4)))
-
-        self.graph = surface_graph(points, normals)
-        self.assertLess(
-            self.spread_from(4).mean(),
-            0.5,
-            "Without curvature, the surface is modeled as flat, so the normals of "
-            "neighbors around the cylinder are not predicted.",
-        )
-
-    def test_stops_at_a_step_between_parallel_surfaces(self) -> None:
-        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
-        right = points[:, 0] >= 0.02
-        points[right, 2] += 0.004
-        self.graph = surface_graph(points, [0, 0, 1])
-
-        inhibited = self.spread_from(25)
-
-        nptest.assert_array_equal(
-            inhibited,
-            ~right,
-            "The normals agree across the step, but the locations beyond it are not "
-            "on the surface the nodes before it predict.",
         )
 
     def test_stops_at_a_tightly_rounded_edge(self) -> None:
@@ -1641,127 +1563,67 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
         self.assertTrue(np.all(inhibited[:100]))
         self.assertFalse(np.any(inhibited[100:]))
 
-    def test_nodes_with_unreliable_normals_are_inhibited_but_do_not_stop_it(
-        self,
-    ) -> None:
-        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
-        normals = np.tile([0.0, 0.0, 1.0], (100, 1))
-        # Averaging both sides of a thin wall shortens the stored normal.
-        unreliable = [33, 34, 66]
-        normals[unreliable] = [0.1, 0.05, 0.0]
-        self.graph = surface_graph(points, normals)
-
-        inhibited = self.spread_from(55)
-
-        self.assertTrue(np.all(inhibited))
-
     def test_noisy_neighbors_do_not_stop_spreading(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
         normals = np.tile([0.0, 0.0, 1.0], (100, 1))
         noisy = [44, 45]
         normals[noisy] = [np.sin(np.radians(60)), 0.0, np.cos(np.radians(60))]
         self.graph = surface_graph(points, normals)
-        self.gsg.min_inhibited_neighbor_fraction = None
-        self.gsg.min_region_fraction = None
+        self.gsg.min_spread_fraction = None
 
         inhibited = self.spread_from(55)
 
         self.assertFalse(np.any(inhibited[noisy]), "The noisy nodes are not spread to.")
         self.assertTrue(np.all(np.delete(inhibited, noisy)))
 
-    def test_a_small_region_is_inhibited_with_the_region_it_merges_into(
-        self,
-    ) -> None:
-        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
+    def test_spreading_that_stops_too_soon_is_pushed_through(self) -> None:
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 30, 22)
         x, y = np.round(points[:, :2] / SURFACE_SPACING).astype(int).T
-        patch = (x >= 8) & (x < 11) & (y >= 3) & (y < 6)
-        self.graph = surface_graph(points, [0, 0, 1], hues=np.where(patch, 0.5, 0.0))
-        self.gsg.min_inhibited_neighbor_fraction = None
-
-        self.gsg.min_region_fraction = None
-        nptest.assert_array_equal(self.spread_from(0), ~patch)
-        nptest.assert_array_equal(self.spread_from(np.flatnonzero(patch)[4]), patch)
-
-        self.gsg.min_region_fraction = 0.05
-        self.assertTrue(
-            np.all(self.spread_from(0)),
-            "The patch, of 9 of 200 nodes, is merged into the plane around it.",
-        )
-        self.assertTrue(np.all(self.spread_from(np.flatnonzero(patch)[4])))
-
-    def test_small_regions_merge_into_the_smallest_neighboring_region(self) -> None:
-        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
-        x, y = np.round(points[:, :2] / SURFACE_SPACING).astype(int).T
-        medium = (x >= 17) & (y < 4)
-        small = (x >= 14) & (x < 17) & (y < 3)
-        hues = np.select([medium, small], [0.5, 0.25], default=0.0)
+        ring = (x >= 7) & (x < 22) & (y >= 3) & (y < 18)
+        patch = (x >= 13) & (x < 16) & (y >= 9) & (y < 12)
+        ring &= ~patch
+        hues = np.select([patch, ring], [0.5, 0.25], default=0.0)
         self.graph = surface_graph(points, [0, 0, 1], hues=hues)
-        self.gsg.min_inhibited_neighbor_fraction = None
-        self.gsg.min_region_fraction = 0.1
 
-        inhibited = self.spread_from(np.flatnonzero(small)[4])
+        self.gsg.min_spread_fraction = None
+        self.assertFalse(np.any(self.spread_from(np.flatnonzero(patch)[4])[~patch]))
 
+        self.gsg.min_spread_fraction = 0.2
+        inhibited = self.spread_from(np.flatnonzero(patch)[4])
+        self.assertTrue(np.all(inhibited[patch]))
+        self.assertFalse(np.any(inhibited[~(patch | ring)]))
+        self.assertGreaterEqual(
+            inhibited.sum(),
+            132,
+            "Spreading stops at the edge of the patch (9 nodes), short of 132 "
+            "nodes, so is pushed through into the ring around it.",
+        )
+        self.assertLess(
+            inhibited.sum(),
+            150,
+            "Once pushed through, spreading stops on reaching 132 nodes, rather than "
+            "covering the ring (225 nodes).",
+        )
         nptest.assert_array_equal(
-            inhibited,
-            medium | small,
-            "The small region (9 nodes) merges into its smallest neighbor (12 "
-            "nodes), which is then large enough (of at least 20 nodes) to keep.",
+            self.spread_from(0),
+            ~(patch | ring),
+            "Spreading from the plane around the ring stops at the ring, having "
+            "reached enough nodes.",
         )
 
-    def test_small_regions_merge_on_their_side_of_a_thin_wall(self) -> None:
-        outside = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 6, 10)
-        inside = plane_points([0, 0, -0.001], [1, 0, 0], [0, 1, 0], 10, 10)
-        x, y = np.round(inside[:, :2] / SURFACE_SPACING).astype(int).T
-        patch = (x >= 1) & (x < 4) & (y >= 3) & (y < 6)
-        self.graph = surface_graph(
-            np.vstack([outside, inside]),
-            np.vstack([np.tile([0, 0, 1], (60, 1)), np.tile([0, 0, -1], (100, 1))]),
-            hues=np.concatenate([np.zeros(60), np.where(patch, 0.5, 0.0)]),
-        )
-        self.gsg.min_region_fraction = 0.1
-
-        inhibited = self.spread_from(60 + np.flatnonzero(patch)[4])
-
-        nptest.assert_array_equal(
-            inhibited,
-            np.arange(160) >= 60,
-            "The patch on the inside merges into the rest of the inside, although "
-            "the outside, on the far side of the wall, is a smaller neighbor.",
-        )
-
-    def test_small_regions_merge_through_a_thin_wall_without_another_neighbor(
-        self,
-    ) -> None:
+    def test_spreading_is_not_pushed_through_a_thin_wall(self) -> None:
         outside = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
         inside = plane_points([0.008, 0.008, -0.001], [1, 0, 0], [0, 1, 0], 3, 3)
         self.graph = surface_graph(
             np.vstack([outside, inside]),
             np.vstack([np.tile([0, 0, 1], (100, 1)), np.tile([0, 0, -1], (9, 1))]),
         )
-        self.gsg.min_region_fraction = 0.1
+        self.gsg.min_spread_fraction = 0.2
 
-        self.assertTrue(
-            np.all(self.spread_from(55)),
-            "The inside patch's only neighboring region is on the far side of the "
-            "wall, so it is merged into it.",
-        )
-
-        self.gsg.min_region_fraction = None
-        self.assertFalse(np.any(self.spread_from(55)[100:]))
-
-    def test_noisy_nodes_surrounded_by_the_spread_are_inhibited(self) -> None:
-        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
-        normals = np.tile([0.0, 0.0, 1.0], (100, 1))
-        noisy = [44, 45]
-        normals[noisy] = [np.sin(np.radians(60)), 0.0, np.cos(np.radians(60))]
-        self.graph = surface_graph(points, normals)
-
-        inhibited = self.spread_from(55)
-
-        self.assertTrue(np.all(inhibited))
-        (record,) = self.gsg.spread_records
-        self.assertCountEqual(
-            record.node_order[-2:], noisy, "Surrounded nodes are inhibited last."
+        nptest.assert_array_equal(
+            self.spread_from(102),
+            np.arange(109) >= 100,
+            "The inside patch's only neighbors are on the far side of the wall.",
         )
 
     def test_no_spreading_when_sensed_features_are_not_predicted(self) -> None:
