@@ -6,17 +6,16 @@
 # Use of this source code is governed by the MIT
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
-"""Tests for the feature-based graph-mismatch logic of the EvidenceGoalGenerator.
+"""Tests for the EvidenceGoalGenerator's hypothesis-testing policy.
 
-The spatial (Euclidean) mismatch path is additionally covered end-to-end in
-tests/unit/frameworks/models/evidence_matching/evidence_lm_test.py; the tests here
-use mock graphs to exercise the discrete (object ID), novel channel, and continuous
-(hue) feature paths that are used when two graphs are spatially near-identical.
+The tests use mock graphs and a mocked parent LM to exercise the selection of
+unexplained locations to test, the spreading of inhibition from received object
+IDs and from sensory input, and the transform of a target location on the MLH
+model into a Goal for the motor system.
 """
 
 from __future__ import annotations
 
-import itertools
 import unittest
 from unittest.mock import MagicMock
 
@@ -26,17 +25,8 @@ from scipy.spatial import KDTree
 from scipy.spatial.transform import Rotation
 
 from tbp.monty.context import RuntimeContext
-from tbp.monty.frameworks.models.goal_generation import (
-    ChildObjectsGoalGenerator,
-    CubeViewGoalGenerator,
-    EvidenceGoalGenerator,
-    TraceGoalGenerator,
-)
-from tbp.monty.frameworks.models.object_model import GridObjectModel
+from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
 
-SKIP_ID_CHANNEL_HYPOTHESIS_TESTING = (
-    "Object-ID channel hypothesis testing is under active development"
-)
 SENSOR_CHANNEL = "patch"
 TOP_ID = "object_a"
 SECOND_ID = "object_b"
@@ -101,15 +91,13 @@ def gsg_with_graphs(graphs, **gsg_kwargs) -> EvidenceGoalGenerator:
 
     Returns:
         The GSG, with its parent LM mocked to serve the given graphs and to
-        report object_a and object_b as the top-two MLH objects.
+        report object_a as the MLH.
     """
     lm = MagicMock()
     lm.learning_module_id = "learning_module_2"
     lm.object_id_feature_names = {}
     lm.max_match_distance = 0.01
     lm.buffer.get_first_sensory_input_channel.return_value = SENSOR_CHANNEL
-    lm.get_top_two_mlh_ids.return_value = (TOP_ID, SECOND_ID)
-    lm.get_mlh_for_object.side_effect = identity_mlh
     lm._get_current_mlh.return_value = identity_mlh(TOP_ID)
     lm.get_graph.side_effect = lambda graph_id, input_channel=None: (
         graphs[graph_id] if input_channel is None else graphs[graph_id][input_channel]
@@ -119,7 +107,6 @@ def gsg_with_graphs(graphs, **gsg_kwargs) -> EvidenceGoalGenerator:
     )
     gsg = EvidenceGoalGenerator(**gsg_kwargs)
     gsg.parent_lm = lm
-    gsg.focus_on_pose = False
     return gsg
 
 
@@ -136,521 +123,6 @@ BASE_POINTS = np.array(
         [0.0, 0.05, 0.0],
     ]
 )
-
-
-def sensor_graph(hues=None, saturations=None, values=None):
-    """A sensor-channel graph over BASE_POINTS, optionally with HSV features.
-
-    Saturations and values default to 1 (fully chromatic) when hues are given.
-
-    Returns:
-        The graph.
-    """
-    features = None
-    if hues is not None:
-        ones = np.ones_like(hues)
-        features = {
-            "hsv": np.column_stack(
-                [
-                    hues,
-                    ones if saturations is None else saturations,
-                    ones if values is None else values,
-                ]
-            )
-        }
-    return FakeGraph(BASE_POINTS, features)
-
-
-class SpatialPathTest(unittest.TestCase):
-    @unittest.skip(SKIP_ID_CHANNEL_HYPOTHESIS_TESTING)
-    def test_spatial_target_returned_when_graphs_differ_spatially(self) -> None:
-        # The top graph has an extra point 5cm away from anything in the second
-        # graph (like a mug handle), so the spatial path should propose it.
-        top_points = np.vstack([BASE_POINTS, [0.025, 0.1, 0.0]])
-        graphs = {
-            TOP_ID: {SENSOR_CHANNEL: FakeGraph(top_points)},
-            SECOND_ID: {SENSOR_CHANNEL: sensor_graph()},
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        channel, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
-
-        self.assertEqual(channel, SENSOR_CHANNEL)
-        self.assertEqual(target_loc_id, len(top_points) - 1)
-
-
-class DiscreteFeaturePathTest(unittest.TestCase):
-    def lm_channel_graphs(self, positions, top_object_ids, second_object_ids):
-        """Build matching-position LM channel graphs with the given object IDs.
-
-        Returns:
-            Tuple of (top graph, second graph).
-        """
-        return (
-            FakeGraph(positions, {"object_id": top_object_ids}),
-            FakeGraph(positions, {"object_id": second_object_ids}),
-        )
-
-    def test_target_is_model_point_at_center_of_mismatch_cluster(self) -> None:
-        # Three contiguous mismatching nodes (a "logo") plus one far-away
-        # mismatching outlier; the target should be the middle of the cluster,
-        # and the outlier should not drag the center away.
-        lm_positions = np.array(
-            [
-                [0.0, 0.0, 0.0],
-                [0.004, 0.0, 0.0],
-                [0.008, 0.0, 0.0],
-                [0.03, 0.03, 0.0],  # matching node
-                [0.1, 0.0, 0.0],  # mismatching outlier, >1cm from the cluster
-            ]
-        )
-        top_ids = np.array([1, 1, 1, 2, 3])
-        second_ids = np.array([7, 7, 7, 2, 8])
-        top_lm, second_lm = self.lm_channel_graphs(lm_positions, top_ids, second_ids)
-        graphs = {
-            TOP_ID: {SENSOR_CHANNEL: sensor_graph(), "learning_module_0": top_lm},
-            SECOND_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_0": second_lm,
-            },
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        channel, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
-
-        self.assertEqual(channel, "learning_module_0")
-        self.assertEqual(
-            target_loc_id,
-            1,
-            "Target should be the model point closest to the cluster's center, "
-            "with the far-away mismatching node excluded as an outlier.",
-        )
-
-    def test_channel_with_larger_mismatch_cluster_wins(self) -> None:
-        cluster_of_two = np.array([[0.0, 0.0, 0.0], [0.005, 0.0, 0.0]])
-        cluster_of_three = np.array(
-            [[0.0, 0.02, 0.0], [0.005, 0.02, 0.0], [0.01, 0.02, 0.0]]
-        )
-        top_lm0, second_lm0 = self.lm_channel_graphs(
-            cluster_of_two, np.array([1, 1]), np.array([2, 2])
-        )
-        top_lm1, second_lm1 = self.lm_channel_graphs(
-            cluster_of_three, np.array([1, 1, 1]), np.array([2, 2, 2])
-        )
-        graphs = {
-            TOP_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_0": top_lm0,
-                "learning_module_1": top_lm1,
-            },
-            SECOND_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_0": second_lm0,
-                "learning_module_1": second_lm1,
-            },
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        channel, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
-
-        self.assertEqual(channel, "learning_module_1")
-        self.assertEqual(target_loc_id, 1, "Middle of the three-node cluster.")
-
-    def test_object_id_mismatch_prioritized_over_hue_mismatch(self) -> None:
-        # The sensor channel has a large hue difference, but a single
-        # mismatching object ID should still take precedence.
-        lm_positions = np.array([[0.0, 0.0, 0.0]])
-        top_lm, second_lm = self.lm_channel_graphs(
-            lm_positions, np.array([1]), np.array([2])
-        )
-        graphs = {
-            TOP_ID: {
-                SENSOR_CHANNEL: sensor_graph(hues=np.array([0.0, 0.5, 0.0, 0.0])),
-                "learning_module_0": top_lm,
-            },
-            SECOND_ID: {
-                SENSOR_CHANNEL: sensor_graph(hues=np.zeros(4)),
-                "learning_module_0": second_lm,
-            },
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        channel, _ = gsg._compute_graph_mismatch(make_ctx())
-
-        self.assertEqual(channel, "learning_module_0")
-
-    def test_no_goal_when_object_ids_match_and_no_other_features(self) -> None:
-        lm_positions = np.array([[0.0, 0.0, 0.0], [0.005, 0.0, 0.0]])
-        top_lm, second_lm = self.lm_channel_graphs(
-            lm_positions, np.array([1, 1]), np.array([1, 1])
-        )
-        graphs = {
-            TOP_ID: {SENSOR_CHANNEL: sensor_graph(), "learning_module_0": top_lm},
-            SECOND_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_0": second_lm,
-            },
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        self.assertIsNone(gsg._compute_graph_mismatch(make_ctx()))
-
-    def test_matching_object_ids_beyond_max_match_distance_mismatch(self) -> None:
-        # The second graph stores the same object ID, but only 2cm away from the
-        # top graph's three nodes, i.e. beyond max_match_distance (1cm).
-        top_lm = FakeGraph(
-            np.array([[0.0, 0.0, 0.0], [0.004, 0.0, 0.0], [0.008, 0.0, 0.0]]),
-            {"object_id": np.array([1, 1, 1])},
-        )
-        second_lm = FakeGraph(
-            np.array([[0.004, 0.02, 0.0]]), {"object_id": np.array([1])}
-        )
-        graphs = {
-            TOP_ID: {SENSOR_CHANNEL: sensor_graph(), "learning_module_0": top_lm},
-            SECOND_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_0": second_lm,
-            },
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        channel, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
-        self.assertEqual(channel, "learning_module_0")
-        self.assertEqual(target_loc_id, 1, "Middle of the three-node cluster.")
-
-        gsg.parent_lm.max_match_distance = 0.03
-        self.assertIsNone(
-            gsg._compute_graph_mismatch(make_ctx()),
-            "Within max_match_distance, matching object IDs are not a mismatch.",
-        )
-
-
-# A contiguous "logo" of LM-channel nodes around BASE_POINTS[2], plus a far-away
-# outlier node that should be excluded from the cluster.
-LOGO_POSITIONS = np.array(
-    [
-        [0.046, 0.05, 0.0],
-        [0.05, 0.05, 0.0],
-        [0.054, 0.05, 0.0],
-        [0.0, 0.0, 0.0],  # outlier, >1cm from the cluster
-    ]
-)
-
-
-def logo_graph(positions=LOGO_POSITIONS):
-    """An LM-channel graph storing object IDs at the given positions.
-
-    Returns:
-        The graph.
-    """
-    return FakeGraph(positions, {"object_id": np.ones(len(positions))})
-
-
-class NovelChannelPathTest(unittest.TestCase):
-    def test_channel_only_in_top_graph_targets_center_of_its_cluster(self) -> None:
-        graphs = {
-            TOP_ID: {SENSOR_CHANNEL: sensor_graph(), "learning_module_1": logo_graph()},
-            SECOND_ID: {SENSOR_CHANNEL: sensor_graph()},
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        channel, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
-
-        self.assertEqual(channel, "learning_module_1")
-        self.assertEqual(target_loc_id, 1, "Middle of the logo cluster.")
-
-    def test_channel_only_in_second_graph_targets_top_graph_sensor_node(
-        self,
-    ) -> None:
-        # The second MLH has a different pose to the top MLH, so its graph is
-        # stored in a different frame; the logo should be mapped back into the
-        # top MLH graph's frame, landing on the top graph's sensor node 2.
-        second_rotation = Rotation.from_euler("z", 90, degrees=True)
-        second_location = np.array([0.1, 0.0, 0.0])
-
-        def mlh_for_object(graph_id):
-            mlh = identity_mlh(graph_id)
-            if graph_id == SECOND_ID:
-                mlh["rotation"] = second_rotation
-                mlh["location"] = second_location
-            return mlh
-
-        def to_second_frame(points):
-            return second_rotation.apply(points) + second_location
-
-        graphs = {
-            TOP_ID: {SENSOR_CHANNEL: sensor_graph()},
-            SECOND_ID: {
-                SENSOR_CHANNEL: FakeGraph(to_second_frame(BASE_POINTS)),
-                "learning_module_1": logo_graph(to_second_frame(LOGO_POSITIONS)),
-            },
-        }
-        gsg = gsg_with_graphs(graphs)
-        gsg.parent_lm.get_mlh_for_object.side_effect = mlh_for_object
-
-        channel, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
-
-        self.assertEqual(
-            channel,
-            SENSOR_CHANNEL,
-            "Targets must index the top MLH graph, which has no logo channel.",
-        )
-        self.assertEqual(target_loc_id, 2)
-
-    def test_channel_without_object_ids_in_other_graph_is_novel(self) -> None:
-        graphs = {
-            TOP_ID: {SENSOR_CHANNEL: sensor_graph(), "learning_module_1": logo_graph()},
-            SECOND_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_1": FakeGraph(LOGO_POSITIONS),
-            },
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        channel, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
-
-        self.assertEqual(channel, "learning_module_1")
-        self.assertEqual(target_loc_id, 1)
-
-    def test_larger_novel_cluster_wins_across_graphs(self) -> None:
-        # The top graph's novel cluster has two nodes, the second graph's has
-        # three (around BASE_POINTS[3]), so the latter should be targeted.
-        graphs = {
-            TOP_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_0": logo_graph(
-                    np.array([[0.05, 0.0, 0.0], [0.054, 0.0, 0.0]])
-                ),
-            },
-            SECOND_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_1": logo_graph(
-                    np.array(
-                        [[-0.004, 0.05, 0.0], [0.0, 0.05, 0.0], [0.004, 0.05, 0.0]]
-                    )
-                ),
-            },
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        channel, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
-
-        self.assertEqual(channel, SENSOR_CHANNEL)
-        self.assertEqual(target_loc_id, 3)
-
-    def test_shared_object_id_mismatch_prioritized_over_novel_channel(self) -> None:
-        shared_positions = np.array([[0.0, 0.0, 0.0]])
-        graphs = {
-            TOP_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_0": FakeGraph(
-                    shared_positions, {"object_id": np.array([1])}
-                ),
-                "learning_module_1": logo_graph(),
-            },
-            SECOND_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_0": FakeGraph(
-                    shared_positions, {"object_id": np.array([2])}
-                ),
-            },
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        channel, _ = gsg._compute_graph_mismatch(make_ctx())
-
-        self.assertEqual(channel, "learning_module_0")
-
-    def test_novel_channel_prioritized_over_hue_mismatch(self) -> None:
-        graphs = {
-            TOP_ID: {
-                SENSOR_CHANNEL: sensor_graph(hues=np.array([0.0, 0.5, 0.0, 0.0])),
-                "learning_module_1": logo_graph(),
-            },
-            SECOND_ID: {SENSOR_CHANNEL: sensor_graph(hues=np.zeros(4))},
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        channel, _ = gsg._compute_graph_mismatch(make_ctx())
-
-        self.assertEqual(channel, "learning_module_1")
-
-
-class ObjectIdLoggingTest(unittest.TestCase):
-    def assert_logged(self, gsg, expected_message) -> None:
-        with self.assertLogs(
-            "tbp.monty.frameworks.models.goal_generation", level="DEBUG"
-        ) as logs:
-            gsg._compute_graph_mismatch(make_ctx())
-
-        self.assertIn(expected_message, "\n".join(logs.output))
-
-    def test_shared_channel_mismatch_logs_names_of_compared_object_ids(self) -> None:
-        positions = np.array([[0.0, 0.0, 0.0]])
-        graphs = {
-            TOP_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_1": FakeGraph(positions, {"object_id": [1]}),
-            },
-            SECOND_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_1": FakeGraph(positions, {"object_id": [2]}),
-            },
-        }
-        gsg = gsg_with_graphs(graphs)
-        gsg.parent_lm.object_id_feature_names = {1: "tbp_logo", 2: "numenta_logo"}
-
-        self.assert_logged(
-            gsg,
-            "the top hypothesis stores tbp_logo and the second hypothesis stores "
-            "numenta_logo",
-        )
-
-    def test_mismatch_beyond_max_match_distance_logs_nearest_object_id(self) -> None:
-        graphs = {
-            TOP_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_0": FakeGraph(
-                    np.array([[0.0, 0.0, 0.0]]), {"object_id": [1]}
-                ),
-            },
-            SECOND_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_0": FakeGraph(
-                    np.array([[0.0, 0.02, 0.0]]), {"object_id": [1]}
-                ),
-            },
-        }
-        gsg = gsg_with_graphs(graphs)
-        gsg.parent_lm.object_id_feature_names = {1: "mug"}
-
-        self.assert_logged(
-            gsg,
-            "the top hypothesis stores mug and the second hypothesis stores "
-            "nothing within max_match_distance (nearest: mug)",
-        )
-
-    def test_novel_channel_mismatch_logs_name_of_novel_object_id(self) -> None:
-        graphs = {
-            TOP_ID: {SENSOR_CHANNEL: sensor_graph()},
-            SECOND_ID: {
-                SENSOR_CHANNEL: sensor_graph(),
-                "learning_module_1": logo_graph(),
-            },
-        }
-        gsg = gsg_with_graphs(graphs)
-        gsg.parent_lm.object_id_feature_names = {1: "numenta_logo"}
-
-        self.assert_logged(gsg, "only the second hypothesis stores numenta_logo")
-
-    def test_unknown_object_ids_are_logged_as_feature_values(self) -> None:
-        graphs = {
-            TOP_ID: {SENSOR_CHANNEL: sensor_graph(), "learning_module_1": logo_graph()},
-            SECOND_ID: {SENSOR_CHANNEL: sensor_graph()},
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        self.assert_logged(gsg, "only the top hypothesis stores 1")
-
-
-class ContinuousFeaturePathTest(unittest.TestCase):
-    def test_target_is_node_with_maximal_circular_hue_distance(self) -> None:
-        # Node 1 has the largest hue difference (0.5 vs 0.9 -> 0.4); node 0's
-        # difference wraps around the hue circle (0.95 vs 0.05 -> 0.1).
-        top_hues = np.array([0.95, 0.5, 0.2, 0.3])
-        second_hues = np.array([0.05, 0.9, 0.2, 0.3])
-        graphs = {
-            TOP_ID: {SENSOR_CHANNEL: sensor_graph(hues=top_hues)},
-            SECOND_ID: {SENSOR_CHANNEL: sensor_graph(hues=second_hues)},
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        channel, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
-
-        self.assertEqual(channel, SENSOR_CHANNEL)
-        self.assertEqual(target_loc_id, 1)
-
-    def test_tied_hue_distances_resolved_to_one_of_the_tied_nodes(self) -> None:
-        top_hues = np.array([0.5, 0.5, 0.0, 0.0])
-        second_hues = np.array([0.9, 0.9, 0.0, 0.0])
-        graphs = {
-            TOP_ID: {SENSOR_CHANNEL: sensor_graph(hues=top_hues)},
-            SECOND_ID: {SENSOR_CHANNEL: sensor_graph(hues=second_hues)},
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        _, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
-
-        self.assertIn(target_loc_id, [0, 1])
-
-    def test_no_goal_when_hue_difference_below_threshold(self) -> None:
-        top_hues = np.array([0.5, 0.5, 0.0, 0.0])
-        second_hues = np.array([0.55, 0.5, 0.0, 0.0])
-        graphs = {
-            TOP_ID: {SENSOR_CHANNEL: sensor_graph(hues=top_hues)},
-            SECOND_ID: {SENSOR_CHANNEL: sensor_graph(hues=second_hues)},
-        }
-        gsg = gsg_with_graphs(graphs, min_hue_mismatch=0.1)
-
-        self.assertIsNone(gsg._compute_graph_mismatch(make_ctx()))
-
-    def test_no_goal_when_hue_mismatch_is_between_achromatic_nodes(self) -> None:
-        # Node 0 has a large hue difference, but is near-grey in the top graph
-        # (low saturation) and near-black in the second graph (low value).
-        top_hues = np.array([0.7, 0.0, 0.0, 0.0])
-        second_hues = np.array([0.0, 0.0, 0.0, 0.0])
-        graphs = {
-            TOP_ID: {
-                SENSOR_CHANNEL: sensor_graph(
-                    hues=top_hues, saturations=np.array([0.02, 1.0, 1.0, 1.0])
-                )
-            },
-            SECOND_ID: {
-                SENSOR_CHANNEL: sensor_graph(
-                    hues=second_hues, values=np.array([0.01, 1.0, 1.0, 1.0])
-                )
-            },
-        }
-        gsg = gsg_with_graphs(graphs, min_hue_saturation=0.1, min_hue_value=0.1)
-
-        self.assertIsNone(gsg._compute_graph_mismatch(make_ctx()))
-
-    def test_chromatic_hue_mismatch_wins_over_larger_achromatic_one(self) -> None:
-        # Node 0's hue difference (0.4) is largest but its top node is grey;
-        # node 2's smaller difference (0.2) is between chromatic nodes.
-        top_hues = np.array([0.5, 0.0, 0.3, 0.0])
-        second_hues = np.array([0.9, 0.0, 0.1, 0.0])
-        graphs = {
-            TOP_ID: {
-                SENSOR_CHANNEL: sensor_graph(
-                    hues=top_hues, saturations=np.array([0.02, 1.0, 1.0, 1.0])
-                )
-            },
-            SECOND_ID: {SENSOR_CHANNEL: sensor_graph(hues=second_hues)},
-        }
-        gsg = gsg_with_graphs(graphs, min_hue_saturation=0.1)
-
-        _, target_loc_id = gsg._compute_graph_mismatch(make_ctx())
-
-        self.assertEqual(target_loc_id, 2)
-
-    def test_no_goal_when_no_valid_feature_channels(self) -> None:
-        graphs = {
-            TOP_ID: {SENSOR_CHANNEL: sensor_graph()},
-            SECOND_ID: {SENSOR_CHANNEL: sensor_graph()},
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        self.assertIsNone(gsg._compute_graph_mismatch(make_ctx()))
-
-    def test_generate_goal_returns_none_goal_when_no_mismatch(self) -> None:
-        graphs = {
-            TOP_ID: {SENSOR_CHANNEL: sensor_graph()},
-            SECOND_ID: {SENSOR_CHANNEL: sensor_graph()},
-        }
-        gsg = gsg_with_graphs(graphs)
-
-        self.assertIsNone(gsg._generate_goal(make_ctx(), observations=[]))
 
 
 class TargetLocInfoTest(unittest.TestCase):
@@ -715,302 +187,6 @@ class TargetLocInfoTest(unittest.TestCase):
         nptest.assert_allclose(target_info["target_surface_normal"], normals[3])
 
 
-class GeneratedGoalInfoTest(unittest.TestCase):
-    @unittest.skip(SKIP_ID_CHANNEL_HYPOTHESIS_TESTING)
-    def test_goal_info_carries_hypothesis_identity_and_predicted_displacement(
-        self,
-    ) -> None:
-        # The top graph has an extra point 10cm away (like a mug handle) that
-        # the spatial mismatch path will propose as the target location.
-        extra_point = np.array([0.025, 0.1, 0.0])
-        top_points = np.vstack([BASE_POINTS, extra_point])
-        pose_vectors = np.column_stack(
-            [np.tile([0.0, 0.0, 1.0], (len(top_points), 1)), np.zeros((5, 6))]
-        )
-        graphs = {
-            TOP_ID: {
-                SENSOR_CHANNEL: FakeGraph(top_points, {"pose_vectors": pose_vectors})
-            },
-            SECOND_ID: {SENSOR_CHANNEL: sensor_graph()},
-        }
-        gsg = gsg_with_graphs(graphs)
-        gsg.parent_lm.get_output.return_value = MagicMock(confidence=1.0)
-        sensed_location = np.array([0.01, 0.0, 0.0])
-        sensory_input = MagicMock(sender_id=SENSOR_CHANNEL, location=sensed_location)
-
-        goal = gsg._generate_goal(make_ctx(), observations=[sensory_input])
-
-        # The identity of the hypothesis behind the goal is snapshotted so the
-        # LM can attribute a failed jump to it later.
-        self.assertEqual(goal.info["hypothesis_to_test_graph_id"], TOP_ID)
-        self.assertEqual(goal.info["hypothesis_to_test_mlh_id"], 0)
-        # The MLH is at the model origin with identity rotation, so a
-        # successful jump displaces the sensor by the model-frame vector from
-        # the MLH location to the target point.
-        nptest.assert_allclose(goal.info["predicted_displacement"], extra_point)
-        nptest.assert_allclose(
-            goal.info["proposed_surface_loc"],
-            sensed_location + goal.info["predicted_displacement"],
-        )
-
-
-class TraceGoalGeneratorTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.model = GridObjectModel(
-            TOP_ID, max_nodes=10, max_size=1, num_voxels_per_dim=50
-        )
-        pv = np.eye(3).flatten()  # surface normal is the first row: [1, 0, 0]
-        self.model.build_model(
-            BASE_POINTS,
-            {
-                "pose_vectors": np.tile(pv, (len(BASE_POINTS), 1)),
-                "pose_fully_defined": np.ones(len(BASE_POINTS), dtype=bool),
-            },
-        )
-        self.surface_normal = np.array([1.0, 0.0, 0.0])
-        self.sensed_location = np.array([0.2, 0.3, 0.4])
-        self.observations = [
-            MagicMock(sender_id=SENSOR_CHANNEL, location=self.sensed_location)
-        ]
-        self.mlh = identity_mlh(TOP_ID)
-
-        lm = MagicMock()
-        lm.learning_module_id = "learning_module_2"
-        lm.buffer.get_first_sensory_input_channel.return_value = SENSOR_CHANNEL
-        lm.buffer.get_previous_input_percepts.return_value = None
-        lm.buffer.get_num_matching_steps.return_value = 20
-        lm.buffer.get_num_steps_post_output_goal_generated.return_value = 20
-        lm.get_all_known_object_ids.return_value = [TOP_ID]
-        lm.get_graph.side_effect = lambda *_args, **_kwargs: {
-            SENSOR_CHANNEL: self.model
-        }
-        lm._get_current_mlh.side_effect = lambda: self.mlh
-        lm.get_output.return_value = MagicMock(confidence=1.0)
-        self.gsg = TraceGoalGenerator(
-            desired_object_distance=0.03, min_steps_between_goals=10
-        )
-        self.gsg.parent_lm = lm
-
-    def node_at(self, location) -> int:
-        return int(np.argmin(np.linalg.norm(self.model.pos - location, axis=1)))
-
-    def test_goal_targets_maximal_hotspot(self) -> None:
-        self.model.tag_hotspots([[0.05, 0.05, 0.0], [0.0, 0.05, 0.0]], [0.2, 1.5])
-        hotspot_node = self.node_at([0.0, 0.05, 0.0])
-
-        goal = self.gsg._generate_goal(make_ctx(), self.observations)
-
-        # Identity MLH at the model origin: the jump displaces the sensor by the
-        # model-frame vector to the hot spot, then backs off along the normal.
-        nptest.assert_allclose(goal.info["predicted_displacement"], [0.0, 0.05, 0.0])
-        nptest.assert_allclose(
-            goal.location,
-            self.sensed_location + [0.0, 0.05, 0.0] + self.surface_normal * 0.045,
-        )
-        nptest.assert_allclose(
-            goal.morphological_features["pose_vectors"][0], -self.surface_normal
-        )
-        self.assertEqual(goal.info["hotspot_node_id"], hotspot_node)
-        self.assertAlmostEqual(goal.info["hotspot_value"], 1.5)
-        self.assertEqual(goal.info["hypothesis_to_test_graph_id"], TOP_ID)
-
-    def test_goal_is_transformed_by_mlh_pose(self) -> None:
-        self.model.tag_hotspots([[0.05, 0.0, 0.0]], [1.0])
-        rotation = Rotation.from_euler("xyz", [0, 0, 90], degrees=True)
-        mlh_location = np.array([0.0, 0.05, 0.0])
-        self.mlh = {
-            "graph_id": TOP_ID,
-            "mlh_id": 3,
-            "location": mlh_location,
-            "rotation": rotation,
-        }
-
-        goal = self.gsg._generate_goal(make_ctx(), self.observations)
-
-        # The MLH rotation maps body displacements into the model's frame, so
-        # model-frame displacements map back into the body frame by its inverse.
-        body_displacement = rotation.inv().apply(
-            np.array([0.05, 0.0, 0.0]) - mlh_location
-        )
-        body_normal = rotation.inv().apply(self.surface_normal)
-        nptest.assert_allclose(goal.info["predicted_displacement"], body_displacement)
-        nptest.assert_allclose(
-            goal.location,
-            self.sensed_location + body_displacement + body_normal * 0.045,
-            atol=1e-12,
-        )
-
-    def test_repeatedly_selects_the_maximal_hotspot(self) -> None:
-        self.model.tag_hotspots([[0.05, 0.0, 0.0], [0.0, 0.05, 0.0]], [2.0, 1.0])
-
-        goals = [
-            self.gsg._generate_goal(make_ctx(), self.observations) for _ in range(3)
-        ]
-
-        node = self.node_at([0.05, 0.0, 0.0])
-        self.assertEqual([g.info["hotspot_node_id"] for g in goals], [node] * 3)
-
-    def test_no_goal_without_hotspots(self) -> None:
-        self.assertIsNone(self.gsg._generate_goal(make_ctx(), self.observations))
-
-    def test_no_goal_when_hotspot_not_above_min_value(self) -> None:
-        self.model.tag_hotspots([[0.05, 0.0, 0.0]], [0.0])
-
-        self.assertIsNone(self.gsg._generate_goal(make_ctx(), self.observations))
-
-    def test_no_goal_when_mlh_is_not_a_known_object(self) -> None:
-        self.model.tag_hotspots([[0.05, 0.0, 0.0]], [1.0])
-        self.mlh = identity_mlh("no_observations_yet")
-
-        self.assertIsNone(self.gsg._generate_goal(make_ctx(), self.observations))
-
-    def test_step_outputs_goal_only_after_min_steps_between_goals(self) -> None:
-        self.model.tag_hotspots([[0.05, 0.0, 0.0]], [1.0])
-        steps_since_goal = (
-            self.gsg.parent_lm.buffer.get_num_steps_post_output_goal_generated
-        )
-
-        steps_since_goal.return_value = 10
-        self.gsg.step(make_ctx(), self.observations)
-        self.assertEqual(self.gsg.output_goals(), [])
-
-        steps_since_goal.return_value = 11
-        self.gsg.step(make_ctx(), self.observations)
-        (goal,) = self.gsg.output_goals()
-        self.assertEqual(goal.info["hotspot_node_id"], self.node_at([0.05, 0.0, 0.0]))
-
-        # Goals are one-off attempts: the next step outputs no goal.
-        steps_since_goal.return_value = 1
-        self.gsg.step(make_ctx(), self.observations)
-        self.assertEqual(self.gsg.output_goals(), [])
-
-
-class CubeViewGoalGeneratorTest(unittest.TestCase):
-    CENTER = np.array([0.1, 0.2, 0.3])
-
-    def setUp(self) -> None:
-        # Face centers stick out furthest along the face directions, and the
-        # (closer) corners furthest along the corner directions.
-        faces = np.vstack([np.eye(3), -np.eye(3)]) * 0.05
-        corners = np.array(list(itertools.product([1, -1], repeat=3))) * 0.04
-        self.points = np.vstack([faces, corners]) + self.CENTER
-        self.graph = FakeGraph(self.points)
-        self.sensed_location = np.array([0.5, 0.5, 0.5])
-        self.observations = [
-            MagicMock(sender_id=SENSOR_CHANNEL, location=self.sensed_location)
-        ]
-        self.mlh = identity_mlh(TOP_ID)
-
-        lm = MagicMock()
-        lm.learning_module_id = "learning_module_2"
-        lm.buffer.get_first_sensory_input_channel.return_value = SENSOR_CHANNEL
-        lm.buffer.get_previous_input_percepts.return_value = None
-        lm.buffer.get_num_matching_steps.return_value = 1
-        lm.get_all_known_object_ids.return_value = [TOP_ID]
-        lm.get_graph.side_effect = lambda *_args, **_kwargs: {
-            SENSOR_CHANNEL: self.graph
-        }
-        lm._get_current_mlh.side_effect = lambda: self.mlh
-        self.gsg = CubeViewGoalGenerator(
-            desired_object_distance=0.02, steps_per_view=50
-        )
-        self.gsg.parent_lm = lm
-
-    def step_at(self, matching_step) -> list:
-        self.gsg.parent_lm.buffer.get_num_matching_steps.return_value = matching_step
-        self.gsg.step(make_ctx(), self.observations)
-        return self.gsg.output_goals()
-
-    def test_there_are_six_face_and_eight_corner_views(self) -> None:
-        directions = CubeViewGoalGenerator.VIEW_DIRECTIONS
-
-        self.assertEqual(directions.shape, (14, 3))
-        nptest.assert_allclose(np.linalg.norm(directions, axis=1), 1.0)
-        self.assertEqual(int(np.sum(np.count_nonzero(directions, axis=1) == 1)), 6)
-        self.assertEqual(int(np.sum(np.count_nonzero(directions, axis=1) == 3)), 8)
-
-    def test_face_view_looks_at_the_face_from_outside(self) -> None:
-        (goal,) = self.step_at(51)
-
-        direction = np.array([1.0, 0.0, 0.0])
-        face_center = self.CENTER + direction * 0.05
-        nptest.assert_allclose(goal.info["view_direction"], direction)
-        nptest.assert_allclose(goal.info["model_frame_target_loc"], face_center)
-        # Identity MLH at the model origin, backed off along the view direction.
-        nptest.assert_allclose(
-            goal.location, self.sensed_location + face_center + direction * 0.03
-        )
-        nptest.assert_allclose(
-            goal.morphological_features["pose_vectors"][0], -direction
-        )
-
-    def test_corner_view_looks_at_the_corner(self) -> None:
-        self.gsg._next_view_index = 6
-
-        (goal,) = self.step_at(351)
-
-        nptest.assert_allclose(
-            goal.info["model_frame_target_loc"], self.CENTER + 0.04 * np.ones(3)
-        )
-        nptest.assert_allclose(
-            goal.morphological_features["pose_vectors"][0], -np.ones(3) / np.sqrt(3)
-        )
-
-    def test_view_direction_is_transformed_by_mlh_pose(self) -> None:
-        rotation = Rotation.from_euler("xyz", [0, 0, 90], degrees=True)
-        self.mlh = {
-            "graph_id": TOP_ID,
-            "mlh_id": 3,
-            "location": self.CENTER,
-            "rotation": rotation,
-        }
-
-        (goal,) = self.step_at(51)
-
-        body_direction = rotation.inv().apply([1.0, 0.0, 0.0])
-        nptest.assert_allclose(
-            goal.morphological_features["pose_vectors"][0], -body_direction
-        )
-        nptest.assert_allclose(
-            goal.location,
-            self.sensed_location + body_direction * (0.05 + 0.03),
-            atol=1e-12,
-        )
-
-    def test_each_view_is_held_for_steps_per_view_matching_steps(self) -> None:
-        view_indices = []
-        for matching_step in range(1, 801):
-            for goal in self.step_at(matching_step):
-                view_indices.append((matching_step, goal.info["view_index"]))
-
-        # The initial view is explored before the first jump.
-        self.assertEqual(view_indices, [(51 + 50 * view, view) for view in range(14)])
-
-    def test_view_is_retried_while_mlh_is_not_a_known_object(self) -> None:
-        self.mlh = identity_mlh("no_observations_yet")
-        self.assertEqual(self.step_at(51), [])
-
-        self.mlh = identity_mlh(TOP_ID)
-        (goal,) = self.step_at(52)
-        self.assertEqual(goal.info["view_index"], 0)
-
-    def test_failed_view_jumps_are_not_attributed_to_the_mlh(self) -> None:
-        (goal,) = self.step_at(51)
-
-        self.assertIsNone(goal.info["hypothesis_to_test_graph_id"])
-        self.assertIsNone(goal.info["hypothesis_to_test_mlh_id"])
-
-    def test_reset_restarts_from_the_first_view(self) -> None:
-        self.step_at(51)
-        self.step_at(101)
-
-        self.gsg.reset()
-
-        self.assertEqual(self.step_at(1), [])
-        (goal,) = self.step_at(51)
-        self.assertEqual(goal.info["view_index"], 0)
-
-
 WHEEL_ID = 573
 BODY_ID = 1099
 LOGO_ID = 1096
@@ -1053,7 +229,7 @@ def lm_percept(sender_id, object_id):
     )
 
 
-class ChildObjectsGoalGeneratorTest(unittest.TestCase):
+class EvidenceGoalGeneratorTest(unittest.TestCase):
     def setUp(self) -> None:
         self.car = car_line_graph()
         self.logo = logo_line_graph()
@@ -1095,7 +271,7 @@ class ChildObjectsGoalGeneratorTest(unittest.TestCase):
         lm.get_input_channels_in_graph.side_effect = lambda graph_id: list(
             self.graphs[graph_id].keys()
         )
-        self.gsg = ChildObjectsGoalGenerator(
+        self.gsg = EvidenceGoalGenerator(
             min_post_goal_success_steps=20,
             elapsed_steps_factor=10,
             num_spread_neighbors=6,
@@ -1273,6 +449,28 @@ class ChildObjectsGoalGeneratorTest(unittest.TestCase):
             goal.info["model_frame_target_loc"], self.car.pos[node_id]
         )
 
+    def test_goal_info_carries_hypothesis_identity_and_predicted_displacement(
+        self,
+    ) -> None:
+        self.sensor_percept.location = np.array([0.01, 0.0, 0.0])
+
+        goal = self.gsg._generate_goal(make_ctx(), [self.sensor_percept])
+
+        # The identity of the hypothesis behind the goal is snapshotted so the
+        # LM can attribute a failed jump to it later.
+        self.assertEqual(goal.info["hypothesis_to_test_graph_id"], TOP_ID)
+        self.assertEqual(goal.info["hypothesis_to_test_mlh_id"], 0)
+        # The MLH has identity rotation, so a successful jump displaces the
+        # sensor by the model-frame vector from the MLH location to the target.
+        nptest.assert_allclose(
+            goal.info["predicted_displacement"],
+            goal.info["model_frame_target_loc"] - self.mlh["location"],
+        )
+        nptest.assert_allclose(
+            goal.info["proposed_surface_loc"],
+            self.sensor_percept.location + goal.info["predicted_displacement"],
+        )
+
     # ------------------------- Triggering -------------------------
 
     def test_step_spreads_then_targets_an_unexplained_child(self) -> None:
@@ -1407,7 +605,7 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
             {SENSOR_CHANNEL: self.graph} if input_channel is None else self.graph
         )
         lm.get_input_channels_in_graph.side_effect = lambda _graph_id: [SENSOR_CHANNEL]
-        self.gsg = ChildObjectsGoalGenerator()
+        self.gsg = EvidenceGoalGenerator()
         self.gsg.parent_lm = lm
 
     def spread_from(self, node, rotation=None, **sensed_overrides) -> np.ndarray:

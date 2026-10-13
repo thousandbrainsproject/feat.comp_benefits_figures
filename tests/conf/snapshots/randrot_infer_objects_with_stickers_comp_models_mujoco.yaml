@@ -97,7 +97,6 @@ experiment:
               location: 0.015
             elapsed_steps_factor: 10
             min_post_goal_success_steps: 20
-            x_percent_scale_factor: 0.75
             desired_object_distance: 0.03
           region_proposers:
           - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations

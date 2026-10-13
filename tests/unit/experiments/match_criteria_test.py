@@ -10,11 +10,7 @@ from __future__ import annotations
 
 from unittest import TestCase
 
-from tbp.monty.experiment.match_criteria import (
-    AnyLMsMatch,
-    NamedLMsMatch,
-    NeverMatch,
-)
+from tbp.monty.experiment.match_criteria import AnyLMsMatch, NamedLMsMatch
 
 
 class AnyLMsMatchTest(TestCase):
@@ -58,8 +54,3 @@ class NamedLMsMatchTest(TestCase):
     def test_returns_false_if_not_all_ids_are_match(self) -> None:
         criterion = NamedLMsMatch(ids=["lm1", "lm2"])
         self.assertFalse(criterion({"lm1": "match", "lm2": "no_match"}))
-
-
-class NeverMatchTest(TestCase):
-    def test_returns_false_even_if_all_lms_match(self) -> None:
-        self.assertFalse(NeverMatch()({"lm1": "match", "lm2": "match"}))

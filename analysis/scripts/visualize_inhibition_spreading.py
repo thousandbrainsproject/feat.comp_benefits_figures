@@ -9,10 +9,9 @@
 # ruff: noqa: DOC201,DOC501
 """Visualize how sensory input inhibits regions of learned object models.
 
-Runs the ChildObjectsGoalGenerator's spreading of inhibition through nodes with
-a similar hue on a continuous surface (as predicted from the surface normals,
-principal curvatures and curvature directions of neighboring nodes) on the sensor
-channel graphs of one learning module (LM) of a pretrained model, sensing the
+Runs the EvidenceGoalGenerator's spreading of inhibition through neighboring
+nodes with a similar hue and surface normal on the sensor channel graphs of one
+learning module (LM) of a pretrained model, sensing the
 features stored at a chosen seed node with the most likely hypothesis (MLH) at
 that node. Saves (or, with --interactive, shows), prefixed with the model and
 LM (e.g. comp_models_mujoco_lm2_):
@@ -30,9 +29,19 @@ LM (e.g. comp_models_mujoco_lm2_):
   objects), the next seed is sampled uniformly from the nodes not yet
   inhibited, until all are, colored by the visit that first inhibited each.
 
-The sensor channel is the one channel of the LM's graphs that receives input from
-a sensor module (e.g. patch_2 for LM 2, patch_0 for LM 0). Objects the LM has no
-model of are skipped, e.g. LM 0 only models the objects without stickers.
+By default, spreads run on the sensor channel: the one channel of the LM's graphs
+that receives input from a sensor module (e.g. patch_2 for LM 2, patch_0 for
+LM 0). --channels instead spreads on any of the LM's channels, including those
+receiving object IDs from lower-level LMs (e.g. learning_module_0 and
+learning_module_1 for LM 2 of comp_models_mujoco), where inhibition spreads
+through the neighboring nodes storing the received object ID. With several
+channels, each seed senses its location on all of them at once (sensing the
+features, or object ID, stored at each channel's node nearest the location), and
+their nodes are superimposed in the figures, with one marker per channel. Objects
+the LM has no model of, or that have none of the channels, are skipped, e.g. LM 0
+only models the objects without stickers, and only the objects with stickers
+have a learning_module_1 channel. The tolerance figure, which only affects
+sensory spreading, is skipped when spreading on object-ID channels only.
 
 Usage:
     python analysis/scripts/visualize_inhibition_spreading.py [MODEL_PATH] [options]
@@ -51,6 +60,15 @@ Options:
                       pretrained directory, or the experiment directory.
     --lm ID           Overrides which learning module's models to use (e.g. 0 to
                       compare the models of LM 0 of comp_models_mujoco).
+    --channels CH [CH ...]
+                      The input channels to spread on, superimposed (default: the
+                      sensor channel), e.g. learning_module_0 learning_module_1.
+    --objects ID [ID ...]
+                      Overrides the objects drawn in the compartments and visits
+                      figures (e.g. 024_mug_tbp_horz 025_mug_tbp_vert, which have
+                      a learning_module_1 channel).
+    --mug ID          Overrides the mug of the seeds, tolerance and visits figures
+                      (e.g. 024_mug_tbp_horz).
     --min-spread-fraction F
                       Overrides the goal generator's min_spread_fraction in all
                       figures (0 to not push spreading through).
@@ -73,11 +91,12 @@ import matplotlib.colors as mpl_colors
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from scipy.spatial import KDTree
 from scipy.spatial.transform import Rotation
 
-from tbp.monty.frameworks.models.goal_generation import ChildObjectsGoalGenerator
+from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
 
 DEFAULT_OUTPUT_DIR = "~/tbp/results/comp_benefits_figures/inhibition_spreading"
 MODELS = {
@@ -122,6 +141,10 @@ MIN_VISIT_FRACTION = 0.01
 PART_NAMES = ["side", "rim", "bottom", "handle", "inside"]
 # Overrides of the goal generator's parameters, for every figure.
 GSG_KWARGS: dict = {}
+# The input channels to spread on, for every figure (the sensor channel if empty).
+CHANNELS: list[str] = []
+# The marker of each channel's nodes, in the order of the channels.
+CHANNEL_MARKERS = ["o", "^", "s", "D"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -142,6 +165,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--lm", type=int, default=None, help="overrides the LM whose models to use"
+    )
+    parser.add_argument(
+        "--channels",
+        "--channel",
+        nargs="+",
+        default=None,
+        help="the input channels to spread on, superimposed (default: the sensor "
+        "channel)",
+    )
+    parser.add_argument(
+        "--objects",
+        nargs="+",
+        default=None,
+        help="overrides the objects drawn in the compartments and visits figures",
+    )
+    parser.add_argument(
+        "--mug",
+        default=None,
+        help="overrides the mug of the seeds, tolerance and visits figures",
     )
     parser.add_argument(
         "--min-spread-fraction",
@@ -227,7 +269,7 @@ def sensor_channel(memory: dict) -> str:
 class FakeParentLM:
     """Serve a checkpoint's graph memory through the parent-LM interface.
 
-    Implements just what the ChildObjectsGoalGenerator uses to spread
+    Implements just what the EvidenceGoalGenerator uses to spread
     inhibition, with the MLH set by the caller.
     """
 
@@ -255,31 +297,102 @@ class FakeParentLM:
         return self.memory[graph_id][input_channel]
 
 
+def is_object_id_channel(memory: dict, channel: str) -> bool:
+    """Whether a channel receives object IDs from a lower-level LM."""
+    return any(
+        "object_id" in graphs[channel].feature_mapping
+        for graphs in memory.values()
+        if channel in graphs
+    )
+
+
 class Spreader:
-    """Spread inhibition from sensing the features stored at a node."""
+    """Spread inhibition on one or more channels from sensing a location.
+
+    The nodes of a graph's channels are concatenated in the order of
+    self.channels, so that each node index refers to one node of one channel.
+    """
 
     def __init__(self, memory: dict, **gsg_kwargs):
         self.lm = FakeParentLM(memory)
-        self.channel = sensor_channel(memory)
-        self.gsg = ChildObjectsGoalGenerator(**{**GSG_KWARGS, **gsg_kwargs})
+        self.channels = CHANNELS or [sensor_channel(memory)]
+        self.gsg = EvidenceGoalGenerator(**{**GSG_KWARGS, **gsg_kwargs})
         self.gsg.parent_lm = self.lm
         self.gsg.reset()
+        self._nodes = {}
 
-    def spread(self, graph_id: str, node: int) -> tuple[np.ndarray, np.ndarray]:
-        """Spread from a node, sensing the features stored there.
+    def channels_in(self, graph_id: str) -> list[str]:
+        """Get the channels to spread on that a graph has."""
+        graphs = self.lm.memory.get(graph_id, {})
+        return [channel for channel in self.channels if channel in graphs]
+
+    def nodes(self, graph_id: str) -> tuple[np.ndarray, np.ndarray]:
+        """Get the nodes of all of a graph's channels to spread on.
 
         Returns:
-            Whether each node is inhibited, and the order of each node in the
-            spread (-1 for nodes it did not reach).
+            The position of each node, and the index of its channel in
+            self.channels.
         """
-        graph = self.lm.get_graph(graph_id, self.channel)
+        if graph_id not in self._nodes:
+            channels = self.channels_in(graph_id)
+            pos = [np.asarray(self.lm.get_graph(graph_id, c).pos) for c in channels]
+            node_channels = [
+                np.full(len(channel_pos), self.channels.index(channel))
+                for channel, channel_pos in zip(channels, pos)
+            ]
+            self._nodes[graph_id] = (np.concatenate(pos), np.concatenate(node_channels))
+        return self._nodes[graph_id]
+
+    def spread(self, graph_id: str, node: int) -> tuple[np.ndarray, np.ndarray]:
+        """Spread from sensing the location of a node on all of a graph's channels.
+
+        Each channel senses the features stored at its node nearest the location:
+        surface features on a channel from a sensor module, or the ID of the child
+        object stored there on a channel from a lower-level LM.
+
+        Returns:
+            Whether each node is inhibited, and how far through its channel's
+            spread each node was reached, from 0 (first) to 1 (last), or -1 for
+            nodes no spread reached.
+        """
+        location = self.nodes(graph_id)[0][node]
+        channels = self.channels_in(graph_id)
+        percepts = [self._percept(graph_id, channel, location) for channel in channels]
+        self.lm.mlh = {
+            "graph_id": graph_id,
+            "mlh_id": 0,
+            "location": location,
+            "rotation": Rotation.identity(),
+        }
+        # Only the inhibition is reset, keeping the cached neighbors.
+        self.gsg._inhibition_steps = {}
+        self.gsg.spread_records = []
+        self.gsg._spread_from_observations(percepts)
+        inhibited, order = [], []
+        for channel in channels:
+            num_nodes = len(self.lm.get_graph(graph_id, channel).pos)
+            channel_order = np.full(num_nodes, -1.0)
+            for record in self.gsg.spread_records:
+                if record.input_channel == channel:
+                    reached = record.node_order
+                    channel_order[reached] = np.arange(len(reached)) / max(
+                        len(reached) - 1, 1
+                    )
+            inhibited.append(self.gsg.get_inhibition_weights(graph_id, channel) > 0)
+            order.append(channel_order)
+        return np.concatenate(inhibited), np.concatenate(order)
+
+    def _percept(self, graph_id: str, channel: str, location: np.ndarray):
+        """Sense the features stored at a channel's node nearest a location."""
+        graph = self.lm.get_graph(graph_id, channel)
+        node = int(graph.find_nearest_neighbors(location, num_neighbors=1))
         features = {
             name: np.asarray(graph.x[node, start:end])
             for name, (start, end) in graph.feature_mapping.items()
         }
-        percept = SimpleNamespace(
-            sender_type="SM",
-            sender_id=self.channel,
+        return SimpleNamespace(
+            sender_type="LM" if "object_id" in features else "SM",
+            sender_id=channel,
             morphological_features={
                 "pose_vectors": features["pose_vectors"].reshape(3, 3)
             },
@@ -289,22 +402,10 @@ class Spreader:
                 if name != "pose_vectors"
             },
         )
-        self.lm.mlh = {
-            "graph_id": graph_id,
-            "mlh_id": 0,
-            "location": np.asarray(graph.pos[node]),
-            "rotation": Rotation.identity(),
-        }
-        # Only the inhibition is reset, keeping the cached neighbors.
-        self.gsg._inhibition_steps = {}
-        self.gsg.spread_records = []
-        self.gsg._spread_from_observations([percept])
-        num_nodes = len(graph.pos)
-        order = np.full(num_nodes, -1)
-        for record in self.gsg.spread_records:
-            order[record.node_order] = np.arange(len(record.node_order))
-        inhibited = self.gsg.get_inhibition_weights(graph_id, self.channel) > 0
-        return inhibited, order
+
+
+def channels_text(spreader: Spreader) -> str:
+    return " + ".join(spreader.channels)
 
 
 def _fit_circle(points_2d: np.ndarray) -> tuple[np.ndarray, float]:
@@ -362,7 +463,34 @@ def label_mug_parts(memory: dict, graph_id: str, channel: str) -> np.ndarray:
     return parts
 
 
-def draw_views(fig, grid_row, pos, layers, title, num_rows, num_cols, col_offset=0):
+def mug_parts(memory: dict, mug: str, pos: np.ndarray) -> np.ndarray:
+    """Label locations on a mug by the part of their nearest sensor graph node.
+
+    Only the sensor graph stores the surface normals that label_mug_parts fits
+    the mug to; the graphs of channels from other LMs store child object poses.
+
+    Returns:
+        One of PART_NAMES, or "other", per location.
+    """
+    channel = sensor_channel(memory)
+    parts = label_mug_parts(memory, mug, channel)
+    sensor_pos = np.asarray(memory[mug][channel].pos)
+    return parts[KDTree(sensor_pos).query(pos)[1]]
+
+
+def draw_views(
+    fig,
+    grid_row,
+    pos,
+    layers,
+    title,
+    num_rows,
+    num_cols,
+    col_offset=0,
+    node_channels=None,
+    channel_names=(),
+    alpha=1.0,
+):
     """Draw one model in len(VIEWS) 3D views on a row of a figure's subplot grid.
 
     Args:
@@ -374,7 +502,13 @@ def draw_views(fig, grid_row, pos, layers, title, num_rows, num_cols, col_offset
         num_rows: The number of rows of the subplot grid.
         num_cols: The number of columns of the subplot grid.
         col_offset: The column of the first view.
+        node_channels: The index of each node's channel in channel_names, drawn
+            with that channel's marker (see CHANNEL_MARKERS); None for one channel.
+        channel_names: The names of the channels, shown in the legend if more
+            than one.
     """
+    if node_channels is None:
+        node_channels = np.zeros(len(pos), dtype=int)
     for i, (elevation, azimuth) in enumerate(VIEWS):
         ax = fig.add_subplot(
             num_rows,
@@ -382,29 +516,48 @@ def draw_views(fig, grid_row, pos, layers, title, num_rows, num_cols, col_offset
             grid_row * num_cols + col_offset + i + 1,
             projection="3d",
         )
-        for mask, colors, size, label in layers:
-            if not np.any(mask):
-                continue
-            selected = pos[mask]
-            layer_colors = colors
-            if not isinstance(colors, str) and np.ndim(colors) > 1:
-                layer_colors = colors[mask]
-            ax.scatter(
-                selected[:, 0],
-                selected[:, 1],
-                selected[:, 2],
-                c=layer_colors,
-                s=size,
-                depthshade=False,
-                label=label if i == 0 else None,
-            )
+        for mask, colors, size, layer_label in layers:
+            # Labeled once, on the first view, for the legend.
+            label = layer_label if i == 0 else None
+            for channel in np.unique(node_channels[mask]):
+                selected_mask = mask & (node_channels == channel)
+                selected = pos[selected_mask]
+                layer_colors = colors
+                if not isinstance(colors, str) and np.ndim(colors) > 1:
+                    layer_colors = colors[selected_mask]
+                ax.scatter(
+                    selected[:, 0],
+                    selected[:, 1],
+                    selected[:, 2],
+                    c=layer_colors,
+                    s=size,
+                    marker=CHANNEL_MARKERS[channel % len(CHANNEL_MARKERS)],
+                    depthshade=False,
+                    label=label,
+                    alpha=alpha,
+                )
+                label = None
         ax.view_init(elevation, azimuth)
         ax.set_axis_off()
         ax.set_aspect("equal")
         if i == 0:
             ax.set_title(title, fontsize=9, loc="left")
-            if any(label for *_, label in layers):
-                ax.legend(fontsize=7, loc="lower left", markerscale=2)
+            handles, _ = ax.get_legend_handles_labels()
+            if len(channel_names) > 1:
+                handles += [
+                    Line2D(
+                        [],
+                        [],
+                        marker=CHANNEL_MARKERS[channel % len(CHANNEL_MARKERS)],
+                        markersize=3,
+                        color="0.4",
+                        linestyle="none",
+                        label=channel_names[channel],
+                    )
+                    for channel in np.unique(node_channels)
+                ]
+            if handles:
+                ax.legend(handles=handles, fontsize=7, loc="lower left", markerscale=2)
 
 
 def spread_layers(inhibited, order, seed, num_nodes):
@@ -414,9 +567,7 @@ def spread_layers(inhibited, order, seed, num_nodes):
         The layers for draw_views.
     """
     reached = order >= 0
-    order_colors = plt.get_cmap("viridis")(
-        np.where(reached, order, 0) / max(order.max(), 1)
-    )
+    order_colors = plt.get_cmap("viridis")(np.where(reached, order, 0))
     seed_mask = np.arange(num_nodes) == seed
     return [
         (~inhibited, "0.8", 3, "not inhibited"),
@@ -434,7 +585,7 @@ def coverage_text(inhibited, parts) -> str:
     )
 
 
-def choose_mug_seeds(memory, mug, parts, spreader, num_candidates=10):
+def choose_mug_seeds(mug, parts, spreader, num_candidates=10):
     """Pick a representative seed on each part of the mug.
 
     Spreads from a node's own neighborhood vary with the noise in the stored
@@ -445,7 +596,7 @@ def choose_mug_seeds(memory, mug, parts, spreader, num_candidates=10):
     Returns:
         (description, node) pairs.
     """
-    pos = np.asarray(memory[mug][spreader.channel].pos)
+    pos, _ = spreader.nodes(mug)
     handle_distance = KDTree(pos[parts == "handle"]).query(pos)[0]
     side = parts == "side"
     regions = [
@@ -471,10 +622,9 @@ def choose_mug_seeds(memory, mug, parts, spreader, num_candidates=10):
 
 def plot_mug_seeds(memory, mug, _objects):
     spreader = Spreader(memory)
-    channel = spreader.channel
-    parts = label_mug_parts(memory, mug, channel)
-    pos = np.asarray(memory[mug][channel].pos)
-    seeds = choose_mug_seeds(memory, mug, parts, spreader)
+    pos, node_channels = spreader.nodes(mug)
+    parts = mug_parts(memory, mug, pos)
+    seeds = choose_mug_seeds(mug, parts, spreader)
     num_cols = len(VIEWS) + 1
     fig = plt.figure(figsize=(4 * num_cols, 3.6 * len(seeds)))
     for row, (description, seed) in enumerate(seeds):
@@ -488,6 +638,8 @@ def plot_mug_seeds(memory, mug, _objects):
             f"inhibited\n{coverage_text(inhibited, parts)}",
             len(seeds),
             num_cols,
+            node_channels=node_channels,
+            channel_names=spreader.channels,
         )
     # The part labels used for the coverage percentages, in the last column.
     ax_parts = fig.add_subplot(len(seeds), num_cols, num_cols, projection="3d")
@@ -508,7 +660,8 @@ def plot_mug_seeds(memory, mug, _objects):
     ax_parts.set_title("Mug parts (for coverage)", fontsize=9, loc="left")
     ax_parts.legend(fontsize=7, loc="lower left", markerscale=3)
     fig.suptitle(
-        f"{mug} ({channel} graph): inhibition spread from sensing one location "
+        f"{mug} ({channels_text(spreader)}): inhibition spread from sensing one "
+        "location "
         "on each part of the mug\n(the seed with the median spread out of 10 random "
         "seeds per part; percentages: share of each part inhibited)",
         fontsize=12,
@@ -524,7 +677,7 @@ def compartments(spreader, graph_id, rng):
         The compartment of each node (-1 for nodes no spread reached), and the
         seed of each compartment.
     """
-    num_nodes = len(spreader.lm.get_graph(graph_id, spreader.channel).pos)
+    num_nodes = len(spreader.nodes(graph_id)[0])
     labels = np.full(num_nodes, -1)
     seeds = []
     for node in rng.permutation(num_nodes):
@@ -541,12 +694,11 @@ def compartments(spreader, graph_id, rng):
 
 def plot_compartments(memory, _mug, objects):
     spreader = Spreader(memory)
-    channel = spreader.channel
-    objects = [graph_id for graph_id in objects if graph_id in memory]
+    objects = [graph_id for graph_id in objects if spreader.channels_in(graph_id)]
     fig = plt.figure(figsize=(4 * len(VIEWS), 3.6 * len(objects)))
     rng = np.random.default_rng(0)
     for row, graph_id in enumerate(objects):
-        pos = np.asarray(memory[graph_id][channel].pos)
+        pos, node_channels = spreader.nodes(graph_id)
         labels, _ = compartments(spreader, graph_id, rng)
         ids, counts = np.unique(labels[labels >= 0], return_counts=True)
         large = ids[counts >= MIN_COMPARTMENT_NODES]
@@ -571,9 +723,12 @@ def plot_compartments(memory, _mug, objects):
             "(grey: smaller compartments)",
             len(objects),
             len(VIEWS),
+            node_channels=node_channels,
+            channel_names=spreader.channels,
         )
     fig.suptitle(
-        f"Compartments of the {channel} graphs: regions inhibited together "
+        f"Compartments of the {channels_text(spreader)} graphs: regions inhibited "
+        "together "
         "by a spread from sensing any of their nodes\n(one color per compartment, "
         "largest first)",
         fontsize=12,
@@ -593,7 +748,7 @@ def simulate_visits(spreader, graph_id, first_seed, rng):
         The visit (numbered from 0) that first inhibited each node, and for each
         visit, its seed and the number of nodes its spread reached.
     """
-    num_nodes = len(spreader.lm.get_graph(graph_id, spreader.channel).pos)
+    num_nodes = len(spreader.nodes(graph_id)[0])
     visit = np.full(num_nodes, -1)
     visits = []
     seed = first_seed
@@ -607,40 +762,42 @@ def simulate_visits(spreader, graph_id, first_seed, rng):
     return visit, visits
 
 
-def first_mug_seed(memory, mug, channel, rng):
+def first_mug_seed(parts, pos, rng):
     """Sample a node on the side of a mug, away from its handle."""
-    parts = label_mug_parts(memory, mug, channel)
-    pos = np.asarray(memory[mug][channel].pos)
     handle_distance = KDTree(pos[parts == "handle"]).query(pos)[0]
     return int(rng.choice(np.flatnonzero((parts == "side") & (handle_distance > 0.02))))
 
 
 def plot_visits(memory, mug, objects):
     spreader = Spreader(memory)
-    channel = spreader.channel
     fraction = spreader.gsg.min_spread_fraction or 0
-    objects = [graph_id for graph_id in objects if graph_id in memory]
+    objects = [graph_id for graph_id in objects if spreader.channels_in(graph_id)]
     num_cols = len(VIEWS) + 1
     fig = plt.figure(figsize=(3.6 * num_cols, 3.6 * len(objects)))
-    cmap = plt.get_cmap("tab20")
+    # tab20 pairs each color with a lighter shade of it; all of the strong colors
+    # come first so that consecutive visits differ in hue, and the greys are left
+    # out, being the color of the other visits.
+    tab20 = plt.get_cmap("tab20").colors
+    visit_colors = [tab20[i] for i in [*range(0, 20, 2), *range(1, 20, 2)]]
+    visit_colors = [c for c in visit_colors if c not in (tab20[14], tab20[15])]
     for row, graph_id in enumerate(objects):
         rng = np.random.default_rng(0)
-        pos = np.asarray(memory[graph_id][channel].pos)
+        pos, node_channels = spreader.nodes(graph_id)
         num_nodes = len(pos)
         parts = None
         if graph_id == mug:
-            parts = label_mug_parts(memory, mug, channel)
-            first_seed = first_mug_seed(memory, mug, channel, rng)
+            parts = mug_parts(memory, mug, pos)
+            first_seed = first_mug_seed(parts, pos, rng)
         else:
             first_seed = int(rng.integers(num_nodes))
         visit, visits = simulate_visits(spreader, graph_id, first_seed, rng)
         new_counts = np.bincount(visit, minlength=len(visits))
         shown = np.flatnonzero(new_counts >= MIN_VISIT_FRACTION * num_nodes)
-        shown = shown[: cmap.N]
+        shown = shown[: len(visit_colors)]
         node_colors = np.tile(mpl_colors.to_rgba("0.75"), (num_nodes, 1))
         legend = []
         for rank, index in enumerate(shown):
-            color = cmap(rank)
+            color = mpl_colors.to_rgba(visit_colors[rank])
             node_colors[visit == index] = color
             label = (
                 f"{index + 1}: {new_counts[index] / num_nodes:.0%} new"
@@ -669,12 +826,16 @@ def plot_visits(memory, mug, objects):
             f"the first 5 inhibit {cumulative[min(4, len(visits) - 1)]:.0%}",
             len(objects),
             num_cols,
+            node_channels=node_channels,
+            channel_names=spreader.channels,
+            alpha=0.5,
         )
         ax = fig.add_subplot(len(objects), num_cols, (row + 1) * num_cols)
         ax.set_axis_off()
         ax.legend(handles=legend, loc="center left", fontsize=7, frameon=False)
     fig.suptitle(
-        f"Online visits to the {channel} graphs, each spreading from a seed sampled "
+        f"Online visits to the {channels_text(spreader)} graphs, each spreading from "
+        "a seed sampled "
         "from the nodes not yet inhibited (the first on the side of the mug)\n"
         "colored by the visit that first inhibited each node; legend: the order of "
         "the visit, the nodes it newly inhibited, and the nodes its spread reached\n"
@@ -687,10 +848,10 @@ def plot_visits(memory, mug, objects):
 
 
 def plot_tolerance(memory, mug, _objects):
-    channel = sensor_channel(memory)
-    parts = label_mug_parts(memory, mug, channel)
-    pos = np.asarray(memory[mug][channel].pos)
-    seeds = choose_mug_seeds(memory, mug, parts, Spreader(memory))[:2]
+    default_spreader = Spreader(memory)
+    pos, node_channels = default_spreader.nodes(mug)
+    parts = mug_parts(memory, mug, pos)
+    seeds = choose_mug_seeds(mug, parts, default_spreader)[:2]
     tolerances = [1, 2, 3]
     num_cols = len(VIEWS) * len(seeds)
     fig = plt.figure(figsize=(3.4 * num_cols, 3.6 * len(tolerances)))
@@ -708,10 +869,12 @@ def plot_tolerance(memory, mug, _objects):
                 len(tolerances),
                 num_cols,
                 col_offset=col * len(VIEWS),
+                node_channels=node_channels,
+                channel_names=spreader.channels,
             )
     fig.suptitle(
-        f"{mug}: spreads from the same seeds with different max_dissimilar_neighbors"
-        " (the default is 2)",
+        f"{mug} ({channels_text(default_spreader)}): spreads from the same seeds "
+        "with different max_dissimilar_neighbors (the default is 2)",
         fontsize=12,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.96))
@@ -791,15 +954,36 @@ def main():
     memory = load_lm_memory(resolve_checkpoint(model_path), lm_id)
     if args.min_spread_fraction is not None:
         GSG_KWARGS["min_spread_fraction"] = args.min_spread_fraction or None
+    prefix = f"{args.model}_lm{lm_id}_"
+    if args.channels:
+        known = {channel for graphs in memory.values() for channel in graphs}
+        unknown = sorted(set(args.channels) - known)
+        if unknown:
+            raise ValueError(
+                f"Unknown channels {unknown}; LM {lm_id}'s graphs have {sorted(known)}"
+            )
+        CHANNELS.extend(args.channels)
+        prefix += "+".join(args.channels) + "_"
+    channels = Spreader(memory).channels
+    mug = args.mug or model.mug
+    objects = args.objects or model.objects
+    if not any(c in memory.get(graph_id, {}) for graph_id in objects for c in channels):
+        raise ValueError(
+            f"None of the objects {objects} have any of the channels {channels}; "
+            "choose others with --objects"
+        )
     plots = [plot_compartments, plot_visits]
-    if model.mug in memory:
-        plots = [plot_mug_seeds, plot_compartments, plot_visits, plot_tolerance]
+    mug_channels = [c for c in channels if c in memory.get(mug, {})]
+    if mug_channels:
+        plots = [plot_mug_seeds, plot_compartments, plot_visits]
+        if not all(is_object_id_channel(memory, c) for c in mug_channels):
+            plots.append(plot_tolerance)
     for plot in plots:
-        fig, filename = plot(memory, model.mug, model.objects)
+        fig, filename = plot(memory, mug, objects)
         if args.interactive:
             make_scrollable(fig)
             continue
-        path = output_dir / f"{args.model}_lm{lm_id}_{filename}"
+        path = output_dir / f"{prefix}{filename}"
         fig.savefig(path, dpi=110)
         plt.close(fig)
         print(f"Saved {path}")

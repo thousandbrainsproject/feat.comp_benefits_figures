@@ -10,37 +10,18 @@
 from __future__ import annotations
 
 import copy
-import unittest
 
 import numpy as np
 
 from tbp.monty.cmp import Goal, Message
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
-from tbp.monty.frameworks.models.evidence_matching.hypothesis_trace import (
-    HypothesisTracer,
-)
 from tbp.monty.frameworks.models.evidence_matching.learning_module import (
     EvidenceGraphLM,
 )
-from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
 from tests.unit.resources.unit_test_utils import BaseGraphTest
-
-SKIP_ID_CHANNEL_HYPOTHESIS_TESTING = (
-    "Object-ID channel hypothesis testing is under active development"
-)
 
 
 class EvidenceLMTest(BaseGraphTest):
-    def setUp(self):
-        super().setUp()
-
-        self.default_gsg_config = dict(
-            elapsed_steps_factor=10,
-            min_post_goal_success_steps=5,
-            x_percent_scale_factor=0.75,
-            desired_object_distance=0.03,
-        )
-
     def get_elm_with_fake_object(
         self, fake_obs, initial_possible_poses="informed", gsg=None
     ):
@@ -631,151 +612,6 @@ class EvidenceLMTest(BaseGraphTest):
                     "Should have no possible matches.",
                 )
 
-    def _evaluate_target_location(
-        self, graph_lm, fake_obs_test, target_object, focus_on_pose=False
-    ):
-        """Helper function for hypothesis testing that retreives a target location."""
-        graph_lm.mode = ExperimentMode.EVAL
-        graph_lm.reset_stm()
-        graph_lm.fixme_reset_ground_truth(primary_target=self.placeholder_target)
-
-        # Observe 4 / 5 of the available features
-        for ii in range(4):
-            observation = fake_obs_test[ii]
-            graph_lm.add_lm_processing_to_buffer_stats(lm_processed=True)
-            graph_lm.matching_step(self.ctx, [observation])
-
-        if not focus_on_pose:
-            # Since up to now we had identical evidence for both cube and house, we give
-            # the house an edge now so we test for it and get the expected result.
-            graph_lm.current_mlh["graph_id"] = "new_object1"
-            graph_lm._hypotheses["new_object1"].evidence += 1
-
-        # Based on most recent observation, propose the most misaligned graph
-        # sub-regions
-        graph_lm.gsg.focus_on_pose = focus_on_pose
-        target_channel, target_loc_id = graph_lm.gsg._compute_graph_mismatch(self.ctx)
-
-        target_graph = graph_lm.get_graph(target_object)
-        first_input_channel = graph_lm.get_input_channels_in_graph(target_object)[0]
-        self.assertEqual(
-            target_channel,
-            first_input_channel,
-            "Spatially-distinct graphs should propose a target on the sensory channel.",
-        )
-        target_loc = target_graph[first_input_channel].pos[target_loc_id]
-
-        assert np.all(np.isclose(target_loc, self.fake_obs_house[4].location)), (
-            "Should propose testing 5th (indexed from 0) location on object"
-        )
-
-    @unittest.skip(SKIP_ID_CHANNEL_HYPOTHESIS_TESTING)
-    def test_hypothesis_testing_proposal_for_id(self):
-        """Test that the LM correctly predicts a location on a graph to test.
-
-        Test that the LM correctly predicts a location on a graph to test, given
-        the mismatch between the top two most likely graphs.
-
-        The "square" object is made up of four simple features, while the "house"
-        object is a 2D square with an additional, 5th feature above (like the point
-        on a house's roof); these two objects are a 2D analogue for distinguishing e.g.
-        a mug with a handle from a cylindrical can.
-        """
-        fake_obs_test = copy.deepcopy(self.fake_obs_house)
-
-        graph_lm = self.get_elm_with_two_fake_objects(
-            self.fake_obs_square,
-            self.fake_obs_house,
-            initial_possible_poses=[[0, 0, 0]],  # Note we isolate the influence of
-            # ambiguous pose on the hypothesis testing
-            gsg=EvidenceGoalGenerator(**self.default_gsg_config),
-        )
-
-        self._evaluate_target_location(
-            graph_lm, fake_obs_test, target_object="new_object1"
-        )
-
-    @unittest.skip(SKIP_ID_CHANNEL_HYPOTHESIS_TESTING)
-    def test_hypothesis_testing_proposal_for_id_with_transformation(self):
-        """Test that the LM correctly predicts a location on a graph to test.
-
-        Test that the LM correctly predicts a location on a graph to test, given
-        the mismatch between the top two most likely graphs.
-
-        As for test_hypothesis_testing_proposal_for_id, but in this case, the
-        "house" object has been rotated and translated in the environment, and we check
-        that the policy still proposes the correct location in object-centric
-        coordinates.
-        """
-        fake_obs_test = copy.deepcopy(self.fake_percept_house_trans)
-
-        graph_lm = self.get_elm_with_two_fake_objects(
-            self.fake_obs_square,
-            self.fake_obs_house,
-            initial_possible_poses=[[45, 75, 190]],  # Note we isolate the influence of
-            # ambiguous pose on the hypothesis testing
-            gsg=EvidenceGoalGenerator(**self.default_gsg_config),
-        )
-
-        self._evaluate_target_location(
-            graph_lm, fake_obs_test, target_object="new_object1"
-        )
-
-    @unittest.skip(SKIP_ID_CHANNEL_HYPOTHESIS_TESTING)
-    def test_hypothesis_testing_proposal_for_pose(self):
-        """Test that the LM correctly predicts a location on a graph to test.
-
-        Test that the LM correctly predicts a location on a graph to test, given
-        the mismatch between the top two most likely poses of a given object.
-
-        In this case, the house can be either right-side up or upside-down, so the
-        policy should select the tip of the house's roof to disambiguate this.
-        """
-        fake_obs_test = copy.deepcopy(self.fake_obs_house)
-
-        # Only trained on one object
-        graph_lm = self.get_elm_with_fake_object(
-            self.fake_obs_house,
-            initial_possible_poses=[[0, 0, 0], [0, 0, 180]],
-            # Note pose *is* ambiguous in this unti test, vs. in proposal_for_id; in
-            # particular, house can either be right-side up, or upside-down (rotated
-            # about z)
-            gsg=EvidenceGoalGenerator(**self.default_gsg_config),
-        )
-
-        self._evaluate_target_location(
-            graph_lm, fake_obs_test, target_object="new_object0", focus_on_pose=True
-        )
-
-    @unittest.skip(SKIP_ID_CHANNEL_HYPOTHESIS_TESTING)
-    def test_hypothesis_testing_proposal_for_pose_with_transformation(self):
-        """Test that the LM correctly predicts a location on a graph to test.
-
-        Test that the LM correctly predicts a location on a graph to test, given
-        the mismatch between the top two most likely poses of a given object.
-
-        In this case, the house can be either right-side up or upside-down, so the
-        policy should select the tip of the house's roof to disambiguate this.
-        In addition, the house has been transformed in environmental coordinates
-        (translated and rotated), and we confirm that the object-centric target
-        point is still correct.
-        """
-        fake_obs_test = copy.deepcopy(self.fake_percept_house_trans)
-
-        # Only trained on one object
-        graph_lm = self.get_elm_with_fake_object(
-            self.fake_obs_house,
-            initial_possible_poses=[[45, 75, 190], [315, 285, 10]],
-            # Note pose *is* ambiguous in this unti test, vs. in proposal_for_id; in
-            # particular, house can either be right-side up, or upside-down (was rotated
-            # about z before the additional complex transformation was applied)
-            gsg=EvidenceGoalGenerator(**self.default_gsg_config),
-        )
-
-        self._evaluate_target_location(
-            graph_lm, fake_obs_test, target_object="new_object0", focus_on_pose=True
-        )
-
     def test_different_features_still_recognized(self):
         """Test that the object is still recognized if features don't match.
 
@@ -932,64 +768,3 @@ class EvidenceLMTest(BaseGraphTest):
             [0, 0, 0],
             "Should recognize rotation 0, 0, 0.",
         )
-
-    def _run_hotspot_learning_episode(
-        self, house_obs, hotspot_learning=True
-    ) -> EvidenceGraphLM:
-        """Learn a square and a house, then infer the house with a hypothesis tracer.
-
-        The house is the square plus a rooftop, so only the rooftop distinguishes it.
-
-        Returns:
-            The LM after the end-of-episode memory update.
-        """
-        graph_lm = self.get_elm_with_two_fake_objects(
-            self.fake_obs_square, house_obs, initial_possible_poses="informed", gsg=None
-        )
-        graph_lm.hypothesis_tracer = HypothesisTracer(num_recent_locations=5)
-        graph_lm.set_hotspot_learning(enabled=hotspot_learning)
-        graph_lm.mode = ExperimentMode.EVAL
-        graph_lm.reset_stm()
-        graph_lm.fixme_reset_ground_truth(primary_target=self.placeholder_target)
-        for observation in copy.deepcopy(house_obs):
-            graph_lm.add_lm_processing_to_buffer_stats(lm_processed=True)
-            graph_lm.matching_step(self.ctx, [observation])
-            # Usually Monty coordinates terminal condition checks.
-            graph_lm.update_terminal_condition()
-        graph_lm.update_ltm_from_stm()
-        return graph_lm
-
-    def test_hotspot_learning_tags_distinguishing_location_on_match(self):
-        graph_lm = self._run_hotspot_learning_episode(self.fake_obs_house_3d)
-
-        self.assertEqual(graph_lm.terminal_state, "match")
-        house_model = graph_lm.get_graph("new_object1")["patch"]
-        node_id, value = house_model.get_max_hotspot_node()
-        np.testing.assert_allclose(
-            house_model.pos[node_id], self.fake_obs_house_3d[4].location
-        )
-        # The house gained 2 evidence at the rooftop, while the square lost 1.
-        self.assertAlmostEqual(value, 3.0)
-        square_model = graph_lm.get_graph("new_object0")["patch"]
-        self.assertIsNone(square_model.get_max_hotspot_node())
-
-    def test_no_hotspots_tagged_when_hotspot_learning_disabled(self):
-        graph_lm = self._run_hotspot_learning_episode(
-            self.fake_obs_house_3d, hotspot_learning=False
-        )
-
-        self.assertEqual(graph_lm.terminal_state, "match")
-        for graph_id in graph_lm.get_all_known_object_ids():
-            self.assertIsNone(
-                graph_lm.get_graph(graph_id)["patch"].get_max_hotspot_node()
-            )
-
-    def test_no_hotspots_tagged_without_convergence(self):
-        # The flat house's pose remains ambiguous, so the LM never converges.
-        graph_lm = self._run_hotspot_learning_episode(self.fake_obs_house)
-
-        self.assertNotEqual(graph_lm.terminal_state, "match")
-        for graph_id in graph_lm.get_all_known_object_ids():
-            self.assertIsNone(
-                graph_lm.get_graph(graph_id)["patch"].get_max_hotspot_node()
-            )

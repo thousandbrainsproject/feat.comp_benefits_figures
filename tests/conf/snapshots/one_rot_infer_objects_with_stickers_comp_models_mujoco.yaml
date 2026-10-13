@@ -2,8 +2,6 @@ experiment:
   config:
     do_eval: true
     do_train: false
-    do_post_training_unsupervised_learning: false
-    n_post_training_unsupervised_epochs: 1
     monty_config:
       monty_class: ${monty.class:tbp.monty.frameworks.models.evidence_matching.model.MontyForEvidenceGraphMatching}
       monty_args:
@@ -93,12 +91,11 @@ experiment:
           num_model_voxels_per_dim: 100
           max_nodes_per_graph: 2000
           gsg:
-            _target_: tbp.monty.frameworks.models.goal_generation.ChildObjectsGoalGenerator
+            _target_: tbp.monty.frameworks.models.goal_generation.EvidenceGoalGenerator
             goal_tolerances:
               location: 0.015
             elapsed_steps_factor: 10
             min_post_goal_success_steps: 20
-            x_percent_scale_factor: 0.75
             desired_object_distance: 0.03
             num_spread_neighbors: 6
             inhibition_decay_steps: 50

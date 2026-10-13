@@ -137,11 +137,6 @@ class NoResetEvidenceGraphLM(TheoreticalLimitLMLoggingMixin, EvidenceGraphLM):
             kwargs["hypotheses_updater_class"] = BurstSamplingHypothesesUpdater
         super().__init__(*args, **kwargs)
 
-        # it does not make sense for the wait factor to exponentially
-        # grow when objects are swapped without any supervisory signal.
-        if self.gsg is not None:
-            self.gsg.wait_growth_multiplier = 1
-
         # TODO: make this part of `__init__()` after `reset_stm()` is removed.
         self._init_NoResetEvidenceGraphLM()
 

@@ -51,7 +51,7 @@ experiment:
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.NoopEvidenceGraphLMTelemetry
           gsg:
-            _target_: tbp.monty.frameworks.models.goal_generation.ChildObjectsGoalGenerator
+            _target_: tbp.monty.frameworks.models.goal_generation.EvidenceGoalGenerator
             min_post_goal_success_steps: 5
             num_spread_neighbors: 6
             inhibition_decay_steps: 50
