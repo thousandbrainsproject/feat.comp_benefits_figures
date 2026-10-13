@@ -48,7 +48,6 @@ from tbp.monty.frameworks.models.graph_matching import GraphLM
 from tbp.monty.frameworks.utils.graph_matching_utils import (
     add_pose_features_to_tolerances,
     get_scaled_evidences,
-    object_id_to_features,
 )
 from tbp.monty.geometry import Rotation
 from tbp.monty.memento import Memento
@@ -1399,7 +1398,9 @@ class EvidenceGraphLM(GraphLM):
         Returns:
             The object ID features.
         """
-        return object_id_to_features(object_id)
+        # TODO H: Make this based on object similarity
+        # For now just taking sum of character ids in object name
+        return sum(ord(i) for i in object_id)
 
     def _fill_feature_weights_with_default(self, default: int) -> None:
         for input_channel, channel_tolerances in self.tolerances.items():

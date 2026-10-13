@@ -276,7 +276,6 @@ class FakeParentLM:
     def __init__(self, memory: dict):
         self.memory = memory
         self.learning_module_id = "demo_lm"
-        self.object_id_feature_names = {}
         # As configured for LMs 0 and 2 in evidence_3lm_heterarchy
         self.max_match_distance = 0.01
         self.mlh = None

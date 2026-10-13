@@ -95,7 +95,6 @@ def gsg_with_graphs(graphs, **gsg_kwargs) -> EvidenceGoalGenerator:
     """
     lm = MagicMock()
     lm.learning_module_id = "learning_module_2"
-    lm.object_id_feature_names = {}
     lm.max_match_distance = 0.01
     lm.buffer.get_first_sensory_input_channel.return_value = SENSOR_CHANNEL
     lm._get_current_mlh.return_value = identity_mlh(TOP_ID)
@@ -254,7 +253,6 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
 
         lm = MagicMock()
         lm.learning_module_id = "learning_module_2"
-        lm.object_id_feature_names = {}
         lm.max_match_distance = 0.01
         lm.buffer.get_first_sensory_input_channel.return_value = SENSOR_CHANNEL
         lm.buffer.get_previous_input_percepts.return_value = None
@@ -597,7 +595,6 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
         self.mlh = None
         lm = MagicMock()
         lm.learning_module_id = "learning_module_0"
-        lm.object_id_feature_names = {}
         lm.max_match_distance = 0.01
         lm.get_all_known_object_ids.side_effect = lambda: [TOP_ID]
         lm._get_current_mlh.side_effect = lambda: self.mlh

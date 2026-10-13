@@ -8,8 +8,6 @@
 # https://opensource.org/licenses/MIT.
 from __future__ import annotations
 
-from typing import Literal
-
 import numpy as np
 
 
@@ -110,25 +108,15 @@ class DecayKernelFactory:
 
 
 class DecayField:
-    """Manages a collection of decay kernels.
-
-    The weights of overlapping kernels are pooled either by taking their maximum,
-    so that revisiting a location does not inhibit it more than a single visit, or
-    by summing them (bounded to 1), so that repeatedly dwelling on a small region
-    inhibits all of it.
-    """
+    """Manages a collection of decay kernels."""
 
     def __init__(
         self,
         kernel_factory: DecayKernelFactory | None = None,
-        pooling: Literal["max", "sum"] = "max",
     ):
-        if pooling not in ("max", "sum"):
-            raise ValueError(f"Unknown pooling: {pooling}")
         self._kernel_factory = (
             DecayKernelFactory() if kernel_factory is None else kernel_factory
         )
-        self._pooling = pooling
         self._kernels: list[DecayKernel] = []
 
     def reset(self) -> None:
@@ -149,8 +137,6 @@ class DecayField:
 
         # Stack kernel parameters and compute in batch
         results = np.array([k(points) for k in self._kernels])
-        if self._pooling == "sum":
-            return np.minimum(np.sum(results, axis=0), 1.0)
         return np.max(results, axis=0)
 
 

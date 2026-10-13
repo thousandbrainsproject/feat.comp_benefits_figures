@@ -475,19 +475,19 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     """Generator of Goals for an evidence-based graph LM.
 
     GSG specifically set up for generating Goals for an evidence-based graph LM,
-    which can therefore leverage the hypothesis-testing action policy. This policy
+    which can therefore leverage the compositional inference policy. This policy
     uses the most likely object hypothesis (MLH), as well as knowledge of its
-    structure from long-term memory, to propose test-points that visit the
+    structure from recent memory, to propose test-points that visit the
     unexplained parts of the object the agent is currently observing.
 
-    Hypothesis tests are directed at the parts of the model of the most likely
+    Goals are directed at the parts of the model of the most likely
     object hypothesis (MLH) that the LM's input has not yet explained. Within the
     MLH graph, each channel storing "object_id" features (input from lower-level
     LMs, i.e. a compositional model) contributes one candidate per child object (the
     nodes storing that object ID), and every other (sensory) channel contributes
     one candidate made up of all of its nodes. Candidates are ranked by their
-    number of nodes, and a random uninhibited node of the highest-ranked candidate
-    with any uninhibited node is selected as the location to test.
+    number of uninhibited nodes, and a random uninhibited node of the highest-ranked
+    candidate with any uninhibited node is selected as the location to test.
 
     Input that the MLH predicts at its current location "explains" part of the
     model, which is then inhibited from being tested for a while, by spreading
@@ -692,10 +692,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         )
         goal.info["target_node_id"] = node_id
         goal.info["target_child_object_id"] = object_id
-        if object_id is None:
-            tested = "sensory features"
-        else:
-            (tested,) = self._get_feature_object_id_names([object_id])
+        tested = "sensory features" if object_id is None else f"object ID {object_id}"
         logger.debug(
             f"Child objects goal: testing {tested} on channel {input_channel} "
             f"(node {node_id}) of {graph_id}"
@@ -884,11 +881,11 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 node_order=order,
             )
         )
-        if object_id is None:
-            explained = "similar features"
-        else:
-            (object_name,) = self._get_feature_object_id_names([object_id])
-            explained = f"storing {object_name}"
+        explained = (
+            "with similar features"
+            if object_id is None
+            else f"storing object ID {object_id}"
+        )
         logger.debug(
             f"Inhibited {len(order)} nodes {explained} on channel "
             f"{input_channel} of {graph_id}"
@@ -1524,16 +1521,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             an output Goal was generated.
         """
         return self.parent_lm.buffer.get_num_steps_post_output_goal_generated()
-
-    def _get_feature_object_id_names(self, object_id_features) -> list:
-        """Get the names of the objects encoded by "object_id" feature values.
-
-        Returns:
-            The name of each object, or the feature value itself if its name is
-            not known to the parent LM.
-        """
-        names = self.parent_lm.object_id_feature_names
-        return [names.get(int(feature), int(feature)) for feature in object_id_features]
 
     @staticmethod
     def _get_feature_values(graph, feature) -> np.ndarray:
