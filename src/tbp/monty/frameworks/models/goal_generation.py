@@ -10,11 +10,13 @@
 from __future__ import annotations
 
 import logging
-from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import dijkstra
+from sklearn.neighbors import kneighbors_graph
 
 from tbp.monty.cmp import Goal, Message
 from tbp.monty.context import RuntimeContext
@@ -462,7 +464,8 @@ class SpreadRecord:
             i.e. the channel the input was received on.
         object_id: The "object_id" feature value that was received, or None for a
             spread of similar features from sensory input.
-        node_order: The inhibited nodes, in the order the spread reached them.
+        node_order: The inhibited nodes, in the order the spread reached them: by
+            increasing number of hops from the seeds (see `_get_spread_order`).
     """
 
     graph_id: str
@@ -625,12 +628,11 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         # (graph_id, input_channel).
         self._inhibition_steps: dict[tuple[str, str], np.ndarray] = {}
         # Keyed by (graph_id, input_channel, number of nodes, number of neighbors).
-        self._neighbor_cache: dict[tuple[str, str, int, int], list[np.ndarray]] = {}
+        self._neighbor_cache: dict[tuple[str, str, int, int], csr_matrix] = {}
         # For sensory spreading (see `_get_similar_neighbors`), keyed by
         # (graph_id, input_channel, number of nodes).
         self._similar_neighbors_cache: dict[
-            tuple[str, str, int],
-            tuple[np.ndarray, list[np.ndarray], tuple[np.ndarray, np.ndarray]],
+            tuple[str, str, int], tuple[csr_matrix, csr_matrix]
         ] = {}
         self._prev_goal_mlh: dict | None = None
         self.spread_records: list[SpreadRecord] = []
@@ -792,11 +794,18 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         if not np.any(stores_id[seeds[nearby]]) or not np.all(stores_id[seeds]):
             return
 
-        neighbors = self._get_node_neighbors(graph_id, input_channel, graph)
-        source, target = self._get_neighbor_edges(neighbors)
-        spreads = self._all_neighbors_satisfy(stores_id[target], source, len(stores_id))
+        neighbors = self._get_neighbor_matrix(graph_id, input_channel, graph)
+        # A node spreads to its neighbors if it has any, and all of them store the
+        # received ID, i.e. none of them stores another.
+        spreads = (neighbors.getnnz(axis=1) > 0) & (
+            neighbors @ (~stores_id).astype(float) == 0
+        )
+        source, target = neighbors.nonzero()
+        propagation = self._edge_matrix(
+            source[spreads[source]], target[spreads[source]], len(stores_id)
+        )
         self._spread_from_seeds(
-            graph_id, input_channel, seeds, neighbors, spreads, object_id=received_id
+            graph_id, input_channel, seeds, propagation, object_id=received_id
         )
 
     def _spread_similar_features(
@@ -832,28 +841,15 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             & self._similar_features(features, seeds, reference)
         ]
 
-        spreads, neighbors, surface_edges = self._get_similar_neighbors(
+        propagation, surface = self._get_similar_neighbors(
             graph_id, input_channel, graph, features
         )
         self._spread_from_seeds(
-            graph_id,
-            input_channel,
-            seeds,
-            neighbors,
-            spreads,
-            object_id=None,
-            surface_edges=surface_edges,
+            graph_id, input_channel, seeds, propagation, object_id=None, surface=surface
         )
 
     def _spread_from_seeds(
-        self,
-        graph_id,
-        input_channel,
-        seeds,
-        neighbors,
-        spreads,
-        object_id,
-        surface_edges=None,
+        self, graph_id, input_channel, seeds, propagation, object_id, surface=None
     ) -> None:
         """Inhibit the seeds and spread inhibition from them through the graph.
 
@@ -864,16 +860,17 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             graph_id: The graph to spread through.
             input_channel: The input channel whose graph to spread through.
             seeds: The nodes to begin spreading from.
-            neighbors: The neighbors of each node of the graph (see
-                `_get_node_neighbors`).
-            spreads: Whether each node of the graph spreads to its neighbors.
+            propagation: The propagation matrix of the graph: a sparse
+                (num_nodes x num_nodes) matrix with an edge at (node, neighbor)
+                wherever the node spreads to the neighbor.
             object_id: The received object ID, or None for sensory input.
-            surface_edges: For sensory input, every (node, neighbor) pair on the
-                same side of the surface (see `_get_spread_order`); None for
-                object IDs.
+            surface: For sensory input, the surface matrix of the graph (see
+                `_get_spread_order`); None for object IDs.
         """
-        order = self._get_spread_order(seeds, neighbors, spreads, surface_edges)
-        inhibition = self._get_inhibition_steps(graph_id, input_channel, len(spreads))
+        order = self._get_spread_order(seeds, propagation, surface)
+        inhibition = self._get_inhibition_steps(
+            graph_id, input_channel, propagation.shape[0]
+        )
         inhibition[order] = self.inhibition_decay_steps
         self.spread_records.append(
             SpreadRecord(
@@ -893,63 +890,76 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             f"{input_channel} of {graph_id}"
         )
 
-    def _get_spread_order(
-        self, seeds, neighbors, spreads, surface_edges=None
-    ) -> np.ndarray:
+    def _get_spread_order(self, seeds, propagation, surface=None) -> np.ndarray:
         """Spread from seeds through a graph, without inhibiting the reached nodes.
 
-        Beginning with the seeds, every reached node that spreads reaches all of
-        its neighbors, and spreading then continues from each of them. For
-        sensory input, whenever spreading stops having reached fewer than
-        min_spread_fraction of the graph's nodes (e.g. on a fragment of noisy
-        features, or a small part like a mug's handle), it is pushed through: every
-        reached node reaches all of its neighbors on the same side of the surface
-        (`surface_edges`), whether or not their features are similar, and
-        spreading continues from them, but only until it has reached
+        A breadth-first search from the seeds along the edges of the propagation
+        matrix: every reached node reaches the nodes it has edges to, and
+        spreading then continues from each of them. For sensory input, whenever
+        spreading stops having reached fewer than min_spread_fraction of the
+        graph's nodes (e.g. on a fragment of noisy features, or a small part like
+        a mug's handle), it is pushed through: every unreached node that a reached
+        node has an edge to in the surface matrix (i.e. on the same side of the
+        surface, whether or not their features are similar) is reached, and
+        spreading continues from them, but only as many hops as it takes to reach
         min_spread_fraction of the nodes (so e.g. a spread pushed from the handle
         onto the side of a mug does not go on to cover the side).
 
         Args:
             seeds: The nodes to begin spreading from.
-            neighbors: The neighbors of each node of the graph (see
-                `_get_node_neighbors`).
-            spreads: Whether each node of the graph spreads to its neighbors.
-            surface_edges: The (node, neighbor) pairs on the same side of the
-                surface, or None to not push spreading through.
+            propagation: The propagation matrix of the graph (see
+                `_spread_from_seeds`).
+            surface: The surface matrix of the graph: a sparse (num_nodes x
+                num_nodes) matrix with an edge at (node, neighbor) for every
+                neighbor on the same side of the surface, or None to not push
+                spreading through.
 
         Returns:
-            The reached nodes, in the order they were reached.
+            The reached nodes, in the order they were reached: by increasing
+            number of hops from the seeds, then, after each push, from the nodes
+            pushed through to. Nodes the same number of hops away are in index
+            order.
         """
-        num_nodes = len(spreads)
-        reached = np.zeros(num_nodes, dtype=bool)
-        reached[seeds] = True
-        order = seeds.tolist()
-        queue = deque(order)
+        num_nodes = propagation.shape[0]
+        sources = np.asarray(seeds, dtype=int).reshape(-1)
+        if len(sources) == 0:
+            return np.empty(0, dtype=int)
         min_size = 0
-        if surface_edges is not None and self.min_spread_fraction:
+        if surface is not None and self.min_spread_fraction:
             min_size = self.min_spread_fraction * num_nodes
+        reached = np.zeros(num_nodes, dtype=bool)
+        order = []
         pushed = False
         while True:
-            while queue and not (pushed and len(order) >= min_size):
-                node = queue.popleft()
-                if not spreads[node]:
-                    continue
-                for neighbor in neighbors[node].tolist():
-                    if not reached[neighbor]:
-                        reached[neighbor] = True
-                        order.append(neighbor)
-                        queue.append(neighbor)
-            if len(order) >= min_size:
+            # The number of hops from the sources to each node the spread reaches,
+            # by a breadth-first search (inf for the nodes it does not reach).
+            hops = dijkstra(
+                propagation,
+                directed=True,
+                indices=sources,
+                min_only=True,
+                unweighted=True,
+            )
+            hops[reached] = np.inf
+            new = np.flatnonzero(np.isfinite(hops))
+            new = new[np.argsort(hops[new], kind="stable")]
+            if pushed:
+                # Only spread as many hops as reaching min_size nodes takes, i.e.
+                # the hops of the node that reaches it.
+                needed = int(np.ceil(min_size)) - np.count_nonzero(reached)
+                if needed < len(new):
+                    new = new[hops[new] <= hops[new[needed - 1]]]
+            reached[new] = True
+            order.append(new)
+            if np.count_nonzero(reached) >= min_size:
+                break
+            # Push through: the unreached neighbors (on the same side of the
+            # surface) of the reached nodes become the sources of the next spread.
+            sources = np.flatnonzero((surface.T @ reached.astype(float) > 0) & ~reached)
+            if len(sources) == 0:
                 break
             pushed = True
-            source, target = surface_edges
-            frontier = np.unique(target[reached[source] & ~reached[target]])
-            if len(frontier) == 0:
-                break
-            reached[frontier] = True
-            order.extend(frontier.tolist())
-            queue.extend(frontier.tolist())
-        return np.array(order, dtype=int)
+        return np.concatenate(order)
 
     def _get_nodes_nearest_mlh(
         self, graph, mlh_location
@@ -1096,8 +1106,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
 
     def _get_similar_neighbors(
         self, graph_id, input_channel, graph, features
-    ) -> tuple[np.ndarray, list[np.ndarray], tuple[np.ndarray, np.ndarray]]:
-        """Get the neighbors of each node for spreading through similar features.
+    ) -> tuple[csr_matrix, csr_matrix]:
+        """Get the edges of a graph for spreading through similar features.
 
         Neighbors on the far side of a thin wall from a node (see
         min_far_side_angle) are not its neighbors here, as they are not part of the
@@ -1105,81 +1115,61 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         own if at most max_dissimilar_neighbors of its neighbors are not.
 
         Returns:
-            For each node of the graph, whether it spreads, and the neighbors it
-            spreads to; and every (node, neighbor) pair on the same side of the
-            surface, whether or not their features are similar.
+            The propagation matrix (see `_spread_from_seeds`), with an edge from
+            each node to the neighbors it spreads to, and the surface matrix (see
+            `_get_spread_order`), with an edge from each node to every neighbor on
+            the same side of the surface, whether or not their features are
+            similar.
         """
         key = (graph_id, input_channel, len(graph.pos))
         if key not in self._similar_neighbors_cache:
             num_nodes = len(graph.pos)
-            all_neighbors = self._get_node_neighbors(
+            source, target = self._get_neighbor_matrix(
                 graph_id,
                 input_channel,
                 graph,
                 num_neighbors=self.num_feature_spread_neighbors,
-            )
-            source, target = self._get_neighbor_edges(all_neighbors)
-            near_side = np.ones(len(source), dtype=bool)
+            ).nonzero()
             if "normal" in features:
                 cosine = np.sum(
                     features["normal"][source] * features["normal"][target], axis=1
                 )
                 near_side = cosine > np.cos(np.radians(self.min_far_side_angle))
-            source, target = source[near_side], target[near_side]
-            surface_edges = (source, target)
+                source, target = source[near_side], target[near_side]
+            surface = self._edge_matrix(source, target, num_nodes)
             similar = self._similar_feature_pairs(
                 {name: values[source] for name, values in features.items()},
                 {name: values[target] for name, values in features.items()},
             )
             num_dissimilar = np.bincount(source[~similar], minlength=num_nodes)
-            spreads = (np.bincount(source, minlength=num_nodes) > 0) & (
+            spreads = (surface.getnnz(axis=1) > 0) & (
                 num_dissimilar <= self.max_dissimilar_neighbors
             )
-            source, target = source[similar], target[similar]
-            boundaries = np.searchsorted(source, np.arange(num_nodes + 1))
-            neighbors = [
-                target[boundaries[node] : boundaries[node + 1]]
-                for node in range(num_nodes)
-            ]
-            self._similar_neighbors_cache[key] = (spreads, neighbors, surface_edges)
+            keep = similar & spreads[source]
+            propagation = self._edge_matrix(source[keep], target[keep], num_nodes)
+            self._similar_neighbors_cache[key] = (propagation, surface)
         return self._similar_neighbors_cache[key]
 
     @staticmethod
-    def _all_neighbors_satisfy(satisfied, source, num_nodes) -> np.ndarray:
-        """Get whether each node has neighbors, and all of them satisfy a condition.
+    def _edge_matrix(source, target, num_nodes) -> csr_matrix:
+        """Build the sparse adjacency matrix of a set of directed edges.
 
         Args:
-            satisfied: Whether the condition is satisfied, for each neighbor edge.
-            source: The node each neighbor edge belongs to.
+            source: The node each edge starts from.
+            target: The node each edge leads to.
             num_nodes: The number of nodes in the graph.
 
         Returns:
-            For each node, whether it has neighbors that all satisfy the condition.
+            Sparse (num_nodes x num_nodes) matrix with a 1 at (source, target) for
+            every edge.
         """
-        has_neighbors = np.bincount(source, minlength=num_nodes) > 0
-        unsatisfied = np.bincount(source[~satisfied], minlength=num_nodes) > 0
-        return has_neighbors & ~unsatisfied
-
-    @staticmethod
-    def _get_neighbor_edges(neighbors) -> tuple[np.ndarray, np.ndarray]:
-        """Get every (node, neighbor) pair of a graph.
-
-        Args:
-            neighbors: The neighbors of each node (see `_get_node_neighbors`).
-
-        Returns:
-            The node and the neighbor of each pair, ordered by node.
-        """
-        source = np.repeat(
-            np.arange(len(neighbors)),
-            [len(node_neighbors) for node_neighbors in neighbors],
+        return csr_matrix(
+            (np.ones(len(source)), (source, target)), shape=(num_nodes, num_nodes)
         )
-        target = np.concatenate(neighbors) if len(neighbors) else np.empty(0, dtype=int)
-        return source, target.astype(int)
 
-    def _get_node_neighbors(
+    def _get_neighbor_matrix(
         self, graph_id, input_channel, graph, num_neighbors=None
-    ) -> list[np.ndarray]:
+    ) -> csr_matrix:
         """Get the two-way nearest-neighbor relations of every node of a graph.
 
         A node's neighbors are its num_neighbors nearest nodes, together with every
@@ -1196,41 +1186,26 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 num_spread_neighbors.
 
         Returns:
-            For each node, the indices of its neighbors (excluding the node itself):
-            its own nearest neighbors first, nearest first, then the nodes that
-            have it among their nearest neighbors.
+            Sparse (num_nodes x num_nodes) matrix with a 1 at (node, neighbor) for
+            every neighbor of every node (excluding the node itself).
         """
         if num_neighbors is None:
             num_neighbors = self.num_spread_neighbors
-        pos = np.asarray(graph.pos)
+        pos = np.asarray(graph.pos, dtype=float)
         num_nodes = len(pos)
         key = (graph_id, input_channel, num_nodes, num_neighbors)
-        if key in self._neighbor_cache:
-            return self._neighbor_cache[key]
-
-        k = min(num_neighbors, num_nodes - 1)
-        if k < 1:
-            neighbors = [np.empty(0, dtype=int) for _ in range(num_nodes)]
-        else:
-            nearest = np.asarray(
-                graph.find_nearest_neighbors(pos, num_neighbors=k + 1)
-            ).reshape(num_nodes, k + 1)
-            # A node is usually its own nearest neighbor, but not necessarily
-            # when several nodes share a location.
-            forward = [
-                [n for n in row if n != node][:k]
-                for node, row in enumerate(nearest.tolist())
-            ]
-            reverse = [[] for _ in range(num_nodes)]
-            for node, node_neighbors in enumerate(forward):
-                for neighbor in node_neighbors:
-                    reverse[neighbor].append(node)
-            neighbors = [
-                np.array(list(dict.fromkeys(forward[node] + reverse[node])), dtype=int)
-                for node in range(num_nodes)
-            ]
-        self._neighbor_cache[key] = neighbors
-        return neighbors
+        if key not in self._neighbor_cache:
+            k = min(num_neighbors, num_nodes - 1)
+            if k < 1:
+                neighbors = csr_matrix((num_nodes, num_nodes), dtype=float)
+            else:
+                # Nodes are excluded from their own nearest neighbors by index, so
+                # that nodes sharing a location are still each other's neighbors.
+                nearest = kneighbors_graph(pos, n_neighbors=k, include_self=False)
+                neighbors = ((nearest + nearest.T) > 0).astype(float).tocsr()
+                neighbors.sort_indices()
+            self._neighbor_cache[key] = neighbors
+        return self._neighbor_cache[key]
 
     def _decay_inhibition(self) -> None:
         for inhibition in self._inhibition_steps.values():

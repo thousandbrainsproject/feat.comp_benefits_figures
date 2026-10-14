@@ -793,11 +793,26 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
             "Spreading stops at the edge of the patch (9 nodes), short of 132 "
             "nodes, so is pushed through into the ring around it.",
         )
-        self.assertLess(
-            inhibited.sum(),
-            150,
-            "Once pushed through, spreading stops on reaching 132 nodes, rather than "
-            "covering the ring (225 nodes).",
+        self.assertFalse(
+            np.all(inhibited[ring]),
+            "Once pushed through, spreading stops at the hop at which it has "
+            "reached 132 nodes, rather than covering the ring (225 nodes).",
+        )
+        # Node spacings from the patch, in the direction they are farthest.
+        distance = np.maximum(
+            np.maximum(13 - x, x - 15), np.maximum(9 - y, y - 11)
+        ).clip(min=0)
+        self.assertGreaterEqual(
+            distance[ring & ~inhibited].min(),
+            5,
+            "Spreading fans out from the patch one hop at a time, so only the "
+            "ring's outermost nodes are left unreached.",
+        )
+        (record,) = self.gsg.spread_records
+        self.assertEqual(
+            set(record.node_order[:9].tolist()),
+            set(np.flatnonzero(patch).tolist()),
+            "The patch is reached before the nodes pushed through to.",
         )
         nptest.assert_array_equal(
             self.spread_from(0),
