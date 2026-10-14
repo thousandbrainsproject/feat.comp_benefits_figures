@@ -466,12 +466,31 @@ class SpreadRecord:
             spread of similar features from sensory input.
         node_order: The inhibited nodes, in the order the spread reached them: by
             increasing number of hops from the seeds (see `_get_spread_order`).
+        seeds: The nodes the spread began from.
+        hops: For each node of `node_order`, the number of hops from the nodes its
+            stage of the spread began from (0 for the seeds, and for the nodes a
+            push-through began from).
+        stage: For each node of `node_order`, the stage of the spread that reached
+            it: 0 for the spread from the seeds, and n for the n-th push-through.
+        predecessor: For each node of `node_order`, the node it was reached from,
+            or -1 for the nodes a stage began from.
+        sinks: The reached nodes that do not spread (e.g. because too many of
+            their neighbors store other features or object IDs), where the spread
+            came to a stop.
+        min_size: The number of nodes the spread had to reach before stopping, or
+            0 if it was never pushed through.
     """
 
     graph_id: str
     input_channel: str
     object_id: int | None
     node_order: np.ndarray
+    seeds: np.ndarray
+    hops: np.ndarray
+    stage: np.ndarray
+    predecessor: np.ndarray
+    sinks: np.ndarray
+    min_size: float
 
 
 class EvidenceGoalGenerator(GraphGoalGenerator):
@@ -867,7 +886,9 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             surface: For sensory input, the surface matrix of the graph (see
                 `_get_spread_order`); None for object IDs.
         """
-        order = self._get_spread_order(seeds, propagation, surface)
+        order, hops, stage, predecessor, min_size = self._get_spread_order(
+            seeds, propagation, surface
+        )
         inhibition = self._get_inhibition_steps(
             graph_id, input_channel, propagation.shape[0]
         )
@@ -878,6 +899,12 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 input_channel=input_channel,
                 object_id=object_id,
                 node_order=order,
+                seeds=np.asarray(seeds, dtype=int).reshape(-1),
+                hops=hops,
+                stage=stage,
+                predecessor=predecessor,
+                sinks=order[propagation.getnnz(axis=1)[order] == 0],
+                min_size=min_size,
             )
         )
         explained = (
@@ -890,7 +917,9 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             f"{input_channel} of {graph_id}"
         )
 
-    def _get_spread_order(self, seeds, propagation, surface=None) -> np.ndarray:
+    def _get_spread_order(
+        self, seeds, propagation, surface=None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
         """Spread from seeds through a graph, without inhibiting the reached nodes.
 
         A breadth-first search from the seeds along the edges of the propagation
@@ -917,40 +946,50 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         Returns:
             The reached nodes, in the order they were reached: by increasing
             number of hops from the seeds, then, after each push, from the nodes
-            pushed through to. Nodes the same number of hops away are in index
-            order.
+            pushed through to (nodes the same number of hops away are in index
+            order); for each of them, its number of hops from the nodes its stage
+            began from, its stage (0 for the spread from the seeds, n for the
+            n-th push-through), and the node it was reached from (-1 for the
+            nodes a stage began from); and the number of nodes the spread had to
+            reach (0 if it was never pushed through).
         """
         num_nodes = propagation.shape[0]
         sources = np.asarray(seeds, dtype=int).reshape(-1)
+        empty = np.empty(0, dtype=int)
         if len(sources) == 0:
-            return np.empty(0, dtype=int)
+            return empty, empty, empty, empty, 0.0
         min_size = 0
         if surface is not None and self.min_spread_fraction:
             min_size = self.min_spread_fraction * num_nodes
         reached = np.zeros(num_nodes, dtype=bool)
-        order = []
-        pushed = False
+        order, hops, stages, predecessors = [], [], [], []
+        stage = 0
         while True:
             # The number of hops from the sources to each node the spread reaches,
-            # by a breadth-first search (inf for the nodes it does not reach).
-            hops = dijkstra(
+            # by a breadth-first search (inf for the nodes it does not reach), and
+            # the node each is reached from (-9999 for the sources).
+            stage_hops, predecessor, _ = dijkstra(
                 propagation,
                 directed=True,
                 indices=sources,
                 min_only=True,
                 unweighted=True,
+                return_predecessors=True,
             )
-            hops[reached] = np.inf
-            new = np.flatnonzero(np.isfinite(hops))
-            new = new[np.argsort(hops[new], kind="stable")]
-            if pushed:
+            stage_hops[reached] = np.inf
+            new = np.flatnonzero(np.isfinite(stage_hops))
+            new = new[np.argsort(stage_hops[new], kind="stable")]
+            if stage > 0:
                 # Only spread as many hops as reaching min_size nodes takes, i.e.
                 # the hops of the node that reaches it.
                 needed = int(np.ceil(min_size)) - np.count_nonzero(reached)
                 if needed < len(new):
-                    new = new[hops[new] <= hops[new[needed - 1]]]
+                    new = new[stage_hops[new] <= stage_hops[new[needed - 1]]]
             reached[new] = True
             order.append(new)
+            hops.append(stage_hops[new].astype(int))
+            stages.append(np.full(len(new), stage))
+            predecessors.append(np.maximum(predecessor[new], -1))
             if np.count_nonzero(reached) >= min_size:
                 break
             # Push through: the unreached neighbors (on the same side of the
@@ -958,8 +997,14 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             sources = np.flatnonzero((surface.T @ reached.astype(float) > 0) & ~reached)
             if len(sources) == 0:
                 break
-            pushed = True
-        return np.concatenate(order)
+            stage += 1
+        return (
+            np.concatenate(order),
+            np.concatenate(hops),
+            np.concatenate(stages),
+            np.concatenate(predecessors),
+            min_size if stage > 0 else 0.0,
+        )
 
     def _get_nodes_nearest_mlh(
         self, graph, mlh_location

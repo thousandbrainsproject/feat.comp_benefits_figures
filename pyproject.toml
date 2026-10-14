@@ -75,6 +75,11 @@ viz = [
     # Interactive 3D inspection of learned object models (analysis/scripts/inspect_models.py)
     'vedo',
 ]
+gui = [
+    # Browser-based explorer of inhibition spreading (analysis/gui/spreading_app.py)
+    'dash',
+    'plotly',
+]
 build = [
     'build'
 ]

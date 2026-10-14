@@ -336,6 +336,20 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         self.assertEqual(set(record.node_order[:6].tolist()) - set(range(1, 8)), set())
         self.assertIn(0, record.node_order[6:])
         self.assertIn(9, record.node_order[6:])
+        nptest.assert_array_equal(np.sort(record.seeds), record.node_order[:6])
+        nptest.assert_array_equal(record.hops[:6], 0)
+        self.assertTrue(np.all(record.hops[6:] > 0))
+        nptest.assert_array_equal(record.stage, 0)
+        self.assertEqual(record.min_size, 0, "Object IDs are never pushed through.")
+        # Each node beyond the seeds is reached from a seed, or from a node
+        # reached before it.
+        for position in range(6, len(record.node_order)):
+            self.assertIn(record.predecessor[position], record.node_order[:position])
+        nptest.assert_array_equal(record.predecessor[:6], -1)
+        # The wheel's nodes next to the car body do not spread, having neighbors
+        # that store the body's ID.
+        self.assertIn(9, record.sinks)
+        self.assertNotIn(0, record.sinks)
 
     def test_spread_records_only_hold_the_current_steps_spreads(self) -> None:
         def recorded_channels():
@@ -813,6 +827,22 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
             set(record.node_order[:9].tolist()),
             set(np.flatnonzero(patch).tolist()),
             "The patch is reached before the nodes pushed through to.",
+        )
+        self.assertEqual(record.min_size, 0.2 * len(points))
+        nptest.assert_array_equal(record.stage[:9], 0)
+        nptest.assert_array_equal(record.stage[9:], 1)
+        pushed_to = record.node_order[(record.stage == 1) & (record.hops == 0)]
+        self.assertTrue(
+            np.all(ring[pushed_to]) and len(pushed_to) > 0,
+            "The push-through begins from ring nodes next to the patch.",
+        )
+        nptest.assert_array_equal(
+            record.predecessor[(record.stage == 1) & (record.hops == 0)], -1
+        )
+        later = record.node_order[(record.stage == 1) & (record.hops > 0)]
+        self.assertTrue(
+            np.all(ring[record.predecessor[np.isin(record.node_order, later)]]),
+            "Nodes reached after the push-through are reached from ring nodes.",
         )
         nptest.assert_array_equal(
             self.spread_from(0),
