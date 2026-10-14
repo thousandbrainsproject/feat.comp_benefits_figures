@@ -40,7 +40,8 @@ In the app:
   current inhibition, their object ID, or the region of the primitive they belong
   to; toggle normal glyphs, the spread tree, and the other channels' nodes.
 - "Step" decays the inhibition by one step (or ten) without sensing; "Reset"
-  clears it.
+  clears it, and resets the view (orbiting, panning or zooming the scene
+  otherwise persists across sensing, stepping and recoloring).
   The goal generator's parameters can be changed on the fly (the inhibition is
   kept).
 - Hover a node for its features, its neighbors (how many are similar, dissimilar,
@@ -107,6 +108,10 @@ OVERLAYS = {
     "ghost": "Other channels",
 }
 DEFAULT_OVERLAYS = ["seeds", "current", "sinks", "boundary", "frontier"]
+DEFAULT_CAMERA = {
+    "eye": {"x": 0.0, "y": -0.6, "z": 2.2},
+    "up": {"x": 0, "y": 1, "z": 0},
+}
 SPEEDS = [1, 2, 5, 10, 25, 50]
 PARAMETER_STEPS = {
     "num_spread_neighbors": 1,
@@ -267,8 +272,27 @@ def legend_marker(name, color, symbol="circle", size=6):
 
 
 def build_figure(
-    session: Session, channel: str, progress: int, color_mode: str, overlays: list
+    session: Session,
+    channel: str,
+    progress: int,
+    color_mode: str,
+    overlays: list,
+    camera: dict | None = None,
 ) -> go.Figure:
+    """Build the 3D figure of a channel's graph.
+
+    Args:
+        session: The session.
+        channel: The channel whose graph to show.
+        progress: How many nodes of the last spread to show as reached.
+        color_mode: One of COLOR_MODES.
+        overlays: The keys of OVERLAYS to draw.
+        camera: The view the user orbited to (as plotly reports it in
+            relayoutData["scene.camera"]), or None for the default view.
+
+    Returns:
+        The figure.
+    """
     graph = session.graphs[channel]
     pos = graph.pos
     num_nodes = len(pos)
@@ -363,12 +387,12 @@ def build_figure(
             "yaxis": axis,
             "zaxis": axis,
             "aspectmode": "data",
-            "camera": {
-                "eye": {"x": 0.0, "y": -0.6, "z": 2.2},
-                "up": {"x": 0, "y": 1, "z": 0},
-            },
+            "camera": camera or DEFAULT_CAMERA,
         },
-        uirevision=session.condition.key,
+        # Changing the revision makes plotly adopt the camera given above rather
+        # than keep the one the user orbited to; that is wanted exactly when the
+        # view is reset (camera None) after the user orbited (camera set).
+        uirevision=f"{session.condition.key}:{'user' if camera else 'default'}",
         margin={"l": 0, "r": 0, "t": 0, "b": 0},
         legend={
             "x": 0.0,
@@ -695,6 +719,8 @@ def build_layout():
         style={"fontFamily": "Helvetica, Arial, sans-serif", "fontSize": "13px"},
         children=[
             dcc.Store(id="version", data=0),
+            # The view the user orbited to, kept across re-renders until reset.
+            dcc.Store(id="camera", data=None),
             dcc.Interval(id="player", interval=120, disabled=True),
             html.Div(
                 [
@@ -1025,6 +1051,7 @@ def register_callbacks(app: Dash) -> None:
         Output("graph", "clickData"),
         Output("player", "disabled"),
         Output("play-btn", "children"),
+        Output("camera", "data"),
         Input("condition", "value"),
         Input("channel", "value"),
         Input("graph", "clickData"),
@@ -1084,6 +1111,8 @@ def register_callbacks(app: Dash) -> None:
             return no_update if value is None else value
 
         loaded = result["id_options"] is not None  # A new condition was loaded.
+        # The view resets with the inhibition, and when another object is loaded.
+        reset_view = loaded or ctx.triggered_id == "reset-btn"
         return (
             version + 1,
             max(result["total"], 1),
@@ -1102,7 +1131,19 @@ def register_callbacks(app: Dash) -> None:
             None,
             True,
             "▶ Play",
+            None if reset_view else no_update,
         )
+
+    @app.callback(
+        Output("camera", "data", allow_duplicate=True),
+        Input("graph", "relayoutData"),
+        prevent_initial_call=True,
+    )
+    def on_relayout(relayout_data):
+        # Remember the view whenever the user orbits, pans or zooms the scene.
+        if relayout_data and "scene.camera" in relayout_data:
+            return relayout_data["scene.camera"]
+        return no_update
 
     @app.callback(
         Output("player", "disabled", allow_duplicate=True),
@@ -1148,13 +1189,16 @@ def register_callbacks(app: Dash) -> None:
         Input("channel", "value"),
         Input("color-mode", "value"),
         Input("overlays", "value"),
+        State("camera", "data"),
     )
-    def render(_version, progress, channel, color_mode, overlays):
+    def render(_version, progress, channel, color_mode, overlays, camera):
         session = SESSION
         if channel not in session.channels:
             channel = session.channels[0]
         progress = int(progress or 0)
-        figure = build_figure(session, channel, progress, color_mode, overlays or [])
+        figure = build_figure(
+            session, channel, progress, color_mode, overlays or [], camera
+        )
         text, background = status_text(session, channel, progress)
         style = {
             "padding": "6px 10px",
