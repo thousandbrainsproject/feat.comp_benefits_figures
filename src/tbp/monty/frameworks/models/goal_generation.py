@@ -649,6 +649,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     def get_inhibition_weights(self, graph_id, input_channel) -> np.ndarray:
         """Get the inhibition weight of each node of a graph.
 
+        TODO make this private, only public for visualization purposes.
+
         Returns:
             Array with one weight in [0, 1] per node of the graph of the given input
             channel; nodes with a weight of 0 can be selected for testing.
@@ -680,7 +682,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
 
         target = self._select_target(ctx, graph_id)
         if target is None:
-            logger.debug(f"All nodes of {graph_id} are inhibited; no goal")
+            logger.debug(f"All nodes of {graph_id} are fully inhibited; no goal")
             return self._generate_none_goal()
 
         input_channel, node_id, object_id = target
