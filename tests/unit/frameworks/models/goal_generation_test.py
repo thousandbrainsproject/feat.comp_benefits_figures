@@ -257,9 +257,11 @@ def oriented_sensor_graph(positions):
 
 
 def lm_percept(sender_id, object_id):
+    # Like an LM's output, carries the pose of the child object (not compared).
     return MagicMock(
         sender_type="LM",
         sender_id=sender_id,
+        morphological_features={"pose_vectors": np.eye(3)},
         non_morphological_features={"object_id": object_id},
     )
 
@@ -404,7 +406,12 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         nptest.assert_array_equal(record.hops[:6], 0)
         self.assertTrue(np.all(record.hops[6:] > 0))
         nptest.assert_array_equal(record.stage, 0)
-        self.assertEqual(record.min_size, 0, "Object IDs are never pushed through.")
+        self.assertEqual(
+            record.min_size,
+            0,
+            "The wheel is more than min_propagation_fraction of the car's nodes, so "
+            "the propagation is not pushed through.",
+        )
         # Each node beyond the seeds is reached from a seed, or from a node
         # reached before it.
         for position in range(6, len(record.node_order)):
@@ -471,16 +478,81 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
 
         self.assertTrue(np.all(self.car_salience() == 1))
 
-    def test_no_propagation_when_seed_neighbors_store_different_ids(self) -> None:
+    def test_propagates_from_the_nearest_nodes_storing_the_received_id(self) -> None:
         # At the border between the wheel and the body, the nearest nodes store
-        # both IDs, even though the wheel is predicted at the MLH location.
+        # both IDs; those storing the wheel's ID are the seeds.
         self.mlh = self.mlh_at_node(9)
 
         self.gsg._propagate_from_observations(
             [lm_percept("learning_module_0", WHEEL_ID)]
         )
 
-        self.assertTrue(np.all(self.car_salience() == 1))
+        (record,) = self.gsg.propagation_records
+        self.assertTrue(np.all(record.seeds < 10), "Only wheel nodes are seeds.")
+        nptest.assert_array_equal(np.nonzero(self.car_salience() < 1)[0], np.arange(10))
+
+    def test_nodes_storing_other_ids_do_not_stop_propagation(self) -> None:
+        # A wheel with one noisy node storing the body's ID in its middle.
+        object_ids = np.full(30, WHEEL_ID)
+        object_ids[15] = BODY_ID
+        positions = np.zeros((30, 3))
+        positions[:, 0] = np.arange(30) * NODE_SPACING
+        self.graphs[TOP_ID]["learning_module_0"] = FakeGraph(
+            positions, {"object_id": object_ids}
+        )
+
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_0", WHEEL_ID)]
+        )
+
+        nptest.assert_array_equal(
+            self.car_salience() < 1,
+            object_ids == WHEEL_ID,
+            "Up to max_dissimilar_neighbors neighbors may store another ID, so the "
+            "propagation goes past the noisy node, but does not reach it.",
+        )
+
+    def test_pose_of_child_objects_is_not_compared(self) -> None:
+        # The pose vectors of an object-ID channel are the orientation of the child
+        # object, not a surface normal; here they differ from node to node.
+        rng = np.random.default_rng(0)
+        poses = Rotation.random(len(self.car.pos), random_state=rng).as_matrix()
+        self.graphs[TOP_ID]["learning_module_0"] = FakeGraph(
+            self.car.pos,
+            {
+                "object_id": self.car.x[:, 0],
+                "pose_vectors": poses.reshape(-1, 9),
+            },
+        )
+
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_0", WHEEL_ID)]
+        )
+
+        nptest.assert_array_equal(np.nonzero(self.car_salience() < 1)[0], np.arange(10))
+
+    def test_propagation_through_a_small_id_region_is_pushed_through(self) -> None:
+        # A logo of 3 nodes at the end of a line of 100, fewer than
+        # min_propagation_fraction (5%) of them.
+        object_ids = np.full(100, BODY_ID)
+        object_ids[:3] = LOGO_ID
+        positions = np.zeros((100, 3))
+        positions[:, 0] = np.arange(100) * NODE_SPACING
+        self.graphs[TOP_ID]["learning_module_0"] = FakeGraph(
+            positions, {"object_id": object_ids}
+        )
+        self.mlh = {**self.mlh_at_node(0), "location": positions[1]}
+
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_0", LOGO_ID)]
+        )
+
+        (record,) = self.gsg.propagation_records
+        nptest.assert_array_equal(np.sort(record.node_order[:3]), np.arange(3))
+        nptest.assert_array_equal(record.stage[:3], 0)
+        self.assertEqual(record.min_size, 5)
+        self.assertGreaterEqual(len(record.node_order), 5)
+        self.assertTrue(np.all(record.stage[3:] > 0))
 
     def test_ids_from_channels_not_in_the_mlh_graph_are_ignored(self) -> None:
         self.gsg._propagate_from_observations(

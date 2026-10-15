@@ -424,17 +424,19 @@ def build_condition(key: str, seed: int = 0) -> Condition:
                 "and learning_module_1 only has nodes on an island, storing "
                 '"logo_A". Sensing a location sends each channel the ID stored at '
                 "its nearest node, which propagates through the nodes storing that ID "
-                "(all of a node's neighbors must store it for it to propagate). "
-                "Switch the displayed channel to see each propagation.",
+                "(the object ID is compared like any other feature, matching only "
+                "the same ID). Switch the displayed channel to see each "
+                "propagation.",
             ),
             "noisy_ids": (
                 "6. With noisy object IDs",
                 '3% of learning_module_0\'s nodes store "circle" and 5% of '
-                'learning_module_1\'s store "logo_B", at random. As a node only '
-                "propagates if all of its neighbors store the received ID, each noisy "
-                "node stops its whole neighborhood from propagating, fragmenting "
-                "the propagation (and a noisy node among the seeds prevents it "
-                "entirely).",
+                'learning_module_1\'s store "logo_B", at random. A node propagates '
+                "as long as at most max_dissimilar_neighbors of its neighbors store "
+                "another ID, so the propagation of the common ID passes the noisy "
+                "nodes without reaching them. Sensing a noisy node propagates through "
+                "its tiny region of the rare ID, then is pushed through onto its "
+                "neighbors to reach min_propagation_fraction of the nodes.",
             ),
             "striped_ids": (
                 "7. With bands of object IDs",

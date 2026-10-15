@@ -41,8 +41,7 @@ features, or object ID, stored at each channel's node nearest the location), and
 their nodes are superimposed in the figures, with one marker per channel. Objects
 the LM has no model of, or that have none of the channels, are skipped, e.g. LM 0
 only models the objects without stickers, and only the objects with stickers
-have a learning_module_1 channel. The tolerance figure, which only affects
-sensory propagation, is skipped when propagating on object-ID channels only.
+have a learning_module_1 channel.
 
 Usage:
     python analysis/scripts/visualize_salience_propagation.py [MODEL_PATH] [options]
@@ -256,7 +255,7 @@ def sensor_channel(memory: dict) -> str:
     """Find the channel of an LM's graphs that receives input from a sensor module.
 
     Channels from other LMs store "object_id" features; the sensor channel stores
-    the surface features that sensory propagation compares.
+    surface features (hue and surface normals).
     """
     channels = {
         channel
@@ -313,15 +312,6 @@ class FakeParentLM:
         if input_channel is None:
             return self.memory[graph_id]
         return self.memory[graph_id][input_channel]
-
-
-def is_object_id_channel(memory: dict, channel: str) -> bool:
-    """Whether a channel receives object IDs from a lower-level LM."""
-    return any(
-        "object_id" in graphs[channel].feature_mapping
-        for graphs in memory.values()
-        if channel in graphs
-    )
 
 
 class Propagator:
@@ -994,9 +984,7 @@ def main():
     plots = [plot_compartments, plot_visits]
     mug_channels = [c for c in channels if c in memory.get(mug, {})]
     if mug_channels:
-        plots = [plot_mug_seeds, plot_compartments, plot_visits]
-        if not all(is_object_id_channel(memory, c) for c in mug_channels):
-            plots.append(plot_tolerance)
+        plots = [plot_mug_seeds, plot_compartments, plot_visits, plot_tolerance]
     for plot in plots:
         fig, filename = plot(memory, mug, objects)
         if args.interactive:

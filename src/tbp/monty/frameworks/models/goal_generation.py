@@ -521,23 +521,27 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     model, whose salience is reduced by `salience_reduction` (falling off along
     the propagation by `salience_reduction_falloff`), by propagating through the
     graph of the channel the input was received on, starting from the nodes
-    nearest the MLH location:
-    - An object ID from a lower-level LM propagates through the nodes storing it.
-    - Sensory input propagates through neighboring nodes with a similar hue
-      and surface normal, within the parent LM's hue and surface normal
-      ("pose_vectors") tolerances for the channel. Propagation stops wherever
-      the hue or the surface normal changes abruptly, so e.g. on a mug it
-      covers the side of the cylinder (whose normal changes gradually from node
-      to node), but not its rim, bottom or handle, and on a cube a single face,
-      but not the other faces. A propagation that stops before reaching
-      `min_propagation_fraction` of the graph's nodes is pushed through to the
-      neighbors whose features differ.
+    nearest the MLH location, through neighboring nodes with similar features.
+    Object IDs and sensory features are propagated alike, differing only in the
+    features compared:
+    - On a channel receiving object IDs from a lower-level LM, the object ID,
+      which is similar only if it is the same, so the propagation goes through
+      the nodes storing the received ID.
+    - On a channel receiving sensory input, the hue and surface normal, which
+      are similar within the parent LM's hue and surface normal ("pose_vectors")
+      tolerances for the channel. Propagation stops wherever the hue or the
+      surface normal changes abruptly, so e.g. on a mug it covers the side of
+      the cylinder (whose normal changes gradually from node to node), but not
+      its rim, bottom or handle, and on a cube a single face, but not the other
+      faces.
+    A propagation that stops before reaching `min_propagation_fraction` of the
+    graph's nodes is pushed through to the neighbors whose features differ.
 
     A node's neighbors are its `num_propagation_neighbors` nearest nodes
     (regardless of their distance), together with the nodes that have it among
-    their own nearest nodes, and it propagates to them only if all of them store
-    the received object ID or, for sensory input, are similar to it (allowing for
-    `max_dissimilar_neighbors` noisy neighbors, which it does not propagate to).
+    their own nearest nodes, and it propagates to those with features similar to
+    its own, as long as at most `max_dissimilar_neighbors` of them are not
+    (allowing for noisy neighbors, which it does not propagate to).
     A propagation therefore covers a contiguous region, including outlying nodes,
     without jumping to disjoint regions (e.g. separate wheels on a car).
     Salience is tracked separately for the graph of each channel, so a location
@@ -603,22 +607,21 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 steps, even if the MLH has not changed. Defaults to 20.
             num_propagation_neighbors: Number of nearest neighbors of each node
                 that, together with the nodes that have it among their own nearest
-                neighbors, must all store the received object ID (or, for sensory
-                input, have similar features, up to max_dissimilar_neighbors) for
-                a propagation to continue from the node. Also the number of nodes
+                neighbors, must have similar features (e.g. store the same object
+                ID), up to max_dissimilar_neighbors, for a propagation to continue
+                from the node. Also the number of nodes
                 nearest the MLH location that a propagation begins from. On a wall
                 thinner than the spacing of nodes (e.g. a bowl's), about half of a
                 node's nearest neighbors are on the far side of the wall (see
                 `_far_side_pairs`), and so are ignored. Defaults to 10.
-            max_dissimilar_neighbors: For sensory input, the number of a node's
-                neighbors whose features may differ from its own, without stopping
+            max_dissimilar_neighbors: The number of a node's neighbors whose
+                features (or object IDs) may differ from its own, without stopping
                 it from propagating to the others (which have similar features).
-                The features stored in learned models are noisy, so with 0 a
-                single noisy neighbor stops a node from propagating; more lets
-                propagation leak across boundaries (e.g. onto a mug's handle).
-                Propagation through object IDs always requires all neighbors to
-                store the ID. Defaults to 2.
-            min_propagation_fraction: For sensory input, the fraction of the
+                The features and object IDs stored in learned models are noisy, so
+                with 0 a single noisy neighbor stops a node from propagating; more
+                lets propagation leak across boundaries (e.g. onto a mug's
+                handle). Defaults to 2.
+            min_propagation_fraction: The fraction of the
                 graph's nodes a propagation must reach: when it stops before
                 reaching them, it is pushed through to the neighbors whose
                 features differ (see `_get_propagation_order`). This keeps
@@ -805,11 +808,10 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     def _propagate_from_observations(self, observations) -> None:
         """Reduce the salience of the parts of the MLH explained by this step's input.
 
-        Object IDs received from lower-level LMs on an object-ID channel of the MLH
-        graph propagate through the nodes storing them, and sensory input received
-        on any other channel of the MLH graph propagates through nodes with
-        similar features. Nothing propagates until the MLH has survived its first
-        chance of being deleted (see `_mlh_survived_deletion`).
+        The input received on each channel of the MLH graph (an object ID from a
+        lower-level LM, or sensory features) propagates through the nodes with
+        similar features (see `_propagate`). Nothing propagates until the MLH has
+        survived its first chance of being deleted (see `_mlh_survived_deletion`).
         """
         graph_id = self._get_mlh_graph_id()
         if graph_id is None:
@@ -823,77 +825,37 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
 
         mlh = self.parent_lm._get_current_mlh()
         channels = self.parent_lm.get_input_channels_in_graph(graph_id)
-        object_id_channels = self._get_object_id_channels(graph_id)
         for percept in observations:
-            channel = percept.sender_id
-            if channel not in channels:
-                continue
-            if channel in object_id_channels:
-                object_id = (percept.non_morphological_features or {}).get("object_id")
-                if percept.sender_type != "LM" or object_id is None:
-                    continue
-                self._propagate_object_id(
-                    graph_id,
-                    channel,
-                    int(np.asarray(object_id).flatten()[0]),
-                    mlh["location"],
-                )
-            elif percept.sender_type == "SM":
-                self._propagate_similar_features(graph_id, channel, percept, mlh)
+            if percept.sender_id in channels:
+                self._propagate(graph_id, percept.sender_id, percept, mlh)
 
-    def _propagate_object_id(
-        self, graph_id, input_channel, received_id, mlh_location
-    ) -> None:
-        """Propagate from the MLH location through the nodes storing an ID.
-
-        The propagation only begins if the received ID is predicted by the MLH,
-        i.e. it is stored by one of the nodes nearest the MLH location that lie
-        within the parent LM's max_match_distance, and all of the nodes nearest
-        the MLH location store it.
-        """
-        graph = self.parent_lm.get_graph(graph_id, input_channel=input_channel)
-        stores_id = self._get_feature_values(graph, "object_id")[:, 0] == received_id
-
-        seeds, seed_distances = self._get_nodes_nearest_mlh(graph, mlh_location)
-        nearby = seed_distances <= self.parent_lm.max_match_distance
-        if not np.any(stores_id[seeds[nearby]]) or not np.all(stores_id[seeds]):
-            return
-
-        neighbors = self._get_neighbor_matrix(graph_id, input_channel, graph)
-        # A node propagates to its neighbors if it has any, and all of them store
-        # the received ID, i.e. none of them stores another.
-        propagates = (neighbors.getnnz(axis=1) > 0) & (
-            neighbors @ (~stores_id).astype(float) == 0
-        )
-        source, target = neighbors.nonzero()
-        propagation = self._edge_matrix(
-            source[propagates[source]], target[propagates[source]], len(stores_id)
-        )
-        self._propagate_from_seeds(
-            graph_id, input_channel, seeds, propagation, object_id=received_id
-        )
-
-    def _propagate_similar_features(
-        self, graph_id, input_channel, percept: Message, mlh
-    ) -> None:
+    def _propagate(self, graph_id, input_channel, percept: Message, mlh) -> None:
         """Propagate from the MLH location through nodes with similar features.
 
-        The propagation only begins if the sensed features are predicted by the
-        MLH, i.e. they are similar to the features of one of the nodes nearest the
-        MLH location that lie within the parent LM's max_match_distance (with the
-        sensed surface normal rotated into the model's frame by the MLH
-        rotation).
-        Unlike for object IDs, stored features vary from node to node, so the
-        propagation begins from those of the nodes nearest the MLH location that
-        are similar to the nearest such node, rather than requiring all of them to
-        be. Nodes on the far side of a thin wall (see `_far_side_pairs`) are
-        ignored throughout.
+        The features compared are those the channel's graph stores (see
+        `_get_propagation_features`): the object ID on a channel receiving object
+        IDs from a lower-level LM, and the hue and surface normal on a channel
+        receiving sensory input. The propagation only begins if the received
+        features are predicted by the MLH, i.e. they are similar to the features
+        of one of the nodes nearest the MLH location that lie within the parent
+        LM's max_match_distance (with a sensed surface normal rotated into the
+        model's frame by the MLH rotation). It then begins from those of the nodes
+        nearest the MLH location that are similar to the nearest such node, and
+        continues through the nodes with features similar to their neighbors'
+        (see `_get_similar_neighbors`). Nodes on the far side of a thin wall (see
+        `_far_side_pairs`) are ignored throughout.
         """
         graph = self.parent_lm.get_graph(graph_id, input_channel=input_channel)
         features = self._get_propagation_features(graph, input_channel)
-        if not features:
+        sensed = {
+            name: value
+            for name, value in self._get_sensed_propagation_features(
+                percept, mlh["rotation"]
+            ).items()
+            if name in features
+        }
+        if not sensed:
             return
-        sensed = self._get_sensed_propagation_features(percept, mlh["rotation"])
 
         seeds, seed_distances = self._get_nodes_nearest_mlh(graph, mlh["location"])
         nearby = seeds[seed_distances <= self.parent_lm.max_match_distance]
@@ -912,11 +874,16 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             graph_id, input_channel, graph, features
         )
         self._propagate_from_seeds(
-            graph_id, input_channel, seeds, propagation, object_id=None, surface=surface
+            graph_id,
+            input_channel,
+            seeds,
+            propagation,
+            surface,
+            object_id=sensed.get("object_id"),
         )
 
     def _propagate_from_seeds(
-        self, graph_id, input_channel, seeds, propagation, object_id, surface=None
+        self, graph_id, input_channel, seeds, propagation, surface, object_id
     ) -> None:
         """Propagate from seeds through the graph, reducing the reached salience.
 
@@ -932,9 +899,9 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             propagation: The propagation matrix of the graph: a sparse
                 (num_nodes x num_nodes) matrix with an edge at (node, neighbor)
                 wherever the node propagates to the neighbor.
+            surface: The surface matrix of the graph (see
+                `_get_propagation_order`).
             object_id: The received object ID, or None for sensory input.
-            surface: For sensory input, the surface matrix of the graph (see
-                `_get_propagation_order`); None for object IDs.
         """
         order, hops, stage, predecessor, min_size = self._get_propagation_order(
             seeds, propagation, surface
@@ -999,10 +966,10 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
 
         A breadth-first search from the seeds along the edges of the propagation
         matrix: every reached node reaches the nodes it has edges to, and the
-        propagation then continues from each of them. For sensory input, whenever
-        the propagation stops having reached fewer than min_propagation_fraction
-        of the graph's nodes (e.g. on a fragment of noisy features, or a small
-        part like a mug's handle), it is pushed through: every unreached node that
+        propagation then continues from each of them. Whenever the propagation
+        stops having reached fewer than min_propagation_fraction of the graph's
+        nodes (e.g. on a fragment of noisy features, or a small part like a mug's
+        handle), it is pushed through: every unreached node that
         a reached node has an edge to in the surface matrix (i.e. on the same side
         of the surface, whether or not their features are similar) is reached, and
         the propagation continues from them, but only as many hops as it takes to
@@ -1138,15 +1105,24 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         return float(np.asarray(pose_vectors, dtype=float).reshape(-1)[0])
 
     def _get_propagation_features(self, graph, input_channel) -> dict[str, np.ndarray]:
-        """Get the features of every node of a graph that sensory propagation compares.
+        """Get the features of every node of a graph that propagation compares.
+
+        On a channel receiving object IDs from a lower-level LM, only the object
+        ID is compared: the pose vectors stored there are the orientation of the
+        child object, not a surface normal. On any other channel, the hue and the
+        surface normal are compared.
 
         Returns:
             Arrays of each compared feature the graph stores, with one row per node:
-            "hsv" (hue, saturation and value) and "normal" (the unit surface
-            normal). Hue is omitted when not compared on the channel (see
+            "object_id", or "hsv" (hue, saturation and value) and "normal" (the
+            unit surface normal, which also identifies the far side of thin walls,
+            even if its similarity is not compared; see `_get_max_normal_angle`).
+            Hue is omitted when not compared on the channel (see
             `_get_max_hue_difference`).
         """
         feature_mapping = graph.feature_mapping or {}
+        if "object_id" in feature_mapping:
+            return {"object_id": self._get_feature_values(graph, "object_id")[:, 0]}
         features = {}
         if (
             self._get_max_hue_difference(input_channel) is not None
@@ -1161,22 +1137,27 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         return features
 
     def _get_sensed_propagation_features(self, percept: Message, rotation) -> dict:
-        """Get the sensed features that sensory propagation compares.
+        """Get the received features that propagation compares.
 
         Args:
-            percept: The sensory input.
+            percept: The input: sensory features, or an object ID from a
+                lower-level LM.
             rotation: The MLH rotation, which rotates the sensed (body-frame)
                 surface normal into the model's frame.
 
         Returns:
-            The sensed features, in the format of `_get_propagation_features` (with one
-            value per feature, and the normal in the model's frame), for those the
-            percept carries. Only the features also present in the stored ones are
-            compared.
+            The received features, in the format of `_get_propagation_features`
+            (with one value per feature, and the normal in the model's frame), for
+            those the percept carries. Only the features also present in the
+            stored ones are compared (e.g. not the pose of a child object).
         """
         non_morphological = percept.non_morphological_features or {}
         morphological = percept.morphological_features or {}
         sensed = {}
+        if non_morphological.get("object_id") is not None:
+            sensed["object_id"] = int(
+                np.asarray(non_morphological["object_id"]).reshape(-1)[0]
+            )
         if non_morphological.get("hsv") is not None:
             sensed["hsv"] = np.asarray(non_morphological["hsv"], dtype=float)[:3]
         if morphological.get("pose_vectors") is not None:
@@ -1218,10 +1199,10 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     ) -> np.ndarray:
         """Check which pairs of features are similar.
 
-        Hues are similar if they differ by at most the parent LM's hue tolerance
-        for the channel (see `_get_max_hue_difference`), and surface normals if
-        they differ by at most its surface normal tolerance (see
-        `_get_max_normal_angle`).
+        Object IDs are similar only if they are the same. Hues are similar if they
+        differ by at most the parent LM's hue tolerance for the channel (see
+        `_get_max_hue_difference`), and surface normals if they differ by at most
+        its surface normal tolerance (see `_get_max_normal_angle`).
 
         Args:
             input_channel: The input channel the features were received on.
@@ -1229,11 +1210,13 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             features_b: Arrays of the features to compare them to, likewise.
 
         Returns:
-            Whether the features of each pair are similar in hue and surface
-            normal, comparing only the features present in both.
+            Whether the features of each pair are similar, comparing only the
+            features present in both.
         """
         num_pairs = len(next(iter(features_a.values()), []))
         similar = np.ones(num_pairs, dtype=bool)
+        if "object_id" in features_a and "object_id" in features_b:
+            similar &= features_a["object_id"] == features_b["object_id"]
         max_hue_difference = self._get_max_hue_difference(input_channel)
         if (
             max_hue_difference is not None
@@ -1330,7 +1313,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         Neighbors on the far side of a thin wall from a node (see
         `_far_side_pairs`) are not its neighbors here, as they are not part of the
         same surface. A node propagates to the neighbors with features similar to its
-        own if at most max_dissimilar_neighbors of its neighbors are not.
+        own (e.g. storing the same object ID) if at most max_dissimilar_neighbors
+        of its neighbors are not.
 
         Returns:
             The propagation matrix (see `_propagate_from_seeds`), with an edge from

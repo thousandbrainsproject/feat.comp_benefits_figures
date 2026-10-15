@@ -400,18 +400,15 @@ class Session:
         return current
 
     def edge_matrices(self, channel):
-        """Get the propagation and surface (or neighbor) matrices of a channel.
+        """Get the propagation and surface matrices of a channel.
 
         Returns:
             Sparse matrices with the edges a node propagates along, and the edges
-            to all of its neighbors on the same side of the surface (for an
-            object-ID channel: all of its neighbors, and None, as those
-            propagations are not pushed through), see
+            to all of its neighbors on the same side of the surface (all of its
+            neighbors, on an object-ID channel), see
             `EvidenceGoalGenerator._get_propagation_order`.
         """
         graph = self.graphs[channel]
-        if self.is_id_channel(channel):
-            return None, self.gsg._get_neighbor_matrix("primitive", channel, graph)
         features = self.gsg._get_propagation_features(graph, channel)
         return self.gsg._get_similar_neighbors("primitive", channel, graph, features)
 
@@ -430,49 +427,36 @@ class Session:
         if self.is_id_channel(channel):
             object_id = int(graph.feature("object_id")[node, 0])
             details["object ID"] = f"{self.id_name(object_id)} ({object_id})"
-            neighbors = gsg._get_neighbor_matrix("primitive", channel, graph)
-            targets = neighbors.indices[
-                neighbors.indptr[node] : neighbors.indptr[node + 1]
-            ]
-            other = graph.feature("object_id")[targets, 0] != object_id
-            details["neighbors"] = (
-                f"{len(targets)}, of which {other.sum()} store another ID"
-            )
-            details["propagates"] = (
-                "yes"
-                if len(targets) and not other.any()
-                else "no (not all neighbors store its ID)"
-                if len(targets)
-                else "no (no neighbors)"
-            )
         else:
             if "hsv" in graph.feature_mapping:
                 hsv = graph.feature("hsv")[node]
                 details["hue"] = f"{hsv[0]:.3f} (s {hsv[1]:.2f}, v {hsv[2]:.2f})"
             normal = graph.normals[node]
             details["normal"] = "(" + ", ".join(f"{c:+.2f}" for c in normal) + ")"
-            features = gsg._get_propagation_features(graph, channel)
-            all_neighbors = gsg._get_neighbor_matrix("primitive", channel, graph)
-            targets = all_neighbors.indices[
-                all_neighbors.indptr[node] : all_neighbors.indptr[node + 1]
-            ]
-            reference = {name: values[node] for name, values in features.items()}
-            far = gsg._far_side(features, targets, reference)
-            similar = gsg._similar_features(channel, features, targets[~far], reference)
-            num_dissimilar = int((~similar).sum())
-            details["neighbors"] = (
-                f"{len(targets)}: {far.sum()} on the far side (ignored), "
-                f"{similar.sum()} similar, {num_dissimilar} dissimilar"
+        features = gsg._get_propagation_features(graph, channel)
+        all_neighbors = gsg._get_neighbor_matrix("primitive", channel, graph)
+        targets = all_neighbors.indices[
+            all_neighbors.indptr[node] : all_neighbors.indptr[node + 1]
+        ]
+        reference = {name: values[node] for name, values in features.items()}
+        far = gsg._far_side(features, targets, reference)
+        similar = gsg._similar_features(channel, features, targets[~far], reference)
+        num_dissimilar = int((~similar).sum())
+        details["neighbors"] = (
+            f"{len(targets)}: "
+            + (f"{far.sum()} on the far side (ignored), " if far.any() else "")
+            + f"{similar.sum()} similar, {num_dissimilar} dissimilar"
+            + (" (storing another ID)" if self.is_id_channel(channel) else "")
+        )
+        if len(targets) == far.sum():
+            details["propagates"] = "no (no neighbors on this side of the surface)"
+        elif num_dissimilar > gsg.max_dissimilar_neighbors:
+            details["propagates"] = (
+                f"no ({num_dissimilar} > max_dissimilar_neighbors="
+                f"{gsg.max_dissimilar_neighbors})"
             )
-            if len(targets) == far.sum():
-                details["propagates"] = "no (no neighbors on this side of the surface)"
-            elif num_dissimilar > gsg.max_dissimilar_neighbors:
-                details["propagates"] = (
-                    f"no ({num_dissimilar} > max_dissimilar_neighbors="
-                    f"{gsg.max_dissimilar_neighbors})"
-                )
-            else:
-                details["propagates"] = f"yes, to its {similar.sum()} similar neighbors"
+        else:
+            details["propagates"] = f"yes, to its {similar.sum()} similar neighbors"
         salience = float(self.salience(channel)[node])
         if salience >= 1:
             details["salience"] = "1.00 (full)"
@@ -580,20 +564,13 @@ class Session:
                 f"no node within max_match_distance ({self.lm.max_match_distance} m) "
                 f"of the sensed location (nearest: {distances.min():.3f} m)"
             )
-        if self.is_id_channel(channel):
-            received = int(percept.non_morphological_features["object_id"][0])
-            stored = graph.feature("object_id")[seeds, 0].astype(int)
-            if not np.any(stored[nearby] == received):
-                return "the received ID is not stored by any nearby node"
-            others = sorted({self.id_name(i) for i in stored if i != received})
-            return (
-                f"not all of the {len(seeds)} nearest nodes store the received ID "
-                f"(some store {', '.join(map(str, others))})"
-            )
         features = gsg._get_propagation_features(graph, channel)
         sensed = gsg._get_sensed_propagation_features(percept, self.lm.mlh["rotation"])
-        if not features:
-            return "the channel stores no features to compare"
+        sensed = {name: value for name, value in sensed.items() if name in features}
+        if not sensed:
+            return "the channel stores none of the received features to compare"
         if not gsg._similar_features(channel, features, seeds[nearby], sensed).any():
+            if self.is_id_channel(channel):
+                return "the received ID is not stored by any nearby node"
             return "the sensed features are not similar to any nearby node's"
         return "no seeds (all nearest nodes are on the far side of the surface)"
