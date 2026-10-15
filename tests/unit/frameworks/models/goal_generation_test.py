@@ -914,6 +914,35 @@ def plane_points(origin, u, v, nu, nv):
     )
 
 
+def banded_grid(rng, band_width=2, jitter=0.2):
+    """A 30 x 12 grid of points, crossed by a band, jittered like a learned model.
+
+    Args:
+        rng: The random number generator jittering the points.
+        band_width: The width of the band, in nodes.
+        jitter: The standard deviation of the jitter, in node spacings.
+
+    Returns:
+        The points, whether each is in the band (from column 15), and whether
+        each is beyond it.
+    """
+    points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 30, 12)
+    column = np.round(points[:, 0] / SURFACE_SPACING).astype(int)
+    points[:, :2] += rng.normal(0, jitter * SURFACE_SPACING, (len(points), 2))
+    band = (column >= 15) & (column < 15 + band_width)
+    return points, band, column >= 15 + band_width
+
+
+def near_node(points, x, y) -> int:
+    """Get the node nearest a location, in node spacings on the xy plane.
+
+    Returns:
+        The node.
+    """
+    location = np.array([x, y, 0.0]) * SURFACE_SPACING
+    return int(np.argmin(np.linalg.norm(points - location, axis=1)))
+
+
 def surface_graph(positions, normals, hues=None, saturations=None):
     """A sensor-channel graph storing hue and surface normals.
 
@@ -1206,6 +1235,55 @@ class SensoryFeaturePropagationTest(unittest.TestCase):
         self.assertFalse(np.any(reached[noisy]), "The noisy nodes are not reached.")
         self.assertTrue(np.all(np.delete(reached, noisy)))
 
+    def test_islands_of_other_features_are_left_as_holes(self) -> None:
+        # A plane with a large island of another hue, a large island of tilted
+        # normals, and a small island of another hue (4 nodes, fewer than
+        # min_propagation_fraction of the 660 nodes).
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 30, 22)
+        x, y = np.round(points[:, :2] / SURFACE_SPACING).astype(int).T
+        # Square islands (7 x 7 nodes), as a node protruding from an island (e.g.
+        # the tip of a disc on a grid) may be left unreached: most of its
+        # neighbors are outside the island, and its neighbors in the island
+        # have too many neighbors outside it to propagate.
+        hue_island = (np.abs(x - 7) <= 3) & (np.abs(y - 11) <= 3)
+        tilted_island = (np.abs(x - 21) <= 3) & (np.abs(y - 11) <= 3)
+        small_island = (x >= 14) & (x < 16) & (y >= 2) & (y < 4)
+        tilt = np.radians(60)
+        normals = np.where(
+            tilted_island[:, None], [np.sin(tilt), 0.0, np.cos(tilt)], [0.0, 0.0, 1.0]
+        )
+        hues = np.where(hue_island | small_island, 0.5, 0.0)
+        self.graph = surface_graph(points, normals, hues=hues)
+        surface = ~(hue_island | tilted_island | small_island)
+
+        nptest.assert_array_equal(
+            self.propagate_from(int(np.flatnonzero((x == 14) & (y == 18))[0])),
+            surface,
+            "The propagation goes around the islands, leaving them as holes, and "
+            "is not pushed through to the small one, having reached enough nodes.",
+        )
+        nptest.assert_array_equal(
+            self.propagate_from(int(np.flatnonzero((x == 7) & (y == 11))[0])),
+            hue_island,
+            "The island is larger than min_propagation_fraction of the nodes.",
+        )
+        nptest.assert_array_equal(
+            self.propagate_from(int(np.flatnonzero((x == 21) & (y == 11))[0])),
+            tilted_island,
+        )
+
+    def test_propagation_never_jumps_a_band_of_another_hue(self) -> None:
+        # Two regions of the same hue, separated by a band of another hue two
+        # nodes wide, on grids jittered like learned models (a band one node wide
+        # can be jumped, as a node's nearest neighbors then reach across it).
+        for seed in range(5):
+            points, band, far = banded_grid(np.random.default_rng(seed))
+            self.graph = surface_graph(points, [0, 0, 1], hues=np.where(band, 0.5, 0.0))
+
+            reached = self.propagate_from(near_node(points, 4, 6))
+
+            nptest.assert_array_equal(reached, ~(band | far), err_msg=f"seed {seed}")
+
     def test_propagation_that_stops_too_soon_is_pushed_through(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 30, 22)
         x, y = np.round(points[:, :2] / SURFACE_SPACING).astype(int).T
@@ -1316,6 +1394,161 @@ class SensoryFeaturePropagationTest(unittest.TestCase):
         self.assertEqual(record.input_channel, SENSOR_CHANNEL)
         self.assertIsNone(record.object_id)
         nptest.assert_array_equal(np.sort(record.node_order), np.arange(100))
+
+
+SQUARE_ID = 1
+CIRCLE_ID = 2
+LOGO_A_ID = 10
+
+
+def id_graph(positions, object_ids):
+    """An object-ID channel graph, storing the orientation of each child object.
+
+    Returns:
+        The graph.
+    """
+    rng = np.random.default_rng(0)
+    poses = Rotation.random(len(positions), random_state=rng).as_matrix()
+    return FakeGraph(
+        positions, {"object_id": object_ids, "pose_vectors": poses.reshape(-1, 9)}
+    )
+
+
+class ObjectIdPropagationTest(unittest.TestCase):
+    """Propagation of object IDs on 2D surfaces, with one or two ID channels."""
+
+    def setUp(self) -> None:
+        self.graphs: dict[str, FakeGraph] = {}
+        self.mlh = None
+        lm = MagicMock()
+        lm.learning_module_id = "learning_module_2"
+        lm.max_match_distance = 0.01
+        lm.get_all_known_object_ids.side_effect = lambda: [TOP_ID]
+        lm._get_current_mlh.side_effect = lambda: self.mlh
+        lm.hypotheses_updater = hypotheses_updater(
+            {TOP_ID: slope_tracker(ESTABLISHED_AGE)}
+        )
+        lm.get_graph.side_effect = lambda _graph_id, input_channel=None: (
+            self.graphs if input_channel is None else self.graphs[input_channel]
+        )
+        lm.get_input_channels_in_graph.side_effect = lambda _graph_id: list(self.graphs)
+        self.gsg = EvidenceGoalGenerator()
+        self.gsg.parent_lm = lm
+        lm.tolerances = add_pose_features_to_tolerances(
+            {channel: {} for channel in ("learning_module_0", "learning_module_1")}
+        )
+
+    def propagate_at(self, location, received_ids) -> dict[str, np.ndarray]:
+        """Receive object IDs with the MLH at a location, from full salience.
+
+        Args:
+            location: The MLH location.
+            received_ids: The ID each channel receives.
+
+        Returns:
+            For each channel, whether each node was reached (its salience reduced).
+        """
+        self.mlh = {
+            "graph_id": TOP_ID,
+            "mlh_id": 0,
+            "location": np.asarray(location, dtype=float),
+            "rotation": Rotation.identity(),
+        }
+        self.gsg.reset()
+        self.gsg._propagate_from_observations(
+            [
+                lm_percept(channel, object_id)
+                for channel, object_id in received_ids.items()
+            ]
+        )
+        return {
+            channel: self.gsg.get_salience(TOP_ID, channel) < 1
+            for channel in self.graphs
+        }
+
+    def test_each_channel_propagates_the_id_it_receives(self) -> None:
+        # A surface storing "square" on one channel, and a logo island storing
+        # "logo_A" on the other, which only has nodes on the island.
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 30, 20)
+        island = np.hypot(*(points[:, :2] / SURFACE_SPACING - [20, 10]).T) <= 6
+        self.graphs = {
+            "learning_module_0": id_graph(points, np.full(len(points), SQUARE_ID)),
+            "learning_module_1": id_graph(
+                points[island], np.full(island.sum(), LOGO_A_ID)
+            ),
+        }
+        received = {"learning_module_0": SQUARE_ID, "learning_module_1": LOGO_A_ID}
+
+        reached = self.propagate_at(points[near_node(points, 20, 10)], received)
+
+        self.assertTrue(np.all(reached["learning_module_0"]))
+        self.assertTrue(np.all(reached["learning_module_1"]))
+        self.assertEqual(
+            {(r.input_channel, r.object_id) for r in self.gsg.propagation_records},
+            set(received.items()),
+        )
+
+        reached = self.propagate_at(points[near_node(points, 3, 10)], received)
+        self.assertTrue(np.all(reached["learning_module_0"]))
+        self.assertFalse(
+            np.any(reached["learning_module_1"]),
+            "No node of the logo channel is within max_match_distance of the "
+            "sensed location, so its ID is not predicted there.",
+        )
+
+    def test_noisy_ids_neither_stop_propagation_nor_are_reached(self) -> None:
+        # One node in 25 stores "circle" instead of "square", including the node
+        # at the MLH location.
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 30, 20)
+        x, y = np.round(points[:, :2] / SURFACE_SPACING).astype(int).T
+        noisy = (x % 5 == 2) & (y % 5 == 2)
+        self.graphs = {
+            "learning_module_0": id_graph(points, np.where(noisy, CIRCLE_ID, SQUARE_ID))
+        }
+        self.gsg.min_propagation_fraction = None
+
+        reached = self.propagate_at(
+            points[near_node(points, 12, 7)], {"learning_module_0": SQUARE_ID}
+        )
+
+        nptest.assert_array_equal(reached["learning_module_0"], ~noisy)
+
+    def test_propagation_never_jumps_a_band_of_another_id(self) -> None:
+        # Two regions of "square", separated by a band of "circle" two nodes wide,
+        # on grids jittered like learned models (a band one node wide can be
+        # jumped, as a node's nearest neighbors then reach across it).
+        for seed in range(5):
+            points, band, far = banded_grid(np.random.default_rng(seed))
+            self.graphs = {
+                "learning_module_0": id_graph(
+                    points, np.where(band, CIRCLE_ID, SQUARE_ID)
+                )
+            }
+
+            reached = self.propagate_at(
+                points[near_node(points, 4, 6)], {"learning_module_0": SQUARE_ID}
+            )["learning_module_0"]
+            nptest.assert_array_equal(reached, ~(band | far), err_msg=f"seed {seed}")
+
+    def test_propagation_covers_a_band_of_the_received_id(self) -> None:
+        # A band of "circle" four nodes wide (48 nodes, more than
+        # min_propagation_fraction of them). Narrower bands are not reliably
+        # covered on jittered grids, as too many of their nodes have too many
+        # neighbors outside them to propagate along them (all of them, two nodes
+        # wide).
+        for seed in range(5):
+            points, band, _ = banded_grid(np.random.default_rng(seed), band_width=4)
+            self.graphs = {
+                "learning_module_0": id_graph(
+                    points, np.where(band, CIRCLE_ID, SQUARE_ID)
+                )
+            }
+
+            reached = self.propagate_at(
+                points[near_node(points, 16.5, 6)], {"learning_module_0": CIRCLE_ID}
+            )["learning_module_0"]
+
+            nptest.assert_array_equal(reached, band, err_msg=f"seed {seed}")
 
 
 if __name__ == "__main__":
