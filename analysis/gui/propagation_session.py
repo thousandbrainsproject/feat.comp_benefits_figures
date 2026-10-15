@@ -233,9 +233,10 @@ class Session:
         if not changed:
             return
         self.parameters.update(changed)
-        salience = self.gsg._salience
+        salience = self.gsg.model_salience
         self.gsg = self._make_gsg()
-        self.gsg._salience = salience
+        salience.recovery_steps = self.gsg.model_salience.recovery_steps
+        self.gsg.model_salience = salience
         self.log.append(
             "Parameters: "
             + ", ".join(f"{name}={value}" for name, value in changed.items())
@@ -295,7 +296,7 @@ class Session:
 
     def reset_salience(self) -> None:
         """Restore every node's salience to 1 and forget the last sensing."""
-        self.gsg._salience = {}
+        self.gsg.model_salience.reset()
         self.sensing = None
         self.log.append(f"Step {self.step}: salience reset")
 
@@ -304,7 +305,7 @@ class Session:
         for _ in range(num_steps):
             self.step += 1
             self._age_mlh(1)
-            self.gsg._recover_salience()
+            self.gsg.model_salience.recover(mlh_graph_id="primitive")
         self.log.append(
             f"Step {self.step}: salience recovered"
             + (f" ({num_steps} steps)" if num_steps > 1 else "")
@@ -384,7 +385,7 @@ class Session:
             The salience of each node (a copy).
         """
         num_nodes = len(self.graphs[channel].pos)
-        current = self.gsg._get_salience("primitive", channel, num_nodes).copy()
+        current = self.gsg.model_salience.get("primitive", channel, num_nodes).copy()
         record = None if self.sensing is None else self.sensing.records.get(channel)
         if progress is None or record is None or progress >= len(record.node_order):
             return current
@@ -395,7 +396,10 @@ class Session:
         if len(before) != num_nodes:
             return current
         pending = record.node_order[progress:]
-        recovered = (self.step - self.sensing.step) / self.gsg.salience_recovery_steps
+        recovery_steps = self.gsg.model_salience.recovery_steps
+        recovered = (
+            (self.step - self.sensing.step) / recovery_steps if recovery_steps else 0.0
+        )
         current[pending] = np.minimum(before[pending] + recovered, 1.0)
         return current
 
@@ -461,11 +465,14 @@ class Session:
         if salience >= 1:
             details["salience"] = "1.00 (full)"
         else:
-            remaining = int(np.ceil((1 - salience) * gsg.salience_recovery_steps))
+            recovery_steps = gsg.model_salience.recovery_steps
+            remaining = int(np.ceil((1 - salience) * recovery_steps))
             details["salience"] = f"{salience:.2f}" + (
                 " (never sampled)" if salience <= 0 else ""
             )
-            details["recovery"] = f"back to 1 in {remaining} step(s)"
+            details["recovery"] = (
+                f"back to 1 in {remaining} step(s)" if recovery_steps else "never"
+            )
         if self.sensing is not None and channel in self.sensing.records:
             record = self.sensing.records[channel]
             position = np.flatnonzero(record.node_order == node)

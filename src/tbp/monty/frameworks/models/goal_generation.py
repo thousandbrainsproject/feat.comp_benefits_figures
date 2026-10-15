@@ -23,6 +23,7 @@ from tbp.monty.context import RuntimeContext
 from tbp.monty.frameworks.models.abstract_monty_classes import (
     GoalGenerator,
 )
+from tbp.monty.frameworks.models.model_salience import ModelSalience
 from tbp.monty.frameworks.utils.communication_utils import get_percept_from_channel
 
 if TYPE_CHECKING:
@@ -544,11 +545,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     (allowing for noisy neighbors, which it does not propagate to).
     A propagation therefore covers a contiguous region, including outlying nodes,
     without jumping to disjoint regions (e.g. separate wheels on a car).
-    Salience is tracked separately for the graph of each channel, so a location
-    explained in one channel's graph can still be tested in another's. Salience
-    recovers linearly to 1 over `salience_recovery_steps` steps, except on the
-    steps on which a propagation reaches the node, so that a part visited
-    repeatedly (with the input explaining it each time) is driven to 0.
 
     Input only propagates once the MLH estbalishes credibility: when the parent LM's
     hypotheses updater deletes hypotheses (e.g. `BurstSamplingHypothesesUpdater`,
@@ -559,23 +555,17 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     of its object (salience still recovers). With an updater that never deletes
     hypotheses, input always propagates.
 
-    Salience is kept per object (graph ID) for the whole episode, and is only
-    cleared by `reset` (at the start of each episode), or through natural drift.
-    A change of the MLH object or rotation does not reset it; it only prompts a new
-    Goal (see `_check_need_new_output_goal`):
-    - Only the MLH's salience is reduced (by propagation) and sampled from, but
-      the salience of every object recovers on every step. If the MLH switches to
-      another object and back, the first object's explained parts are
-      remembered, less the recovery of the steps in between. An object that is
-      not the MLH stops being tracked once its salience has fully recovered.
-    - Salience is indexed by node, i.e. in the object's reference frame, so it
-      remains valid when the MLH rotation changes. However, the nodes past
-      propagations reached were found using the MLH pose at the time (the seeds
-      nearest the MLH location, and sensed surface normals rotated by the MLH
-      rotation); if that pose was wrong, the wrong nodes were reduced, and they
-      are not restored until they recover.
-    - If a non-MLH object's salience drifts to 1.0 for all nodes, then it is no longer
-      tracked. In this sense, salience can be reset even without episode boundaries.
+    The salience of the nodes is kept in a `ModelSalience` (`model_salience`),
+    which documents how it recovers (over `salience_recovery_steps` steps, except
+    on the steps a node's salience is reduced), and how long it is kept: per
+    object, for the whole episode, including while the MLH is another object. A
+    change of the MLH object or rotation does not reset it; it only prompts a new
+    Goal (see `_check_need_new_output_goal`). As salience is indexed by node, in
+    the object's reference frame, it remains valid when the MLH rotation changes;
+    however, the nodes past propagations reached were found using the MLH pose at
+    the time (the seeds nearest the MLH location, and sensed surface normals
+    rotated by the MLH rotation), so if that pose was wrong, the wrong nodes were
+    reduced, and they are not restored until they recover.
     """
 
     def __init__(
@@ -638,8 +628,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 salience_reduction_falloff). 0 reduces every reached node by the
                 same amount, wherever it is relative to the first node. Defaults to 0.5.
             salience_recovery_steps: Number of steps over which the salience of a
-                node linearly recovers from 0 to 1. 0 to not recover salience. Defaults
-                to 50 steps.
+                node linearly recovers from 0 to 1 (see `ModelSalience`). 0 to not
+                recover salience. Defaults to 50 steps.
             **kwargs: Additional keyword arguments.
 
         Raises:
@@ -653,7 +643,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         self.min_propagation_fraction = min_propagation_fraction
         self.salience_reduction = salience_reduction
         self.salience_reduction_falloff = salience_reduction_falloff
-        self.salience_recovery_steps = salience_recovery_steps
+        self.model_salience = ModelSalience(salience_recovery_steps)
 
         if num_propagation_neighbors <= 0:
             raise ValueError("num_propagation_neighbors must be positive")
@@ -667,16 +657,13 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             raise ValueError("salience_reduction must be in [0, 1]")
         if salience_reduction_falloff > 1 or salience_reduction_falloff < 0:
             raise ValueError("salience_reduction_falloff must be in [0, 1]")
-        if salience_recovery_steps < 0:
-            raise ValueError("salience_recovery_steps must be positive or 0")
 
     # ======================= Public ==========================
 
     def reset(self):
         """Reset the salience of all nodes, and the MLH at the last Goal."""
         super().reset()
-        # The salience (in [0, 1]) of each node, keyed by (graph_id, input_channel).
-        self._salience: dict[tuple[str, str], np.ndarray] = {}
+        self.model_salience.reset()
         # Keyed by (graph_id, input_channel, number of nodes).
         self._neighbor_cache: dict[tuple[str, str, int], csr_matrix] = {}
         # For propagating sensory input (see `_get_similar_neighbors`), keyed by
@@ -707,7 +694,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             relative to the others (never, at 0).
         """
         num_nodes = len(self.parent_lm.get_graph(graph_id, input_channel).pos)
-        return self._get_salience(graph_id, input_channel, num_nodes)
+        return self.model_salience.get(graph_id, input_channel, num_nodes)
 
     # ======================= Private ==========================
 
@@ -726,8 +713,9 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         for record in self.propagation_records:
             key = (record.graph_id, record.input_channel)
             reached.setdefault(key, []).append(record.node_order)
-        self._recover_salience(
-            {key: np.concatenate(nodes) for key, nodes in reached.items()}
+        self.model_salience.recover(
+            except_nodes={key: np.concatenate(nodes) for key, nodes in reached.items()},
+            mlh_graph_id=self._get_mlh_graph_id(),
         )
 
     def _generate_goal(self, ctx: RuntimeContext, observations) -> Goal | None:
@@ -787,7 +775,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             for channel in channels
         ]
         salience = [
-            self._get_salience(graph_id, channel, len(graph.pos))
+            self.model_salience.get(graph_id, channel, len(graph.pos))
             for channel, graph in zip(channels, graphs)
         ]
         weights = np.concatenate(salience) if salience else np.empty(0)
@@ -906,12 +894,10 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         order, hops, stage, predecessor, min_size = self._get_propagation_order(
             seeds, propagation, surface
         )
-        salience = self._get_salience(graph_id, input_channel, propagation.shape[0])
         reduction = self._salience_reductions(len(order))
-        reduced = salience[order] - reduction
-        # Snap to 0 what repeated reductions leave as floating-point residue, so
-        # that fully explained nodes are never sampled.
-        salience[order] = np.where(reduced > 1e-9, reduced, 0.0)
+        self.model_salience.reduce(
+            graph_id, input_channel, propagation.shape[0], order, reduction
+        )
         self.propagation_records.append(
             PropagationRecord(
                 graph_id=graph_id,
@@ -1400,37 +1386,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             self._neighbor_cache[key] = neighbors
         return self._neighbor_cache[key]
 
-    def _recover_salience(self, except_nodes=None) -> None:
-        """Recover the salience of every node by one step, towards 1.
-
-        Every tracked graph recovers, whether or not it is the MLH. Once all of
-        the nodes of a graph that is not the MLH are back at 1, the graph is no
-        longer tracked: its salience is the same as that of a graph never
-        reduced, and is recreated (at 1) if it becomes the MLH again. If
-        salience_recovery_steps is 0, salience does not recover.
-
-        Args:
-            except_nodes: For each (graph_id, input_channel) key, the nodes whose
-                salience does not recover on this step (those a propagation
-                reached). None for every node to recover.
-        """
-        if self.salience_recovery_steps:
-            recovery = 1.0 / self.salience_recovery_steps
-            for key, salience in self._salience.items():
-                recovers = np.ones(len(salience), dtype=bool)
-                if except_nodes and key in except_nodes:
-                    recovers[except_nodes[key]] = False
-                salience[recovers] = np.minimum(salience[recovers] + recovery, 1.0)
-
-        mlh_graph_id = self._get_mlh_graph_id()
-        recovered = [
-            key
-            for key, salience in self._salience.items()
-            if key[0] != mlh_graph_id and np.all(salience >= 1.0)
-        ]
-        for key in recovered:
-            del self._salience[key]
-
     def _check_need_new_output_goal(
         self,
         ctx: RuntimeContext,  # noqa: ARG002
@@ -1531,19 +1486,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             if graph.feature_mapping and "object_id" in graph.feature_mapping:
                 channels.append(channel)
         return channels
-
-    def _get_salience(self, graph_id, input_channel, num_nodes) -> np.ndarray:
-        """Get the salience of each node of a graph (1 until reduced).
-
-        Returns:
-            Array (stored, so modifiable in place) with one entry per node.
-        """
-        key = (graph_id, input_channel)
-        salience = self._salience.get(key)
-        if salience is None or len(salience) != num_nodes:
-            salience = np.ones(num_nodes, dtype=float)
-            self._salience[key] = salience
-        return salience
 
     # ------------- Goals for a target location on the MLH -------------
 

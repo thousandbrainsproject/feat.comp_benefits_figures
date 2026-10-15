@@ -373,7 +373,7 @@ class Propagator:
             "rotation": Rotation.identity(),
         }
         # Only the salience is reset, keeping the cached neighbors.
-        self.gsg._salience = {}
+        self.gsg.model_salience.reset()
         self.gsg.propagation_records = []
         self.gsg._propagate_from_observations(percepts)
         reached_nodes, order = [], []

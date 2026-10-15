@@ -335,7 +335,7 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             The salience array.
         """
         num_nodes = len(self.graphs[TOP_ID][channel].pos)
-        return self.gsg._get_salience(TOP_ID, channel, num_nodes)
+        return self.gsg.model_salience.get(TOP_ID, channel, num_nodes)
 
     def set_steps_since_goal(self, steps) -> None:
         buffer = self.gsg.parent_lm.buffer
@@ -638,21 +638,8 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         nptest.assert_allclose(self.car_salience(), 0.52)
 
     # ------------------------- Salience dynamics -------------------------
-
-    def test_salience_recovers_linearly_to_one(self) -> None:
-        self.gsg.salience_reduction_falloff = 0.0
-        self.gsg._propagate_from_observations(
-            [lm_percept("learning_module_0", WHEEL_ID)]
-        )
-        self.assertAlmostEqual(self.car_salience()[0], 0.8)
-
-        for _ in range(5):
-            self.gsg._recover_salience()
-        self.assertAlmostEqual(self.car_salience()[0], 0.9)
-
-        for _ in range(10):
-            self.gsg._recover_salience()
-        self.assertEqual(self.car_salience()[0], 1.0, "Salience is capped at 1.")
+    # How salience recovers is tested with ModelSalience; these test how the
+    # GSG's propagation and recovery combine on each step.
 
     def test_reached_nodes_do_not_recover_on_the_step_they_are_reached(
         self,
@@ -693,16 +680,18 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         self.mlh = {**self.mlh, "graph_id": "other_object"}
 
         for _ in range(9):
-            self.gsg._recover_salience()
-        self.assertIn((TOP_ID, "learning_module_0"), self.gsg._salience)
+            self.gsg._update_salience([])
+        self.assertIn((TOP_ID, "learning_module_0"), self.gsg.model_salience.tracked())
         nptest.assert_allclose(
-            self.gsg._salience[(TOP_ID, "learning_module_0")][:10],
+            self.salience("learning_module_0")[:10],
             0.98,
             err_msg="Not the MLH, but still recovering.",
         )
 
-        self.gsg._recover_salience()
-        self.assertNotIn((TOP_ID, "learning_module_0"), self.gsg._salience)
+        self.gsg._update_salience([])
+        self.assertNotIn(
+            (TOP_ID, "learning_module_0"), self.gsg.model_salience.tracked()
+        )
 
         self.mlh = self.mlh_at_node(4)
         self.assertTrue(
@@ -715,9 +704,9 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         )
 
         for _ in range(50):
-            self.gsg._recover_salience()
+            self.gsg._update_salience([])
 
-        self.assertIn((TOP_ID, "learning_module_0"), self.gsg._salience)
+        self.assertIn((TOP_ID, "learning_module_0"), self.gsg.model_salience.tracked())
         self.assertTrue(np.all(self.car_salience() == 1))
 
     def test_reset_restores_full_salience(self) -> None:
