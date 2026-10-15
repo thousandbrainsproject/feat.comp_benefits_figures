@@ -660,6 +660,17 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         self.min_hue_saturation = min_hue_saturation
         self.min_hue_value = min_hue_value
 
+        if salience_reduction_falloff > 1 or salience_reduction_falloff < 0:
+            raise ValueError("salience_reduction_falloff must be in [0, 1]")
+        if salience_reduction > 1 or salience_reduction < 0:
+            raise ValueError("salience_reduction must be in [0, 1]")
+        if salience_recovery_steps < 0:
+            raise ValueError("salience_recovery_steps must be positive or 0")
+        if num_propagation_neighbors <= 0:
+            raise ValueError("num_propagation_neighbors must be positive")
+        if num_feature_propagation_neighbors <= 0:
+            raise ValueError("num_feature_propagation_neighbors must be positive")
+
     # ======================= Public ==========================
 
     def reset(self):
@@ -1318,7 +1329,13 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             except_nodes: For each (graph_id, input_channel) key, the nodes whose
                 salience does not recover on this step (those a propagation
                 reached). None for every node to recover.
+
+        If salience_recovery_steps is 0, does nothing.
         """
+
+        if self.salience_recovery_steps == 0:
+            return
+
         recovery = 1.0 / self.salience_recovery_steps
         for key, salience in self._salience.items():
             recovers = np.ones(len(salience), dtype=bool)
