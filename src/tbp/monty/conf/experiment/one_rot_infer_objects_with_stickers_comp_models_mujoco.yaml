@@ -53,8 +53,8 @@ experiment:
           gsg:
             _target_: tbp.monty.frameworks.models.goal_generation.EvidenceGoalGenerator
             min_post_goal_success_steps: 5
-            num_spread_neighbors: 6
-            inhibition_decay_steps: 50
+            num_propagation_neighbors: 6
+            salience_recovery_steps: 50
       sensor_modules:
         sensor_module_0:
           # Random rotations often leave the sticker at a steep angle, where the

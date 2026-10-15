@@ -6,20 +6,20 @@
 # Use of this source code is governed by the MIT
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
-"""Synthetic object models ("primitives") that exercise inhibition spreading.
+"""Synthetic object models ("primitives") that exercise salience propagation.
 
 Each condition is a set of graphs, one per input channel, in the format the
 `EvidenceGoalGenerator` reads from a learning module's graph memory: node
 positions, a feature matrix and a `feature_mapping` from feature name to its
 columns. All conditions share the same slightly curved base surface, so that
-their spreads are comparable:
+their propagations are comparable:
 
 1. `uniform`: the base surface, with a uniform hue.
 2. `islands`: with islands of a different hue, of abruptly tilted surface
    normals, and a smooth bump (whose normals change gradually).
 3. `small_islands`: as above, with islands too small to reach
-   `min_spread_fraction` of the nodes, so that a spread from inside one is pushed
-   through.
+   `min_propagation_fraction` of the nodes, so that a propagation from inside
+   one is pushed through.
 4. `two_sided`: as above, with a far side (inverted normals 1 mm beneath the
    surface) alongside part of the surface, like the inside of a thin wall.
 5. `object_ids`: the uniform surface, with two object-ID channels from lower-level
@@ -30,7 +30,7 @@ their spreads are comparable:
    separate bands of "square" and "logo_A".
 
 Nodes carry small feature noise (as learned models do), and are jittered off the
-regular grid, so that nearest-neighbor ties do not shape the spreads.
+regular grid, so that nearest-neighbor ties do not shape the propagations.
 """
 
 from __future__ import annotations
@@ -103,7 +103,7 @@ class Condition:
         graphs: The graph of each input channel.
         labels: For each channel, the region each node belongs to (e.g. "surface",
             "hue island", "far side"), for hover text and the legend.
-        landmarks: Named 3D locations worth seeding a spread from.
+        landmarks: Named 3D locations worth seeding a propagation from.
         id_names: The name of each object ID the object-ID channels store.
     """
 
@@ -319,8 +319,9 @@ def build_condition(key: str, seed: int = 0) -> Condition:
             key,
             "1. Curved surface, uniform hue",
             "A slightly curved surface whose hue is uniform (up to noise) and whose "
-            "normals change gradually. A spread from anywhere should cover the whole "
-            "surface: neighboring normals differ by far less than max_normal_angle.",
+            "normals change gradually. A propagation from anywhere should cover the "
+            "whole surface: neighboring normals differ by far less than "
+            "max_normal_angle.",
             {SENSOR_CHANNEL: graph},
             {SENSOR_CHANNEL: labels},
             _landmarks(surface, {}),
@@ -338,10 +339,11 @@ def build_condition(key: str, seed: int = 0) -> Condition:
                 key,
                 "2. Islands of different hue / normals",
                 "Three islands: one of a different hue, one of abruptly tilted "
-                "normals, and a smooth bump whose normals change gradually. A spread "
-                "from the surface stops at the first two (leaving them as holes) but "
-                "flows over the bump; a spread from inside an island covers only the "
-                "island, as it is larger than min_spread_fraction of the nodes.",
+                "normals, and a smooth bump whose normals change gradually. A "
+                "propagation from the surface stops at the first two (leaving them "
+                "as holes) but flows over the bump; a propagation from inside an "
+                "island covers only the island, as it is larger than "
+                "min_propagation_fraction of the nodes.",
                 {SENSOR_CHANNEL: graph},
                 {SENSOR_CHANNEL: labels},
                 _landmarks(surface, island_points),
@@ -356,11 +358,12 @@ def build_condition(key: str, seed: int = 0) -> Condition:
             return Condition(
                 key,
                 "3. With small islands (push-through)",
-                "Adds four islands of ~8 nodes each, fewer than min_spread_fraction of "
-                "the graph. A spread seeded inside one stops at its edge, then is "
-                "pushed through onto the surrounding surface until it has reached "
-                "min_spread_fraction of the nodes (orange/red). A spread from the "
-                "surface leaves the small islands as uninhibited holes.",
+                "Adds four islands of ~8 nodes each, fewer than "
+                "min_propagation_fraction of the graph. A propagation seeded inside "
+                "one stops at its edge, then is pushed through onto the surrounding "
+                "surface until it has reached min_propagation_fraction of the nodes "
+                "(orange/red). A propagation from the surface leaves the small "
+                "islands as unreached holes, which keep their salience.",
                 {SENSOR_CHANNEL: graph},
                 {SENSOR_CHANNEL: labels},
                 _landmarks(surface, island_points),
@@ -377,8 +380,8 @@ def build_condition(key: str, seed: int = 0) -> Condition:
             "The right part of the surface has a second side 1 mm beneath it, with "
             "inverted normals, like the inside of a thin wall. Far-side nodes are "
             "among the nearest neighbors of the surface's nodes, but neither stop a "
-            "spread (they are not counted as dissimilar neighbors) nor receive it, "
-            "and a spread is not pushed through to them either.",
+            "propagation (they are not counted as dissimilar neighbors) nor "
+            "receive it, and a propagation is not pushed through to them either.",
             {SENSOR_CHANNEL: graph},
             {SENSOR_CHANNEL: labels},
             landmarks,
@@ -419,23 +422,24 @@ def build_condition(key: str, seed: int = 0) -> Condition:
                 'lower-level LMs: learning_module_0 stores "square" at every node, '
                 "and learning_module_1 only has nodes on an island, storing "
                 '"logo_A". Sensing a location sends each channel the ID stored at '
-                "its nearest node, which spreads through the nodes storing that ID "
-                "(all of a node's neighbors must store it for it to spread). Switch "
-                "the displayed channel to see each spread.",
+                "its nearest node, which propagates through the nodes storing that ID "
+                "(all of a node's neighbors must store it for it to propagate). "
+                "Switch the displayed channel to see each propagation.",
             ),
             "noisy_ids": (
                 "6. With noisy object IDs",
                 '3% of learning_module_0\'s nodes store "circle" and 5% of '
                 'learning_module_1\'s store "logo_B", at random. As a node only '
-                "spreads if all of its neighbors store the received ID, each noisy "
-                "node stops its whole neighborhood from spreading, fragmenting the "
-                "spread (and a noisy node among the seeds prevents it entirely).",
+                "propagates if all of its neighbors store the received ID, each noisy "
+                "node stops its whole neighborhood from propagating, fragmenting "
+                "the propagation (and a noisy node among the seeds prevents it "
+                "entirely).",
             ),
             "striped_ids": (
                 "7. With bands of object IDs",
                 'A band of "circle" splits learning_module_0 into two bands of '
                 '"square", and a band of "logo_B" splits the island on '
-                'learning_module_1 into two bands of "logo_A". A spread of one ID '
+                'learning_module_1 into two bands of "logo_A". A propagation of one ID '
                 "stops at the band of the other and never jumps across it to the "
                 "disjoint band of the same ID.",
             ),

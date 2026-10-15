@@ -6,17 +6,18 @@
 # Use of this source code is governed by the MIT
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
-"""Drive an `EvidenceGoalGenerator`'s inhibition spreading on one condition.
+"""Drive an `EvidenceGoalGenerator`'s salience propagation on one condition.
 
 A `Session` holds one condition (a synthetic primitive, see `primitives`, or a
 learned object, see `learned_models`) and one goal generator whose parent LM is
 faked to serve the condition's graphs, with the most likely hypothesis (MLH)
 placed wherever the user last sensed. Sensing a location is one step of the LM:
-inhibition decays, then every channel receives the features (or object ID)
-stored at its node nearest the location (unless overridden, to see the goal
-generator reject input the MLH does not predict), and the goal generator
-spreads inhibition from there. The `SpreadRecord`s the goal generator logs are
-kept for stepping through the spreads node by node.
+every channel receives the features (or object ID) stored at its node nearest
+the location (unless overridden, to see the goal generator reject input the MLH
+does not predict), the goal generator propagates from there, reducing the
+salience of the nodes it reaches, and the salience of every other node recovers
+by one step. The `PropagationRecord`s the goal generator logs are kept for
+stepping through the propagations node by node.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from analysis.gui import learned_models, primitives
 from analysis.gui.primitives import Condition, Graph
 from tbp.monty.frameworks.models.goal_generation import (
     EvidenceGoalGenerator,
-    SpreadRecord,
+    PropagationRecord,
 )
 
 MAX_MATCH_DISTANCE = 0.01
@@ -39,14 +40,16 @@ MAX_MATCH_DISTANCE = 0.01
 OVERRIDES = {"hue": None, "normal_tilt": None, "object_id": None}
 # The goal generator's parameters the GUI exposes, with their defaults.
 PARAMETERS = {
-    "num_spread_neighbors": 6,
-    "num_feature_spread_neighbors": 10,
-    "inhibition_decay_steps": 50,
+    "num_propagation_neighbors": 6,
+    "num_feature_propagation_neighbors": 10,
+    "salience_recovery_steps": 50,
+    "salience_reduction": 0.2,
+    "salience_reduction_falloff": 0.5,
     "max_hue_difference": 0.05,
     "max_normal_angle": 40.0,
     "min_far_side_angle": 135.0,
     "max_dissimilar_neighbors": 2,
-    "min_spread_fraction": 0.05,
+    "min_propagation_fraction": 0.05,
 }
 
 
@@ -80,28 +83,28 @@ class FakeParentLM:
 
 @dataclass
 class Sensing:
-    """One sensing of a location: what each channel received, and what spread.
+    """One sensing of a location: what each channel received, and what propagated.
 
     Attributes:
         step: The LM step the sensing took place on.
         location: The sensed location (the MLH location).
         percepts: For each channel, a summary of what it received.
-        records: The spread on each channel that spread.
-        no_spread: For each channel that did not spread, why.
-        inhibition_before: For each channel, the inhibition steps of its nodes
-            before the spread (for showing the inhibition as a spread progresses).
+        records: The propagation on each channel that propagated.
+        no_propagation: For each channel that did not propagate, why.
+        salience_before: For each channel, the salience of its nodes before the
+            propagation (for showing the salience as a propagation progresses).
     """
 
     step: int
     location: np.ndarray
     percepts: dict[str, str]
-    records: dict[str, SpreadRecord]
-    no_spread: dict[str, str]
-    inhibition_before: dict[str, np.ndarray] = field(default_factory=dict)
+    records: dict[str, PropagationRecord]
+    no_propagation: dict[str, str]
+    salience_before: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 class Session:
-    """A condition, a goal generator spreading inhibition on it, and its history."""
+    """A condition, a goal generator propagating on it, and its history."""
 
     def __init__(self, condition_key: str, parameters: dict | None = None):
         self.parameters = {**PARAMETERS, **(parameters or {})}
@@ -156,7 +159,7 @@ class Session:
         )
 
     def set_parameters(self, **parameters) -> None:
-        """Change the goal generator's parameters, keeping the inhibition."""
+        """Change the goal generator's parameters, keeping the salience."""
         changed = {
             name: value
             for name, value in parameters.items()
@@ -165,9 +168,9 @@ class Session:
         if not changed:
             return
         self.parameters.update(changed)
-        inhibition = self.gsg._inhibition_steps
+        salience = self.gsg._salience
         self.gsg = self._make_gsg()
-        self.gsg._inhibition_steps = inhibition
+        self.gsg._salience = salience
         self.log.append(
             "Parameters: "
             + ", ".join(f"{name}={value}" for name, value in changed.items())
@@ -175,8 +178,8 @@ class Session:
 
     def _make_gsg(self) -> EvidenceGoalGenerator:
         parameters = dict(self.parameters)
-        if not parameters["min_spread_fraction"]:
-            parameters["min_spread_fraction"] = None
+        if not parameters["min_propagation_fraction"]:
+            parameters["min_propagation_fraction"] = None
         gsg = EvidenceGoalGenerator(**parameters)
         gsg.parent_lm = self.lm
         gsg.reset()
@@ -222,18 +225,19 @@ class Session:
 
     # ----------------------------------------------------------- actions
 
-    def reset_inhibition(self) -> None:
-        self.gsg._inhibition_steps = {}
+    def reset_salience(self) -> None:
+        """Restore every node's salience to 1 and forget the last sensing."""
+        self.gsg._salience = {}
         self.sensing = None
-        self.log.append(f"Step {self.step}: inhibition reset")
+        self.log.append(f"Step {self.step}: salience reset")
 
-    def step_inhibition(self, num_steps: int = 1) -> None:
-        """LM steps without sensing anything: the inhibition decays."""
+    def step_salience(self, num_steps: int = 1) -> None:
+        """LM steps without sensing anything: the salience recovers."""
         for _ in range(num_steps):
             self.step += 1
-            self.gsg._decay_inhibition()
+            self.gsg._recover_salience()
         self.log.append(
-            f"Step {self.step}: inhibition decayed"
+            f"Step {self.step}: salience recovered"
             + (f" ({num_steps} steps)" if num_steps > 1 else "")
         )
 
@@ -241,26 +245,25 @@ class Session:
         """Sense a location: one LM step, with input to every channel.
 
         Each channel receives the features (or object ID) stored at its node nearest
-        the location, as if the MLH were exactly right, and the goal generator
-        spreads inhibition from the nodes nearest the location.
+        the location, as if the MLH were exactly right; the goal generator
+        propagates from the nodes nearest the location, reducing the salience of
+        the nodes it reaches, and the salience of the other nodes recovers by one
+        step.
 
         Returns:
-            What was sensed and what spread.
+            What was sensed and what propagated.
         """
         location = np.asarray(location, dtype=float)
         self.step += 1
-        self.gsg._decay_inhibition()
         self.lm.mlh = {**self.lm.mlh, "location": location}
-        inhibition_before = {
-            channel: self.gsg._get_inhibition_steps(
-                "primitive", channel, len(graph.pos)
-            ).copy()
-            for channel, graph in self.graphs.items()
+        salience_before = {
+            channel: self.salience(channel).copy() for channel in self.channels
         }
         percepts = [self._percept(channel, location) for channel in self.channels]
-        self.gsg.spread_records = []
-        self.gsg._spread_from_observations(percepts)
-        records = {record.input_channel: record for record in self.gsg.spread_records}
+        self.gsg._update_salience(percepts)
+        records = {
+            record.input_channel: record for record in self.gsg.propagation_records
+        }
         self.sensing = Sensing(
             step=self.step,
             location=location,
@@ -269,19 +272,21 @@ class Session:
                 for channel, percept in zip(self.channels, percepts)
             },
             records=records,
-            no_spread={
-                channel: self._why_no_spread(channel, location, percept)
+            no_propagation={
+                channel: self._why_no_propagation(channel, location, percept)
                 for channel, percept in zip(self.channels, percepts)
                 if channel not in records
             },
-            inhibition_before=inhibition_before,
+            salience_before=salience_before,
         )
-        spread = ", ".join(
+        propagated = ", ".join(
             f"{channel}: {len(record.node_order)} nodes"
             + (f" ({record.stage.max()} push-through(s))" if record.min_size else "")
             for channel, record in records.items()
         )
-        self.log.append(f"Step {self.step}: sensed; spread on {spread or 'no channel'}")
+        self.log.append(
+            f"Step {self.step}: sensed; propagated on {propagated or 'no channel'}"
+        )
         return self.sensing
 
     def nearest_node(self, channel, location) -> int:
@@ -293,50 +298,52 @@ class Session:
 
     # ------------------------------------------------------------ queries
 
-    def inhibition_weights(self, channel, progress=None) -> np.ndarray:
-        """Get the inhibition weight (0 to 1) of each node of a channel.
+    def salience(self, channel, progress=None) -> np.ndarray:
+        """Get the salience (0 to 1) of each node of a channel.
 
         Args:
             channel: The channel.
-            progress: Number of nodes of the last spread on the channel to count
-                as reached, to show the inhibition as the spread progresses; None
-                for the current inhibition.
+            progress: Number of nodes of the last propagation on the channel to
+                count as reached, to show the salience as the propagation
+                progresses; None for the current salience.
 
         Returns:
-            The weights.
+            The salience of each node (a copy).
         """
         num_nodes = len(self.graphs[channel].pos)
-        current = self.gsg._get_inhibition_steps("primitive", channel, num_nodes)
+        current = self.gsg._get_salience("primitive", channel, num_nodes).copy()
         record = None if self.sensing is None else self.sensing.records.get(channel)
         if progress is None or record is None or progress >= len(record.node_order):
-            return current / self.gsg.inhibition_decay_steps
-        # Mid-spread: the nodes reached so far show their actual inhibition, the
-        # rest what they had before the spread, decayed by the steps since then.
-        before = self.sensing.inhibition_before[channel]
+            return current
+        # Mid-propagation: the nodes reached so far show their actual salience;
+        # the ones not reached yet what they had before the propagation, plus the
+        # recovery of the steps since (none on the step they were reached).
+        before = self.sensing.salience_before[channel]
         if len(before) != num_nodes:
-            before = np.zeros(num_nodes, dtype=int)
-        steps = np.maximum(before - (self.step - self.sensing.step), 0)
-        reached = record.node_order[:progress]
-        steps[reached] = current[reached]
-        return steps / self.gsg.inhibition_decay_steps
+            return current
+        pending = record.node_order[progress:]
+        recovered = (self.step - self.sensing.step) / self.gsg.salience_recovery_steps
+        current[pending] = np.minimum(before[pending] + recovered, 1.0)
+        return current
 
     def edge_matrices(self, channel):
         """Get the propagation and surface (or neighbor) matrices of a channel.
 
         Returns:
-            Sparse matrices with the edges a node spreads along, and the edges to
-            all of its neighbors on the same side of the surface (for an object-ID
-            channel: all of its neighbors, and None, as those spreads are not
-            pushed through), see `EvidenceGoalGenerator._get_spread_order`.
+            Sparse matrices with the edges a node propagates along, and the edges
+            to all of its neighbors on the same side of the surface (for an
+            object-ID channel: all of its neighbors, and None, as those
+            propagations are not pushed through), see
+            `EvidenceGoalGenerator._get_propagation_order`.
         """
         graph = self.graphs[channel]
         if self.is_id_channel(channel):
             return None, self.gsg._get_neighbor_matrix("primitive", channel, graph)
-        features = self.gsg._get_spread_features(graph)
+        features = self.gsg._get_propagation_features(graph)
         return self.gsg._get_similar_neighbors("primitive", channel, graph, features)
 
     def node_details(self, channel, node) -> dict[str, str]:
-        """Describe a node: its features, neighbors, and spreading status.
+        """Describe a node: its features, neighbors, salience and propagation status.
 
         Returns:
             Labeled values, in display order.
@@ -358,7 +365,7 @@ class Session:
             details["neighbors"] = (
                 f"{len(targets)}, of which {other.sum()} store another ID"
             )
-            details["spreads"] = (
+            details["propagates"] = (
                 "yes"
                 if len(targets) and not other.any()
                 else "no (not all neighbors store its ID)"
@@ -371,12 +378,12 @@ class Session:
                 details["hue"] = f"{hsv[0]:.3f} (s {hsv[1]:.2f}, v {hsv[2]:.2f})"
             normal = graph.normals[node]
             details["normal"] = "(" + ", ".join(f"{c:+.2f}" for c in normal) + ")"
-            features = gsg._get_spread_features(graph)
+            features = gsg._get_propagation_features(graph)
             all_neighbors = gsg._get_neighbor_matrix(
                 "primitive",
                 channel,
                 graph,
-                num_neighbors=gsg.num_feature_spread_neighbors,
+                num_neighbors=gsg.num_feature_propagation_neighbors,
             )
             targets = all_neighbors.indices[
                 all_neighbors.indptr[node] : all_neighbors.indptr[node + 1]
@@ -390,35 +397,39 @@ class Session:
                 f"{similar.sum()} similar, {num_dissimilar} dissimilar"
             )
             if len(targets) == far.sum():
-                details["spreads"] = "no (no neighbors on this side of the surface)"
+                details["propagates"] = "no (no neighbors on this side of the surface)"
             elif num_dissimilar > gsg.max_dissimilar_neighbors:
-                details["spreads"] = (
+                details["propagates"] = (
                     f"no ({num_dissimilar} > max_dissimilar_neighbors="
                     f"{gsg.max_dissimilar_neighbors})"
                 )
             else:
-                details["spreads"] = f"yes, to its {similar.sum()} similar neighbors"
-        steps = gsg._get_inhibition_steps("primitive", channel, len(graph.pos))[node]
-        details["inhibition"] = (
-            f"{steps} of {gsg.inhibition_decay_steps} steps remaining"
-            if steps
-            else "none"
-        )
+                details["propagates"] = f"yes, to its {similar.sum()} similar neighbors"
+        salience = float(self.salience(channel)[node])
+        if salience >= 1:
+            details["salience"] = "1.00 (full)"
+        else:
+            remaining = int(np.ceil((1 - salience) * gsg.salience_recovery_steps))
+            details["salience"] = f"{salience:.2f}" + (
+                " (never sampled)" if salience <= 0 else ""
+            )
+            details["recovery"] = f"back to 1 in {remaining} step(s)"
         if self.sensing is not None and channel in self.sensing.records:
             record = self.sensing.records[channel]
             position = np.flatnonzero(record.node_order == node)
             if len(position):
                 position = int(position[0])
                 stage = int(record.stage[position])
-                details["last spread"] = (
+                details["last propagation"] = (
                     f"reached #{position + 1} of {len(record.node_order)}, "
                     f"{record.hops[position]} hop(s) "
                     + ("from the seeds" if stage == 0 else f"into push-through {stage}")
                     + (" (seed)" if node in record.seeds else "")
                     + (" (sink)" if node in record.sinks else "")
+                    + f"; salience reduced by {record.reduction[position]:.2f}"
                 )
             else:
-                details["last spread"] = "not reached"
+                details["last propagation"] = "not reached"
         return details
 
     # ------------------------------------------------------------ private
@@ -486,7 +497,7 @@ class Session:
             text += " [overridden: " + ", ".join(percept.overridden) + "]"
         return text
 
-    def _why_no_spread(self, channel, location, percept) -> str:
+    def _why_no_propagation(self, channel, location, percept) -> str:
         graph = self.graphs[channel]
         gsg = self.gsg
         seeds, distances = gsg._get_nodes_nearest_mlh(graph, location)
@@ -506,8 +517,8 @@ class Session:
                 f"not all of the {len(seeds)} nearest nodes store the received ID "
                 f"(some store {', '.join(map(str, others))})"
             )
-        features = gsg._get_spread_features(graph)
-        sensed = gsg._get_sensed_spread_features(percept, self.lm.mlh["rotation"])
+        features = gsg._get_propagation_features(graph)
+        sensed = gsg._get_sensed_propagation_features(percept, self.lm.mlh["rotation"])
         if not features:
             return "the channel stores no features to compare"
         if not gsg._similar_features(features, seeds[nearby], sensed).any():

@@ -76,7 +76,7 @@ viz = [
     'vedo',
 ]
 gui = [
-    # Browser-based explorer of inhibition spreading (analysis/gui/spreading_app.py)
+    # Browser-based explorer of salience propagation (analysis/gui/propagation_app.py)
     'dash',
     'plotly',
 ]

@@ -8,15 +8,16 @@
 # https://opensource.org/licenses/MIT.
 """Tests for the EvidenceGoalGenerator's hypothesis-testing policy.
 
-The tests use mock graphs and a mocked parent LM to exercise the selection of
-unexplained locations to test, the spreading of inhibition from received object
-IDs and from sensory input, and the transform of a target location on the MLH
-model into a Goal for the motor system.
+The tests use mock graphs and a mocked parent LM to exercise the sampling of
+locations to test by their salience, the propagation of salience reductions from
+received object IDs and from sensory input, and the transform of a target
+location on the MLH model into a Goal for the motor system.
 """
 
 from __future__ import annotations
 
 import unittest
+from collections import Counter
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -109,8 +110,8 @@ def gsg_with_graphs(graphs, **gsg_kwargs) -> EvidenceGoalGenerator:
     return gsg
 
 
-def make_ctx() -> RuntimeContext:
-    return RuntimeContext(rng=np.random.RandomState(42))
+def make_ctx(seed=42) -> RuntimeContext:
+    return RuntimeContext(rng=np.random.RandomState(seed))
 
 
 # A small flat point cloud used for spatially-identical sensor channels.
@@ -232,8 +233,6 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
     def setUp(self) -> None:
         self.car = car_line_graph()
         self.logo = logo_line_graph()
-        # The sensor channel has fewer nodes than any child object, so that child
-        # objects are ranked first when selecting a target.
         self.sensor = oriented_sensor_graph(self.car.pos[::9])
         self.graphs = {
             TOP_ID: {
@@ -272,8 +271,10 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         self.gsg = EvidenceGoalGenerator(
             min_post_goal_success_steps=20,
             elapsed_steps_factor=10,
-            num_spread_neighbors=6,
-            inhibition_decay_steps=50,
+            num_propagation_neighbors=6,
+            salience_recovery_steps=50,
+            salience_reduction=0.2,
+            salience_reduction_falloff=0.5,
         )
         self.gsg.parent_lm = lm
 
@@ -285,29 +286,51 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             "rotation": Rotation.identity() if rotation is None else rotation,
         }
 
-    def car_inhibition(self) -> np.ndarray:
-        return self.gsg.get_inhibition_weights(TOP_ID, "learning_module_0")
+    def car_salience(self) -> np.ndarray:
+        return self.gsg.get_salience(TOP_ID, "learning_module_0")
+
+    def salience(self, channel) -> np.ndarray:
+        """The (stored, modifiable) salience of a channel's nodes.
+
+        Returns:
+            The salience array.
+        """
+        num_nodes = len(self.graphs[TOP_ID][channel].pos)
+        return self.gsg._get_salience(TOP_ID, channel, num_nodes)
 
     def set_steps_since_goal(self, steps) -> None:
         buffer = self.gsg.parent_lm.buffer
         buffer.get_num_steps_post_output_goal_generated.return_value = steps
 
-    # ------------------------- Spreading -------------------------
+    def sample_targets(self, num_samples=2000, seed=0) -> Counter:
+        """Sample targets repeatedly, without changing the salience.
 
-    def test_recognized_child_inhibits_only_its_contiguous_region(self) -> None:
-        self.gsg._spread_from_observations(
+        Returns:
+            How often each (channel, node) was sampled.
+        """
+        ctx = make_ctx(seed)
+        return Counter(
+            self.gsg._select_target(ctx, TOP_ID)[:2] for _ in range(num_samples)
+        )
+
+    # ------------------------- Propagation -------------------------
+
+    def test_recognized_child_reduces_salience_only_in_its_contiguous_region(
+        self,
+    ) -> None:
+        self.gsg._propagate_from_observations(
             [self.sensor_percept, lm_percept("learning_module_0", WHEEL_ID)]
         )
 
-        inhibited = np.nonzero(self.car_inhibition())[0]
+        reduced = np.nonzero(self.car_salience() < 1)[0]
         nptest.assert_array_equal(
-            inhibited,
+            reduced,
             np.arange(10),
-            "Inhibition should cover the recognized wheel, but stop at the car "
+            "The reduction should cover the recognized wheel, but stop at the car "
             "body and not reach the second, disjoint wheel.",
         )
 
-    def test_spread_reaches_outlying_nodes(self) -> None:
+    def test_propagation_reaches_outlying_nodes(self) -> None:
         # The outlier is 10 node spacings beyond the end of the line, so no node
         # has it among its 6 nearest neighbors, but it has the end of the line
         # among its own.
@@ -318,21 +341,25 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         self.graphs[TOP_ID]["learning_module_0"] = line
         self.mlh = {**self.mlh_at_node(0), "location": positions[10]}
 
-        self.gsg._spread_from_observations([lm_percept("learning_module_0", WHEEL_ID)])
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_0", WHEEL_ID)]
+        )
 
-        weights = self.gsg.get_inhibition_weights(TOP_ID, "learning_module_0")
-        self.assertTrue(np.all(weights > 0), "Every node should be inhibited.")
+        salience = self.gsg.get_salience(TOP_ID, "learning_module_0")
+        self.assertTrue(np.all(salience < 1), "Every node should be reached.")
 
-    def test_spread_is_recorded_in_the_order_nodes_were_reached(self) -> None:
-        self.gsg._spread_from_observations([lm_percept("learning_module_0", WHEEL_ID)])
+    def test_propagation_is_recorded_in_the_order_nodes_were_reached(self) -> None:
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_0", WHEEL_ID)]
+        )
 
-        (record,) = self.gsg.spread_records
+        (record,) = self.gsg.propagation_records
         self.assertEqual(record.graph_id, TOP_ID)
         self.assertEqual(record.input_channel, "learning_module_0")
         self.assertEqual(record.object_id, WHEEL_ID)
         nptest.assert_array_equal(np.sort(record.node_order), np.arange(10))
-        # The spread starts from the 6 nodes nearest the MLH (at node 4), so the
-        # ends of the wheel are reached last.
+        # The propagation starts from the 6 nodes nearest the MLH (at node 4), so
+        # the ends of the wheel are reached last.
         self.assertEqual(set(record.node_order[:6].tolist()) - set(range(1, 8)), set())
         self.assertIn(0, record.node_order[6:])
         self.assertIn(9, record.node_order[6:])
@@ -346,14 +373,49 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         for position in range(6, len(record.node_order)):
             self.assertIn(record.predecessor[position], record.node_order[:position])
         nptest.assert_array_equal(record.predecessor[:6], -1)
-        # The wheel's nodes next to the car body do not spread, having neighbors
-        # that store the body's ID.
+        # The wheel's nodes next to the car body do not propagate, having
+        # neighbors that store the body's ID.
         self.assertIn(9, record.sinks)
         self.assertNotIn(0, record.sinks)
 
-    def test_spread_records_only_hold_the_current_steps_spreads(self) -> None:
+    def test_reduction_falls_off_in_the_order_nodes_were_reached(self) -> None:
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_0", WHEEL_ID)]
+        )
+
+        (record,) = self.gsg.propagation_records
+        nptest.assert_allclose(record.reduction, np.linspace(0.2, 0.1, 10))
+        nptest.assert_allclose(
+            self.car_salience()[record.node_order], 1 - np.linspace(0.2, 0.1, 10)
+        )
+
+    def test_reduction_is_uniform_without_falloff(self) -> None:
+        self.gsg.salience_reduction_falloff = 0.0
+
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_0", WHEEL_ID)]
+        )
+
+        nptest.assert_allclose(self.car_salience()[:10], 0.8)
+        nptest.assert_allclose(self.car_salience()[10:], 1.0)
+
+    def test_full_falloff_leaves_the_last_node_reached_unreduced(self) -> None:
+        self.gsg.salience_reduction_falloff = 1.0
+
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_0", WHEEL_ID)]
+        )
+
+        (record,) = self.gsg.propagation_records
+        self.assertAlmostEqual(record.reduction[0], 0.2)
+        self.assertAlmostEqual(record.reduction[-1], 0.0)
+        self.assertEqual(self.car_salience()[record.node_order[-1]], 1.0)
+
+    def test_propagation_records_only_hold_the_current_steps_propagations(
+        self,
+    ) -> None:
         def recorded_channels():
-            return [record.input_channel for record in self.gsg.spread_records]
+            return [record.input_channel for record in self.gsg.propagation_records]
 
         self.gsg.step(
             make_ctx(), [self.sensor_percept, lm_percept("learning_module_0", WHEEL_ID)]
@@ -363,103 +425,169 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         self.gsg.step(make_ctx(), [self.sensor_percept])
         self.assertEqual(recorded_channels(), [SENSOR_CHANNEL])
 
-    def test_no_spreading_when_received_id_is_not_predicted_by_mlh(self) -> None:
+    def test_no_propagation_when_received_id_is_not_predicted_by_mlh(self) -> None:
         self.mlh = self.mlh_at_node(17)  # On the car body
 
-        self.gsg._spread_from_observations([lm_percept("learning_module_0", WHEEL_ID)])
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_0", WHEEL_ID)]
+        )
 
-        self.assertFalse(np.any(self.car_inhibition()))
+        self.assertTrue(np.all(self.car_salience() == 1))
 
-    def test_no_spreading_when_seed_neighbors_store_different_ids(self) -> None:
+    def test_no_propagation_when_seed_neighbors_store_different_ids(self) -> None:
         # At the border between the wheel and the body, the nearest nodes store
         # both IDs, even though the wheel is predicted at the MLH location.
         self.mlh = self.mlh_at_node(9)
 
-        self.gsg._spread_from_observations([lm_percept("learning_module_0", WHEEL_ID)])
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_0", WHEEL_ID)]
+        )
 
-        self.assertFalse(np.any(self.car_inhibition()))
+        self.assertTrue(np.all(self.car_salience() == 1))
 
     def test_ids_from_channels_not_in_the_mlh_graph_are_ignored(self) -> None:
-        self.gsg._spread_from_observations([lm_percept("learning_module_5", WHEEL_ID)])
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_5", WHEEL_ID)]
+        )
 
-        self.assertFalse(np.any(self.car_inhibition()))
+        self.assertTrue(np.all(self.car_salience() == 1))
 
-    def test_inhibition_decays_linearly_to_zero(self) -> None:
-        self.gsg._spread_from_observations([lm_percept("learning_module_0", WHEEL_ID)])
-        self.assertEqual(self.car_inhibition()[0], 1.0)
+    # ------------------------- Salience dynamics -------------------------
+
+    def test_salience_recovers_linearly_to_one(self) -> None:
+        self.gsg.salience_reduction_falloff = 0.0
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_0", WHEEL_ID)]
+        )
+        self.assertAlmostEqual(self.car_salience()[0], 0.8)
+
+        for _ in range(5):
+            self.gsg._recover_salience()
+        self.assertAlmostEqual(self.car_salience()[0], 0.9)
 
         for _ in range(10):
-            self.gsg._decay_inhibition()
-        self.assertAlmostEqual(self.car_inhibition()[0], 0.8)
+            self.gsg._recover_salience()
+        self.assertEqual(self.car_salience()[0], 1.0, "Salience is capped at 1.")
 
-        for _ in range(40):
-            self.gsg._decay_inhibition()
-        self.assertEqual(self.car_inhibition()[0], 0.0)
+    def test_reached_nodes_do_not_recover_on_the_step_they_are_reached(
+        self,
+    ) -> None:
+        self.gsg.salience_reduction_falloff = 0.0
+        self.salience("learning_module_0")[:] = 0.5
+        self.salience("learning_module_1")[:] = 0.5
 
-    def test_reset_clears_inhibition(self) -> None:
-        self.gsg._spread_from_observations([lm_percept("learning_module_0", WHEEL_ID)])
+        self.gsg._update_salience([lm_percept("learning_module_0", WHEEL_ID)])
+
+        nptest.assert_allclose(self.car_salience()[:10], 0.3, err_msg="Reduced only.")
+        nptest.assert_allclose(self.car_salience()[10:], 0.52)
+        nptest.assert_allclose(
+            self.gsg.get_salience(TOP_ID, "learning_module_1"),
+            0.52,
+            err_msg="Nodes of other channels recover.",
+        )
+
+    def test_repeated_visits_drive_salience_to_zero(self) -> None:
+        self.gsg.salience_reduction_falloff = 0.0
+
+        for visit in range(1, 6):
+            self.gsg._update_salience([lm_percept("learning_module_0", WHEEL_ID)])
+            nptest.assert_allclose(self.car_salience()[:10], 1 - 0.2 * visit)
+        self.assertTrue(np.all(self.car_salience()[:10] == 0))
+
+        self.gsg._update_salience([lm_percept("learning_module_0", WHEEL_ID)])
+        self.assertTrue(
+            np.all(self.car_salience()[:10] == 0), "Salience is clamped at 0."
+        )
+
+    def test_reset_restores_full_salience(self) -> None:
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_0", WHEEL_ID)]
+        )
 
         self.gsg.reset()
 
-        self.assertFalse(np.any(self.car_inhibition()))
+        self.assertTrue(np.all(self.car_salience() == 1))
 
     # ------------------------- Selection -------------------------
 
-    def test_selects_child_with_most_nodes_first(self) -> None:
+    def test_samples_nodes_in_proportion_to_their_channels_size(self) -> None:
+        counts = self.sample_targets()
+
+        per_channel = Counter()
+        for (channel, _), count in counts.items():
+            per_channel[channel] += count
+        # 35 car, 5 logo and 4 sensor nodes, all equally salient.
+        self.assertAlmostEqual(per_channel["learning_module_0"] / 2000, 35 / 44, 1)
+        self.assertAlmostEqual(per_channel["learning_module_1"] / 2000, 5 / 44, 1)
+        self.assertAlmostEqual(per_channel[SENSOR_CHANNEL] / 2000, 4 / 44, 1)
+        self.assertEqual(len(counts), 44, "Every node is sampled at some point.")
+
+    def test_samples_nodes_in_proportion_to_their_salience(self) -> None:
+        self.salience("learning_module_0")[:10] = 0.1
+        self.salience("learning_module_0")[10:] = 0.0
+        self.salience("learning_module_1")[:] = 0.0
+        self.salience(SENSOR_CHANNEL)[:] = 0.0
+        self.salience(SENSOR_CHANNEL)[0] = 1.0
+
+        counts = self.sample_targets()
+
+        # One sensor node at 1.0 against ten wheel nodes at 0.1.
+        self.assertAlmostEqual(counts[(SENSOR_CHANNEL, 0)] / 2000, 0.5, 1)
+        self.assertEqual(
+            sum(
+                count
+                for (channel, _), count in counts.items()
+                if channel != SENSOR_CHANNEL
+            ),
+            2000 - counts[(SENSOR_CHANNEL, 0)],
+        )
+
+    def test_nodes_without_salience_are_never_sampled(self) -> None:
+        self.salience("learning_module_0")[:10] = 0.0
+
+        counts = self.sample_targets(num_samples=500)
+
+        for node in range(10):
+            self.assertNotIn(("learning_module_0", node), counts)
+
+    def test_selected_target_carries_the_stored_object_id(self) -> None:
+        self.salience("learning_module_0")[:] = 0.0
+        self.salience("learning_module_1")[:] = 0.0
+        self.salience(SENSOR_CHANNEL)[:] = 0.0
+        self.salience("learning_module_0")[12] = 1.0
+
         channel, node_id, object_id = self.gsg._select_target(make_ctx(), TOP_ID)
 
-        self.assertEqual(channel, "learning_module_0")
-        self.assertEqual(object_id, WHEEL_ID)
-        self.assertEqual(self.car.x[node_id, 0], WHEEL_ID)
+        self.assertEqual(
+            (channel, node_id, object_id), ("learning_module_0", 12, BODY_ID)
+        )
 
-    def test_selects_next_child_once_largest_is_inhibited(self) -> None:
-        self.gsg._get_inhibition_steps(TOP_ID, "learning_module_0", 35)[:10] = 1
-        self.gsg._get_inhibition_steps(TOP_ID, "learning_module_0", 35)[25:] = 1
+        self.salience("learning_module_0")[12] = 0.0
+        self.salience(SENSOR_CHANNEL)[2] = 1.0
+        channel, node_id, object_id = self.gsg._select_target(make_ctx(), TOP_ID)
+        self.assertEqual((channel, node_id, object_id), (SENSOR_CHANNEL, 2, None))
 
-        channel, _, object_id = self.gsg._select_target(make_ctx(), TOP_ID)
-        self.assertEqual((channel, object_id), ("learning_module_0", BODY_ID))
-
-        self.gsg._get_inhibition_steps(TOP_ID, "learning_module_0", 35)[:] = 1
-        channel, _, object_id = self.gsg._select_target(make_ctx(), TOP_ID)
-        self.assertEqual((channel, object_id), ("learning_module_1", LOGO_ID))
-
-        self.gsg._get_inhibition_steps(TOP_ID, "learning_module_1", 5)[:] = 1
-        channel, _, object_id = self.gsg._select_target(make_ctx(), TOP_ID)
-        self.assertEqual((channel, object_id), (SENSOR_CHANNEL, None))
-
-    def test_sensor_channel_is_ranked_by_its_number_of_nodes(self) -> None:
-        self.graphs[TOP_ID][SENSOR_CHANNEL] = oriented_sensor_graph(self.car.pos)
-
-        channel, _, object_id = self.gsg._select_target(make_ctx(), TOP_ID)
-
-        self.assertEqual((channel, object_id), (SENSOR_CHANNEL, None))
-
-    def test_only_uninhibited_nodes_are_selected(self) -> None:
-        self.gsg._get_inhibition_steps(TOP_ID, "learning_module_0", 35)[:10] = 1
-
-        for seed in range(10):
-            ctx = RuntimeContext(rng=np.random.RandomState(seed))
-            _, node_id, _ = self.gsg._select_target(ctx, TOP_ID)
-            self.assertIn(node_id, range(25, 35))
-
-    def test_no_goal_when_every_node_is_inhibited(self) -> None:
-        self.gsg._get_inhibition_steps(TOP_ID, "learning_module_0", 35)[:] = 1
-        self.gsg._get_inhibition_steps(TOP_ID, "learning_module_1", 5)[:] = 1
-        self.gsg._get_inhibition_steps(TOP_ID, SENSOR_CHANNEL, 4)[:] = 1
+    def test_no_goal_when_no_node_has_salience(self) -> None:
+        self.salience("learning_module_0")[:] = 0.0
+        self.salience("learning_module_1")[:] = 0.0
+        self.salience(SENSOR_CHANNEL)[:] = 0.0
 
         goal = self.gsg._generate_goal(make_ctx(), [self.sensor_percept])
 
         self.assertIsNone(goal)
 
-    def test_goal_targets_the_selected_child_node(self) -> None:
+    def test_goal_targets_the_selected_node(self) -> None:
+        self.salience("learning_module_0")[:] = 0.0
+        self.salience("learning_module_1")[:] = 0.0
+        self.salience(SENSOR_CHANNEL)[:] = 0.0
+        self.salience("learning_module_0")[3] = 1.0
+
         goal = self.gsg._generate_goal(make_ctx(), [self.sensor_percept])
 
-        node_id = goal.info["target_node_id"]
+        self.assertEqual(goal.info["target_node_id"], 3)
         self.assertEqual(goal.info["model_frame_input_channel"], "learning_module_0")
         self.assertEqual(goal.info["target_child_object_id"], WHEEL_ID)
-        nptest.assert_allclose(
-            goal.info["model_frame_target_loc"], self.car.pos[node_id]
-        )
+        nptest.assert_allclose(goal.info["model_frame_target_loc"], self.car.pos[3])
 
     def test_goal_info_carries_hypothesis_identity_and_predicted_displacement(
         self,
@@ -485,14 +613,21 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
 
     # ------------------------- Triggering -------------------------
 
-    def test_step_spreads_then_targets_an_unexplained_child(self) -> None:
+    def test_step_propagates_then_targets_an_unexplained_node(self) -> None:
+        self.gsg.salience_reduction = 1.0  # Explained nodes lose all salience.
+
         self.gsg.step(
             make_ctx(),
             [self.sensor_percept, lm_percept("learning_module_0", WHEEL_ID)],
         )
 
         (goal,) = self.gsg.output_goals()
-        self.assertIn(goal.info["target_node_id"], range(25, 35))
+        channel = goal.info["model_frame_input_channel"]
+        if channel == "learning_module_0":
+            self.assertNotIn(goal.info["target_node_id"], range(10))
+        self.assertNotEqual(
+            channel, SENSOR_CHANNEL, "The sensed features explain the sensor graph."
+        )
 
     def test_no_goal_before_min_post_goal_success_steps(self) -> None:
         self.set_steps_since_goal(20)
@@ -532,7 +667,7 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
 
     def test_targets_sensor_nodes_without_compositional_models(self) -> None:
         self.graphs = {TOP_ID: {SENSOR_CHANNEL: oriented_sensor_graph(self.car.pos)}}
-        # A sensed normal the MLH does not predict, so nothing is inhibited.
+        # A sensed normal the MLH does not predict, so no salience is reduced.
         self.sensor_percept.morphological_features = {"pose_vectors": np.eye(3)}
 
         self.gsg.step(make_ctx(), [self.sensor_percept])
@@ -603,7 +738,7 @@ def cylinder_surface(radius, num_around, num_along):
     return points, normals
 
 
-class SensoryFeatureSpreadingTest(unittest.TestCase):
+class SensoryFeaturePropagationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.graph = None
         self.mlh = None
@@ -619,8 +754,8 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
         self.gsg = EvidenceGoalGenerator()
         self.gsg.parent_lm = lm
 
-    def spread_from(self, node, rotation=None, **sensed_overrides) -> np.ndarray:
-        """Spread from sensing the features stored at a node.
+    def propagate_from(self, node, rotation=None, **sensed_overrides) -> np.ndarray:
+        """Propagate from sensing the features stored at a node.
 
         Args:
             node: The node at the MLH location.
@@ -629,7 +764,7 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
             **sensed_overrides: Sensed features replacing the stored ones.
 
         Returns:
-            Whether each node is inhibited.
+            Whether each node was reached (its salience reduced).
         """
         rotation = Rotation.identity() if rotation is None else rotation
         mapping = self.graph.feature_mapping
@@ -657,10 +792,10 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
             "rotation": rotation,
         }
         self.gsg.reset()
-        self.gsg._spread_from_observations([percept])
-        return self.gsg.get_inhibition_weights(TOP_ID, SENSOR_CHANNEL) > 0
+        self.gsg._propagate_from_observations([percept])
+        return self.gsg.get_salience(TOP_ID, SENSOR_CHANNEL) < 1
 
-    def test_spreads_across_a_face_but_not_around_an_edge(self) -> None:
+    def test_propagates_across_a_face_but_not_around_an_edge(self) -> None:
         # Two faces of a cube meeting at an edge.
         top = plane_points([0, 0, 0.02], [1, 0, 0], [0, 1, 0], 10, 10)
         side = plane_points([0.02, 0, 0], [0, 0, 1], [0, 1, 0], 10, 10)
@@ -669,12 +804,12 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
             np.vstack([np.tile([0, 0, 1], (100, 1)), np.tile([1, 0, 0], (100, 1))]),
         )
 
-        inhibited = self.spread_from(55)
+        reached = self.propagate_from(55)
 
-        self.assertTrue(np.all(inhibited[:100]), "The sensed face is inhibited.")
-        self.assertFalse(np.any(inhibited[100:]), "The adjacent face is not.")
+        self.assertTrue(np.all(reached[:100]), "The sensed face is reached.")
+        self.assertFalse(np.any(reached[100:]), "The adjacent face is not.")
 
-    def test_spreads_around_a_cylinder_but_not_onto_its_cap(self) -> None:
+    def test_propagates_around_a_cylinder_but_not_onto_its_cap(self) -> None:
         radius = 0.02
         side, normals = cylinder_surface(radius, 60, 8)
         top = side[:, 2].max()
@@ -685,25 +820,25 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
             np.vstack([normals, np.tile([0, 0, 1], (len(cap), 1))]),
         )
 
-        inhibited = self.spread_from(4)
+        reached = self.propagate_from(4)
 
         self.assertTrue(
-            np.all(inhibited[: len(side)]),
-            "The whole side is inhibited, as neighboring normals are similar even "
+            np.all(reached[: len(side)]),
+            "The whole side is reached, as neighboring normals are similar even "
             "though the normals around the cylinder are not.",
         )
-        self.assertFalse(np.any(inhibited[len(side) :]), "The cap is not inhibited.")
+        self.assertFalse(np.any(reached[len(side) :]), "The cap is not reached.")
 
     def test_stops_where_hue_differs(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
         right = points[:, 0] >= 0.02
         self.graph = surface_graph(points, [0, 0, 1], hues=np.where(right, 0.5, 0.0))
 
-        inhibited = self.spread_from(25)
+        reached = self.propagate_from(25)
 
-        nptest.assert_array_equal(inhibited, ~right)
+        nptest.assert_array_equal(reached, ~right)
 
-    def test_achromatic_nodes_do_not_stop_spreading(self) -> None:
+    def test_achromatic_nodes_do_not_stop_propagation(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
         right = points[:, 0] >= 0.02
         self.graph = surface_graph(
@@ -713,10 +848,10 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
             saturations=np.where(right, 0.0, 1.0),
         )
 
-        inhibited = self.spread_from(25)
+        reached = self.propagate_from(25)
 
         self.assertTrue(
-            np.all(inhibited),
+            np.all(reached),
             "The hue of the achromatic nodes is undefined, so is not compared.",
         )
 
@@ -752,12 +887,12 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
             ),
         )
 
-        inhibited = self.spread_from(44)
+        reached = self.propagate_from(44)
 
-        self.assertTrue(np.all(inhibited[: len(top)]))
-        self.assertFalse(np.any(inhibited[len(top) + len(arc) :]))
+        self.assertTrue(np.all(reached[: len(top)]))
+        self.assertFalse(np.any(reached[len(top) + len(arc) :]))
 
-    def test_far_side_of_a_thin_wall_neither_stops_nor_receives_spreading(
+    def test_far_side_of_a_thin_wall_neither_stops_nor_receives_propagation(
         self,
     ) -> None:
         outside = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
@@ -767,25 +902,25 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
             np.vstack([np.tile([0, 0, 1], (100, 1)), np.tile([0, 0, -1], (100, 1))]),
         )
 
-        inhibited = self.spread_from(55)
+        reached = self.propagate_from(55)
 
-        self.assertTrue(np.all(inhibited[:100]))
-        self.assertFalse(np.any(inhibited[100:]))
+        self.assertTrue(np.all(reached[:100]))
+        self.assertFalse(np.any(reached[100:]))
 
-    def test_noisy_neighbors_do_not_stop_spreading(self) -> None:
+    def test_noisy_neighbors_do_not_stop_propagation(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
         normals = np.tile([0.0, 0.0, 1.0], (100, 1))
         noisy = [44, 45]
         normals[noisy] = [np.sin(np.radians(60)), 0.0, np.cos(np.radians(60))]
         self.graph = surface_graph(points, normals)
-        self.gsg.min_spread_fraction = None
+        self.gsg.min_propagation_fraction = None
 
-        inhibited = self.spread_from(55)
+        reached = self.propagate_from(55)
 
-        self.assertFalse(np.any(inhibited[noisy]), "The noisy nodes are not spread to.")
-        self.assertTrue(np.all(np.delete(inhibited, noisy)))
+        self.assertFalse(np.any(reached[noisy]), "The noisy nodes are not reached.")
+        self.assertTrue(np.all(np.delete(reached, noisy)))
 
-    def test_spreading_that_stops_too_soon_is_pushed_through(self) -> None:
+    def test_propagation_that_stops_too_soon_is_pushed_through(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 30, 22)
         x, y = np.round(points[:, :2] / SURFACE_SPACING).astype(int).T
         ring = (x >= 7) & (x < 22) & (y >= 3) & (y < 18)
@@ -794,35 +929,35 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
         hues = np.select([patch, ring], [0.5, 0.25], default=0.0)
         self.graph = surface_graph(points, [0, 0, 1], hues=hues)
 
-        self.gsg.min_spread_fraction = None
-        self.assertFalse(np.any(self.spread_from(np.flatnonzero(patch)[4])[~patch]))
+        self.gsg.min_propagation_fraction = None
+        self.assertFalse(np.any(self.propagate_from(np.flatnonzero(patch)[4])[~patch]))
 
-        self.gsg.min_spread_fraction = 0.2
-        inhibited = self.spread_from(np.flatnonzero(patch)[4])
-        self.assertTrue(np.all(inhibited[patch]))
-        self.assertFalse(np.any(inhibited[~(patch | ring)]))
+        self.gsg.min_propagation_fraction = 0.2
+        reached = self.propagate_from(np.flatnonzero(patch)[4])
+        self.assertTrue(np.all(reached[patch]))
+        self.assertFalse(np.any(reached[~(patch | ring)]))
         self.assertGreaterEqual(
-            inhibited.sum(),
+            reached.sum(),
             132,
-            "Spreading stops at the edge of the patch (9 nodes), short of 132 "
-            "nodes, so is pushed through into the ring around it.",
+            "The propagation stops at the edge of the patch (9 nodes), short of "
+            "132 nodes, so is pushed through into the ring around it.",
         )
         self.assertFalse(
-            np.all(inhibited[ring]),
-            "Once pushed through, spreading stops at the hop at which it has "
-            "reached 132 nodes, rather than covering the ring (225 nodes).",
+            np.all(reached[ring]),
+            "Once pushed through, the propagation stops at the hop at which it "
+            "has reached 132 nodes, rather than covering the ring (225 nodes).",
         )
         # Node spacings from the patch, in the direction they are farthest.
         distance = np.maximum(
             np.maximum(13 - x, x - 15), np.maximum(9 - y, y - 11)
         ).clip(min=0)
         self.assertGreaterEqual(
-            distance[ring & ~inhibited].min(),
+            distance[ring & ~reached].min(),
             5,
-            "Spreading fans out from the patch one hop at a time, so only the "
-            "ring's outermost nodes are left unreached.",
+            "The propagation fans out from the patch one hop at a time, so only "
+            "the ring's outermost nodes are left unreached.",
         )
-        (record,) = self.gsg.spread_records
+        (record,) = self.gsg.propagation_records
         self.assertEqual(
             set(record.node_order[:9].tolist()),
             set(np.flatnonzero(patch).tolist()),
@@ -845,53 +980,53 @@ class SensoryFeatureSpreadingTest(unittest.TestCase):
             "Nodes reached after the push-through are reached from ring nodes.",
         )
         nptest.assert_array_equal(
-            self.spread_from(0),
+            self.propagate_from(0),
             ~(patch | ring),
-            "Spreading from the plane around the ring stops at the ring, having "
+            "Propagating from the plane around the ring stops at the ring, having "
             "reached enough nodes.",
         )
 
-    def test_spreading_is_not_pushed_through_a_thin_wall(self) -> None:
+    def test_propagation_is_not_pushed_through_a_thin_wall(self) -> None:
         outside = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
         inside = plane_points([0.008, 0.008, -0.001], [1, 0, 0], [0, 1, 0], 3, 3)
         self.graph = surface_graph(
             np.vstack([outside, inside]),
             np.vstack([np.tile([0, 0, 1], (100, 1)), np.tile([0, 0, -1], (9, 1))]),
         )
-        self.gsg.min_spread_fraction = 0.2
+        self.gsg.min_propagation_fraction = 0.2
 
         nptest.assert_array_equal(
-            self.spread_from(102),
+            self.propagate_from(102),
             np.arange(109) >= 100,
             "The inside patch's only neighbors are on the far side of the wall.",
         )
 
-    def test_no_spreading_when_sensed_features_are_not_predicted(self) -> None:
+    def test_no_propagation_when_sensed_features_are_not_predicted(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
         self.graph = surface_graph(points, [0, 0, 1])
 
-        inhibited = self.spread_from(55, hsv=np.array([0.5, 1.0, 1.0]))
+        reached = self.propagate_from(55, hsv=np.array([0.5, 1.0, 1.0]))
 
-        self.assertFalse(np.any(inhibited))
+        self.assertFalse(np.any(reached))
 
     def test_sensed_normal_is_rotated_into_the_model_frame_by_the_mlh(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
         self.graph = surface_graph(points, [0, 0, 1])
         rotation = Rotation.from_euler("x", 90, degrees=True)
 
-        self.assertTrue(np.all(self.spread_from(55, rotation=rotation)))
+        self.assertTrue(np.all(self.propagate_from(55, rotation=rotation)))
         self.assertFalse(
-            np.any(self.spread_from(55, rotation=rotation, pose_vectors=np.eye(3))),
+            np.any(self.propagate_from(55, rotation=rotation, pose_vectors=np.eye(3))),
             "The sensed normal, unrotated, is not the one the MLH predicts.",
         )
 
-    def test_sensory_spread_is_recorded_without_an_object_id(self) -> None:
+    def test_sensory_propagation_is_recorded_without_an_object_id(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 10, 10)
         self.graph = surface_graph(points, [0, 0, 1])
 
-        self.spread_from(55)
+        self.propagate_from(55)
 
-        (record,) = self.gsg.spread_records
+        (record,) = self.gsg.propagation_records
         self.assertEqual(record.input_channel, SENSOR_CHANNEL)
         self.assertIsNone(record.object_id)
         nptest.assert_array_equal(np.sort(record.node_order), np.arange(100))

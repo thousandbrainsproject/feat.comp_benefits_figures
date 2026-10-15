@@ -7,33 +7,34 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 # ruff: noqa: DOC201,DOC501
-"""Visualize how sensory input inhibits regions of learned object models.
+"""Visualize how sensory input explains regions of learned object models.
 
-Runs the EvidenceGoalGenerator's spreading of inhibition through neighboring
-nodes with a similar hue and surface normal on the sensor channel graphs of one
-learning module (LM) of a pretrained model, sensing the
-features stored at a chosen seed node with the most likely hypothesis (MLH) at
-that node. Saves (or, with --interactive, shows), prefixed with the model and
-LM (e.g. comp_models_mujoco_lm2_):
+Runs the EvidenceGoalGenerator's propagation (of a salience reduction) through
+neighboring nodes with a similar hue and surface normal on the sensor channel
+graphs of one learning module (LM) of a pretrained model, sensing the features
+stored at a chosen seed node with the most likely hypothesis (MLH) at that node.
+Saves (or, with --interactive, shows), prefixed with the model and LM (e.g.
+comp_models_mujoco_lm2_):
 
-- <object>_seeds.png: for the mug, the region inhibited by a spread from seeds
-  on its side, next to its handle, on its rim, bottom, handle and inside wall,
-  colored by the order in which the spread reached each node.
-- compartments.png: for each object, the "compartments" that spreads divide
-  its model into. Starting from random uninhibited nodes, spreads are run until
-  every node is assigned to the compartment of the first spread that reached it.
-- <object>_tolerance.png: for the mug, spreads from the same seeds with
+- <object>_seeds.png: for the mug, the region reached by a propagation from
+  seeds on its side, next to its handle, on its rim, bottom, handle and inside
+  wall, colored by the order in which the propagation reached each node.
+- compartments.png: for each object, the "compartments" that propagations
+  divide its model into. Starting from random unreached nodes, propagations are
+  run until every node is assigned to the compartment of the first propagation
+  that reached it.
+- <object>_tolerance.png: for the mug, propagations from the same seeds with
   different max_dissimilar_neighbors.
 - visits.png: for each object, the online visits inference would make to it:
   starting from a seed on the side of the mug (or a random node of other
   objects), the next seed is sampled uniformly from the nodes not yet
-  inhibited, until all are, colored by the visit that first inhibited each.
+  reached, until all are, colored by the visit that first reached each.
 
-By default, spreads run on the sensor channel: the one channel of the LM's graphs
+By default, propagations run on the sensor channel: the one channel of the LM's graphs
 that receives input from a sensor module (e.g. patch_2 for LM 2, patch_0 for
-LM 0). --channels instead spreads on any of the LM's channels, including those
-receiving object IDs from lower-level LMs (e.g. learning_module_0 and
-learning_module_1 for LM 2 of comp_models_mujoco), where inhibition spreads
+LM 0). --channels instead propagates on any of the LM's channels, including
+those receiving object IDs from lower-level LMs (e.g. learning_module_0 and
+learning_module_1 for LM 2 of comp_models_mujoco), where the propagation goes
 through the neighboring nodes storing the received object ID. With several
 channels, each seed senses its location on all of them at once (sensing the
 features, or object ID, stored at each channel's node nearest the location), and
@@ -41,10 +42,10 @@ their nodes are superimposed in the figures, with one marker per channel. Object
 the LM has no model of, or that have none of the channels, are skipped, e.g. LM 0
 only models the objects without stickers, and only the objects with stickers
 have a learning_module_1 channel. The tolerance figure, which only affects
-sensory spreading, is skipped when spreading on object-ID channels only.
+sensory propagation, is skipped when propagating on object-ID channels only.
 
 Usage:
-    python analysis/scripts/visualize_inhibition_spreading.py [MODEL_PATH] [options]
+    python analysis/scripts/visualize_salience_propagation.py [MODEL_PATH] [options]
 
 Options:
     --model NAME      Which pretrained model to use (default: comp_models_mujoco):
@@ -61,7 +62,7 @@ Options:
     --lm ID           Overrides which learning module's models to use (e.g. 0 to
                       compare the models of LM 0 of comp_models_mujoco).
     --channels CH [CH ...]
-                      The input channels to spread on, superimposed (default: the
+                      The input channels to propagate on, superimposed (default: the
                       sensor channel), e.g. learning_module_0 learning_module_1.
     --objects ID [ID ...]
                       Overrides the objects drawn in the compartments and visits
@@ -69,11 +70,11 @@ Options:
                       a learning_module_1 channel).
     --mug ID          Overrides the mug of the seeds, tolerance and visits figures
                       (e.g. 024_mug_tbp_horz).
-    --min-spread-fraction F
-                      Overrides the goal generator's min_spread_fraction in all
-                      figures (0 to not push spreading through).
+    --min-propagation-fraction F
+                      Overrides the goal generator's min_propagation_fraction in
+                      all figures (0 to not push propagation through).
     --output-dir DIR  Where to save the figures (default:
-                      ~/tbp/results/comp_benefits_figures/inhibition_spreading).
+                      ~/tbp/results/comp_benefits_figures/salience_propagation).
     --interactive     Show the figures in interactive windows (e.g. to rotate
                       the 3D views) instead of saving them. Figures taller than the
                       window scroll with the mouse wheel, the arrow keys, or page
@@ -98,7 +99,7 @@ from scipy.spatial.transform import Rotation
 
 from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
 
-DEFAULT_OUTPUT_DIR = "~/tbp/results/comp_benefits_figures/inhibition_spreading"
+DEFAULT_OUTPUT_DIR = "~/tbp/results/comp_benefits_figures/salience_propagation"
 MODELS = {
     "comp_models_mujoco": SimpleNamespace(
         path="~/tbp/results/monty/pretrained_models/my_trained_models/"
@@ -136,12 +137,12 @@ SCROLL_STEP = 0.6
 VIEWS = [(20, 30), (20, 210), (-60, 30)]
 # Compartments with fewer nodes are drawn in grey rather than their own color.
 MIN_COMPARTMENT_NODES = 2
-# Visits newly inhibiting fewer than this fraction of nodes are drawn in grey.
+# Visits newly reaching fewer than this fraction of nodes are drawn in grey.
 MIN_VISIT_FRACTION = 0.01
 PART_NAMES = ["side", "rim", "bottom", "handle", "inside"]
 # Overrides of the goal generator's parameters, for every figure.
 GSG_KWARGS: dict = {}
-# The input channels to spread on, for every figure (the sensor channel if empty).
+# The input channels to propagate on, for every figure (the sensor channel if empty).
 CHANNELS: list[str] = []
 # The marker of each channel's nodes, in the order of the channels.
 CHANNEL_MARKERS = ["o", "^", "s", "D"]
@@ -171,7 +172,7 @@ def parse_args() -> argparse.Namespace:
         "--channel",
         nargs="+",
         default=None,
-        help="the input channels to spread on, superimposed (default: the sensor "
+        help="the input channels to propagate on, superimposed (default: the sensor "
         "channel)",
     )
     parser.add_argument(
@@ -186,11 +187,11 @@ def parse_args() -> argparse.Namespace:
         help="overrides the mug of the seeds, tolerance and visits figures",
     )
     parser.add_argument(
-        "--min-spread-fraction",
+        "--min-propagation-fraction",
         type=float,
         default=None,
-        help="overrides the goal generator's min_spread_fraction (0 to not push "
-        "spreading through)",
+        help="overrides the goal generator's min_propagation_fraction (0 to not "
+        "push propagation through)",
     )
     parser.add_argument(
         "--output-dir",
@@ -252,7 +253,7 @@ def sensor_channel(memory: dict) -> str:
     """Find the channel of an LM's graphs that receives input from a sensor module.
 
     Channels from other LMs store "object_id" features; the sensor channel stores
-    the surface features that sensory spreading compares.
+    the surface features that sensory propagation compares.
     """
     channels = {
         channel
@@ -269,8 +270,8 @@ def sensor_channel(memory: dict) -> str:
 class FakeParentLM:
     """Serve a checkpoint's graph memory through the parent-LM interface.
 
-    Implements just what the EvidenceGoalGenerator uses to spread
-    inhibition, with the MLH set by the caller.
+    Implements just what the EvidenceGoalGenerator uses to propagate, with the
+    MLH set by the caller.
     """
 
     def __init__(self, memory: dict):
@@ -305,8 +306,8 @@ def is_object_id_channel(memory: dict, channel: str) -> bool:
     )
 
 
-class Spreader:
-    """Spread inhibition on one or more channels from sensing a location.
+class Propagator:
+    """Propagate on one or more channels from sensing a location.
 
     The nodes of a graph's channels are concatenated in the order of
     self.channels, so that each node index refers to one node of one channel.
@@ -321,12 +322,12 @@ class Spreader:
         self._nodes = {}
 
     def channels_in(self, graph_id: str) -> list[str]:
-        """Get the channels to spread on that a graph has."""
+        """Get the channels to propagate on that a graph has."""
         graphs = self.lm.memory.get(graph_id, {})
         return [channel for channel in self.channels if channel in graphs]
 
     def nodes(self, graph_id: str) -> tuple[np.ndarray, np.ndarray]:
-        """Get the nodes of all of a graph's channels to spread on.
+        """Get the nodes of all of a graph's channels to propagate on.
 
         Returns:
             The position of each node, and the index of its channel in
@@ -342,17 +343,17 @@ class Spreader:
             self._nodes[graph_id] = (np.concatenate(pos), np.concatenate(node_channels))
         return self._nodes[graph_id]
 
-    def spread(self, graph_id: str, node: int) -> tuple[np.ndarray, np.ndarray]:
-        """Spread from sensing the location of a node on all of a graph's channels.
+    def propagate(self, graph_id: str, node: int) -> tuple[np.ndarray, np.ndarray]:
+        """Propagate from sensing a node's location on all of a graph's channels.
 
         Each channel senses the features stored at its node nearest the location:
         surface features on a channel from a sensor module, or the ID of the child
         object stored there on a channel from a lower-level LM.
 
         Returns:
-            Whether each node is inhibited, and how far through its channel's
-            spread each node was reached, from 0 (first) to 1 (last), or -1 for
-            nodes no spread reached.
+            Whether each node was reached (its salience reduced), and how far
+            through its channel's propagation each node was reached, from 0
+            (first) to 1 (last), or -1 for nodes no propagation reached.
         """
         location = self.nodes(graph_id)[0][node]
         channels = self.channels_in(graph_id)
@@ -363,23 +364,23 @@ class Spreader:
             "location": location,
             "rotation": Rotation.identity(),
         }
-        # Only the inhibition is reset, keeping the cached neighbors.
-        self.gsg._inhibition_steps = {}
-        self.gsg.spread_records = []
-        self.gsg._spread_from_observations(percepts)
-        inhibited, order = [], []
+        # Only the salience is reset, keeping the cached neighbors.
+        self.gsg._salience = {}
+        self.gsg.propagation_records = []
+        self.gsg._propagate_from_observations(percepts)
+        reached_nodes, order = [], []
         for channel in channels:
             num_nodes = len(self.lm.get_graph(graph_id, channel).pos)
             channel_order = np.full(num_nodes, -1.0)
-            for record in self.gsg.spread_records:
+            for record in self.gsg.propagation_records:
                 if record.input_channel == channel:
                     reached = record.node_order
                     channel_order[reached] = np.arange(len(reached)) / max(
                         len(reached) - 1, 1
                     )
-            inhibited.append(self.gsg.get_inhibition_weights(graph_id, channel) > 0)
+            reached_nodes.append(self.gsg.get_salience(graph_id, channel) < 1)
             order.append(channel_order)
-        return np.concatenate(inhibited), np.concatenate(order)
+        return np.concatenate(reached_nodes), np.concatenate(order)
 
     def _percept(self, graph_id: str, channel: str, location: np.ndarray):
         """Sense the features stored at a channel's node nearest a location."""
@@ -403,8 +404,8 @@ class Spreader:
         )
 
 
-def channels_text(spreader: Spreader) -> str:
-    return " + ".join(spreader.channels)
+def channels_text(propagator: Propagator) -> str:
+    return " + ".join(propagator.channels)
 
 
 def _fit_circle(points_2d: np.ndarray) -> tuple[np.ndarray, float]:
@@ -505,6 +506,7 @@ def draw_views(
             with that channel's marker (see CHANNEL_MARKERS); None for one channel.
         channel_names: The names of the channels, shown in the legend if more
             than one.
+        alpha: The opacity of the markers.
     """
     if node_channels is None:
         node_channels = np.zeros(len(pos), dtype=int)
@@ -559,8 +561,8 @@ def draw_views(
                 ax.legend(handles=handles, fontsize=7, loc="lower left", markerscale=2)
 
 
-def spread_layers(inhibited, order, seed, num_nodes):
-    """Layers drawing uninhibited nodes, inhibited ones by spread order, and the seed.
+def propagation_layers(reached_nodes, order, seed, num_nodes):
+    """Layers drawing unreached nodes, reached ones by propagation order, and the seed.
 
     Returns:
         The layers for draw_views.
@@ -569,33 +571,33 @@ def spread_layers(inhibited, order, seed, num_nodes):
     order_colors = plt.get_cmap("viridis")(np.where(reached, order, 0))
     seed_mask = np.arange(num_nodes) == seed
     return [
-        (~inhibited, "0.8", 3, "not inhibited"),
-        (inhibited & ~reached, "tab:red", 6, None),
-        (reached, order_colors, 6, "inhibited (first to last)"),
+        (~reached_nodes, "0.8", 3, "not reached"),
+        (reached_nodes & ~reached, "tab:red", 6, None),
+        (reached, order_colors, 6, "reached (first to last)"),
         (seed_mask, "magenta", 90, "seed"),
     ]
 
 
-def coverage_text(inhibited, parts) -> str:
+def coverage_text(reached, parts) -> str:
     return ", ".join(
-        f"{name} {inhibited[parts == name].mean():.0%}"
+        f"{name} {reached[parts == name].mean():.0%}"
         for name in PART_NAMES
         if np.any(parts == name)
     )
 
 
-def choose_mug_seeds(mug, parts, spreader, num_candidates=10):
+def choose_mug_seeds(mug, parts, propagator, num_candidates=10):
     """Pick a representative seed on each part of the mug.
 
-    Spreads from a node's own neighborhood vary with the noise in the stored
-    features, so rather than picking a single node, spreads are run from
-    num_candidates random nodes of each part, and the seed whose
-    spread inhibits the median number of nodes is chosen.
+    Propagations from a node's own neighborhood vary with the noise in the
+    stored features, so rather than picking a single node, propagations are run
+    from num_candidates random nodes of each part, and the seed whose
+    propagation reaches the median number of nodes is chosen.
 
     Returns:
         (description, node) pairs.
     """
-    pos, _ = spreader.nodes(mug)
+    pos, _ = propagator.nodes(mug)
     handle_distance = KDTree(pos[parts == "handle"]).query(pos)[0]
     side = parts == "side"
     regions = [
@@ -613,32 +615,32 @@ def choose_mug_seeds(mug, parts, spreader, num_candidates=10):
         candidates = rng.choice(
             candidates, min(num_candidates, len(candidates)), replace=False
         )
-        sizes = [spreader.spread(mug, int(node))[0].sum() for node in candidates]
+        sizes = [propagator.propagate(mug, int(node))[0].sum() for node in candidates]
         median = candidates[np.argsort(sizes)[len(sizes) // 2]]
         seeds.append((description, int(median)))
     return seeds
 
 
 def plot_mug_seeds(memory, mug, _objects):
-    spreader = Spreader(memory)
-    pos, node_channels = spreader.nodes(mug)
+    propagator = Propagator(memory)
+    pos, node_channels = propagator.nodes(mug)
     parts = mug_parts(memory, mug, pos)
-    seeds = choose_mug_seeds(mug, parts, spreader)
+    seeds = choose_mug_seeds(mug, parts, propagator)
     num_cols = len(VIEWS) + 1
     fig = plt.figure(figsize=(4 * num_cols, 3.6 * len(seeds)))
     for row, (description, seed) in enumerate(seeds):
-        inhibited, order = spreader.spread(mug, seed)
+        reached, order = propagator.propagate(mug, seed)
         draw_views(
             fig,
             row,
             pos,
-            spread_layers(inhibited, order, seed, len(pos)),
-            f"Seed on the {description}: {inhibited.sum()} of {len(pos)} nodes "
-            f"inhibited\n{coverage_text(inhibited, parts)}",
+            propagation_layers(reached, order, seed, len(pos)),
+            f"Seed on the {description}: {reached.sum()} of {len(pos)} nodes "
+            f"reached\n{coverage_text(reached, parts)}",
             len(seeds),
             num_cols,
             node_channels=node_channels,
-            channel_names=spreader.channels,
+            channel_names=propagator.channels,
         )
     # The part labels used for the coverage percentages, in the last column.
     ax_parts = fig.add_subplot(len(seeds), num_cols, num_cols, projection="3d")
@@ -659,31 +661,31 @@ def plot_mug_seeds(memory, mug, _objects):
     ax_parts.set_title("Mug parts (for coverage)", fontsize=9, loc="left")
     ax_parts.legend(fontsize=7, loc="lower left", markerscale=3)
     fig.suptitle(
-        f"{mug} ({channels_text(spreader)}): inhibition spread from sensing one "
+        f"{mug} ({channels_text(propagator)}): propagation from sensing one "
         "location "
-        "on each part of the mug\n(the seed with the median spread out of 10 random "
-        "seeds per part; percentages: share of each part inhibited)",
+        "on each part of the mug\n(the seed with the median propagation out of 10 "
+        "random seeds per part; percentages: share of each part reached)",
         fontsize=12,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     return fig, f"{mug}_seeds.png"
 
 
-def compartments(spreader, graph_id, rng):
-    """Divide a graph into the regions that spreads from its nodes inhibit.
+def compartments(propagator, graph_id, rng):
+    """Divide a graph into the regions that propagations from its nodes reach.
 
     Returns:
-        The compartment of each node (-1 for nodes no spread reached), and the
-        seed of each compartment.
+        The compartment of each node (-1 for nodes no propagation reached), and
+        the seed of each compartment.
     """
-    num_nodes = len(spreader.nodes(graph_id)[0])
+    num_nodes = len(propagator.nodes(graph_id)[0])
     labels = np.full(num_nodes, -1)
     seeds = []
     for node in rng.permutation(num_nodes):
         if labels[node] >= 0:
             continue
-        inhibited, _ = spreader.spread(graph_id, int(node))
-        new = inhibited & (labels < 0)
+        reached, _ = propagator.propagate(graph_id, int(node))
+        new = reached & (labels < 0)
         if not np.any(new):
             continue
         labels[new] = len(seeds)
@@ -692,13 +694,13 @@ def compartments(spreader, graph_id, rng):
 
 
 def plot_compartments(memory, _mug, objects):
-    spreader = Spreader(memory)
-    objects = [graph_id for graph_id in objects if spreader.channels_in(graph_id)]
+    propagator = Propagator(memory)
+    objects = [graph_id for graph_id in objects if propagator.channels_in(graph_id)]
     fig = plt.figure(figsize=(4 * len(VIEWS), 3.6 * len(objects)))
     rng = np.random.default_rng(0)
     for row, graph_id in enumerate(objects):
-        pos, node_channels = spreader.nodes(graph_id)
-        labels, _ = compartments(spreader, graph_id, rng)
+        pos, node_channels = propagator.nodes(graph_id)
+        labels, _ = compartments(propagator, graph_id, rng)
         ids, counts = np.unique(labels[labels >= 0], return_counts=True)
         large = ids[counts >= MIN_COMPARTMENT_NODES]
         large = large[np.argsort(-counts[np.isin(ids, large)])]
@@ -723,39 +725,39 @@ def plot_compartments(memory, _mug, objects):
             len(objects),
             len(VIEWS),
             node_channels=node_channels,
-            channel_names=spreader.channels,
+            channel_names=propagator.channels,
         )
     fig.suptitle(
-        f"Compartments of the {channels_text(spreader)} graphs: regions inhibited "
+        f"Compartments of the {channels_text(propagator)} graphs: regions reached "
         "together "
-        "by a spread from sensing any of their nodes\n(one color per compartment, "
-        "largest first)",
+        "by a propagation from sensing any of their nodes\n(one color per "
+        "compartment, largest first)",
         fontsize=12,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     return fig, "compartments.png"
 
 
-def simulate_visits(spreader, graph_id, first_seed, rng):
-    """Visit every node of a graph as inference would, without inhibition decaying.
+def simulate_visits(propagator, graph_id, first_seed, rng):
+    """Visit every node of a graph as inference would, without salience recovering.
 
-    Beginning with the first seed, the sensed features of a seed node spread
-    inhibition, and the next seed is sampled uniformly from the nodes not yet
-    inhibited, until every node has been inhibited (or been a seed).
+    Beginning with the first seed, the sensed features of a seed node propagate,
+    and the next seed is sampled uniformly from the nodes not yet reached, until
+    every node has been reached (or been a seed).
 
     Returns:
-        The visit (numbered from 0) that first inhibited each node, and for each
-        visit, its seed and the number of nodes its spread reached.
+        The visit (numbered from 0) that first reached each node, and for each
+        visit, its seed and the number of nodes its propagation reached.
     """
-    num_nodes = len(spreader.nodes(graph_id)[0])
+    num_nodes = len(propagator.nodes(graph_id)[0])
     visit = np.full(num_nodes, -1)
     visits = []
     seed = first_seed
     while seed is not None:
-        inhibited, _ = spreader.spread(graph_id, seed)
-        inhibited[seed] = True
-        visit[inhibited & (visit < 0)] = len(visits)
-        visits.append((seed, int(inhibited.sum())))
+        reached, _ = propagator.propagate(graph_id, seed)
+        reached[seed] = True
+        visit[reached & (visit < 0)] = len(visits)
+        visits.append((seed, int(reached.sum())))
         remaining = np.flatnonzero(visit < 0)
         seed = int(rng.choice(remaining)) if len(remaining) else None
     return visit, visits
@@ -768,9 +770,9 @@ def first_mug_seed(parts, pos, rng):
 
 
 def plot_visits(memory, mug, objects):
-    spreader = Spreader(memory)
-    fraction = spreader.gsg.min_spread_fraction or 0
-    objects = [graph_id for graph_id in objects if spreader.channels_in(graph_id)]
+    propagator = Propagator(memory)
+    fraction = propagator.gsg.min_propagation_fraction or 0
+    objects = [graph_id for graph_id in objects if propagator.channels_in(graph_id)]
     num_cols = len(VIEWS) + 1
     fig = plt.figure(figsize=(3.6 * num_cols, 3.6 * len(objects)))
     # tab20 pairs each color with a lighter shade of it; all of the strong colors
@@ -781,7 +783,7 @@ def plot_visits(memory, mug, objects):
     visit_colors = [c for c in visit_colors if c not in (tab20[14], tab20[15])]
     for row, graph_id in enumerate(objects):
         rng = np.random.default_rng(0)
-        pos, node_channels = spreader.nodes(graph_id)
+        pos, node_channels = propagator.nodes(graph_id)
         num_nodes = len(pos)
         parts = None
         if graph_id == mug:
@@ -789,7 +791,7 @@ def plot_visits(memory, mug, objects):
             first_seed = first_mug_seed(parts, pos, rng)
         else:
             first_seed = int(rng.integers(num_nodes))
-        visit, visits = simulate_visits(spreader, graph_id, first_seed, rng)
+        visit, visits = simulate_visits(propagator, graph_id, first_seed, rng)
         new_counts = np.bincount(visit, minlength=len(visits))
         shown = np.flatnonzero(new_counts >= MIN_VISIT_FRACTION * num_nodes)
         shown = shown[: len(visit_colors)]
@@ -800,7 +802,7 @@ def plot_visits(memory, mug, objects):
             node_colors[visit == index] = color
             label = (
                 f"{index + 1}: {new_counts[index] / num_nodes:.0%} new"
-                f" (spread {visits[index][1] / num_nodes:.0%})"
+                f" (propagation {visits[index][1] / num_nodes:.0%})"
             )
             if parts is not None:
                 new_parts = parts[visit == index]
@@ -821,25 +823,25 @@ def plot_visits(memory, mug, objects):
             row,
             pos,
             [(np.ones(num_nodes, dtype=bool), node_colors, 4, None)],
-            f"{graph_id}: {len(visits)} visits to inhibit all {num_nodes} nodes; "
-            f"the first 5 inhibit {cumulative[min(4, len(visits) - 1)]:.0%}",
+            f"{graph_id}: {len(visits)} visits to reach all {num_nodes} nodes; "
+            f"the first 5 reach {cumulative[min(4, len(visits) - 1)]:.0%}",
             len(objects),
             num_cols,
             node_channels=node_channels,
-            channel_names=spreader.channels,
+            channel_names=propagator.channels,
             alpha=0.5,
         )
         ax = fig.add_subplot(len(objects), num_cols, (row + 1) * num_cols)
         ax.set_axis_off()
         ax.legend(handles=legend, loc="center left", fontsize=7, frameon=False)
     fig.suptitle(
-        f"Online visits to the {channels_text(spreader)} graphs, each spreading from "
-        "a seed sampled "
-        "from the nodes not yet inhibited (the first on the side of the mug)\n"
-        "colored by the visit that first inhibited each node; legend: the order of "
-        "the visit, the nodes it newly inhibited, and the nodes its spread reached\n"
-        f"min_spread_fraction={fraction:.0%}; grey: visits newly inhibiting fewer "
-        f"than {MIN_VISIT_FRACTION:.0%} of nodes",
+        f"Online visits to the {channels_text(propagator)} graphs, each propagating "
+        "from a seed sampled "
+        "from the nodes not yet reached (the first on the side of the mug)\n"
+        "colored by the visit that first reached each node; legend: the order of "
+        "the visit, the nodes it newly reached, and the nodes its propagation "
+        f"reached\nmin_propagation_fraction={fraction:.0%}; grey: visits newly "
+        f"reaching fewer than {MIN_VISIT_FRACTION:.0%} of nodes",
         fontsize=10,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.96))
@@ -847,33 +849,33 @@ def plot_visits(memory, mug, objects):
 
 
 def plot_tolerance(memory, mug, _objects):
-    default_spreader = Spreader(memory)
-    pos, node_channels = default_spreader.nodes(mug)
+    default_propagator = Propagator(memory)
+    pos, node_channels = default_propagator.nodes(mug)
     parts = mug_parts(memory, mug, pos)
-    seeds = choose_mug_seeds(mug, parts, default_spreader)[:2]
+    seeds = choose_mug_seeds(mug, parts, default_propagator)[:2]
     tolerances = [1, 2, 3]
     num_cols = len(VIEWS) * len(seeds)
     fig = plt.figure(figsize=(3.4 * num_cols, 3.6 * len(tolerances)))
     for row, tolerance in enumerate(tolerances):
-        spreader = Spreader(memory, max_dissimilar_neighbors=tolerance)
+        propagator = Propagator(memory, max_dissimilar_neighbors=tolerance)
         for col, (description, seed) in enumerate(seeds):
-            inhibited, order = spreader.spread(mug, seed)
+            reached, order = propagator.propagate(mug, seed)
             draw_views(
                 fig,
                 row,
                 pos,
-                spread_layers(inhibited, order, seed, len(pos)),
+                propagation_layers(reached, order, seed, len(pos)),
                 f"max_dissimilar_neighbors={tolerance}, seed on the {description}:"
-                f" {inhibited.sum()} inhibited\n{coverage_text(inhibited, parts)}",
+                f" {reached.sum()} reached\n{coverage_text(reached, parts)}",
                 len(tolerances),
                 num_cols,
                 col_offset=col * len(VIEWS),
                 node_channels=node_channels,
-                channel_names=spreader.channels,
+                channel_names=propagator.channels,
             )
     fig.suptitle(
-        f"{mug} ({channels_text(default_spreader)}): spreads from the same seeds "
-        "with different max_dissimilar_neighbors (the default is 2)",
+        f"{mug} ({channels_text(default_propagator)}): propagations from the same "
+        "seeds with different max_dissimilar_neighbors (the default is 2)",
         fontsize=12,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.96))
@@ -951,8 +953,8 @@ def main():
     model_path = Path(model.path) if args.model_path is None else args.model_path
     lm_id = model.lm if args.lm is None else args.lm
     memory = load_lm_memory(resolve_checkpoint(model_path), lm_id)
-    if args.min_spread_fraction is not None:
-        GSG_KWARGS["min_spread_fraction"] = args.min_spread_fraction or None
+    if args.min_propagation_fraction is not None:
+        GSG_KWARGS["min_propagation_fraction"] = args.min_propagation_fraction or None
     prefix = f"{args.model}_lm{lm_id}_"
     if args.channels:
         known = {channel for graphs in memory.values() for channel in graphs}
@@ -963,7 +965,7 @@ def main():
             )
         CHANNELS.extend(args.channels)
         prefix += "+".join(args.channels) + "_"
-    channels = Spreader(memory).channels
+    channels = Propagator(memory).channels
     mug = args.mug or model.mug
     objects = args.objects or model.objects
     if not any(c in memory.get(graph_id, {}) for graph_id in objects for c in channels):

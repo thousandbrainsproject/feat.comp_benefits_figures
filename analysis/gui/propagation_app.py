@@ -6,16 +6,16 @@
 # Use of this source code is governed by the MIT
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
-"""Interactive explorer of the EvidenceGoalGenerator's inhibition spreading.
+"""Interactive explorer of the EvidenceGoalGenerator's salience propagation.
 
-A local web app (Dash) that runs the goal generator's spreading on synthetic 3D
-primitives (see `primitives`) or on learned object models (see `learned_models`)
-and lets you watch it unfold node by node. It complements
-analysis/scripts/visualize_inhibition_spreading.py, which plots the same
-spreading on learned models for the paper figures.
+A local web app (Dash) that runs the goal generator's propagation on synthetic
+3D primitives (see `primitives`) or on learned object models (see
+`learned_models`) and lets you watch it unfold node by node. It complements
+analysis/scripts/visualize_salience_propagation.py, which plots the same
+propagation on learned models for the paper figures.
 
 Usage:
-    python analysis/gui/spreading_app.py [--condition KEY] [--port PORT] [--debug]
+    python analysis/gui/propagation_app.py [--condition KEY] [--port PORT] [--debug]
 
 then open http://127.0.0.1:8050 in a browser. Requires `dash` (pip install dash).
 
@@ -27,25 +27,30 @@ In the app:
   objects learned by LM 2 of the compositional Monty, with their object-ID
   channels), and the channel whose graph to display.
 - Click a node (or pick a landmark) to sense its location: that is one step of
-  the LM, on which the inhibition decays and every channel receives the features
-  or object ID stored at its nearest node, which then spread. Override the
-  sensed hue, normal (tilted away from the stored one) or object ID to see the
-  goal generator refuse to spread from input the MLH does not predict.
-- Scrub the slider, or press play, to step through the spread in the order the
-  nodes were reached. The seeds, the node being reached, the sinks (reached
-  nodes that do not spread on), the boundary the spread stopped at, and the
-  frontier a push-through started from are each marked, and the status bar says
-  when a push-through is under way.
-- Color the nodes by the spread, by their hue, their surface normals, their
-  current inhibition, their object ID, or the region of the primitive they belong
-  to; toggle normal glyphs, the spread tree, and the other channels' nodes.
-- "Step" decays the inhibition by one step (or ten) without sensing; "Reset"
-  clears it, and resets the view (orbiting, panning or zooming the scene
-  otherwise persists across sensing, stepping and recoloring).
-  The goal generator's parameters can be changed on the fly (the inhibition is
+  the LM, on which every channel receives the features or object ID stored at
+  its nearest node, which then propagate, reducing the salience of the nodes
+  they reach (by salience_reduction, less for nodes reached later if
+  salience_reduction_falloff > 0), while the salience of every other node
+  recovers by one step. Override the sensed hue, normal (tilted away from the
+  stored one) or object ID to see the goal generator refuse to propagate from
+  input the MLH does not predict.
+- Scrub the slider, or press play, to step through the propagation in the order
+  the nodes were reached. The seeds, the node being reached, the sinks (reached
+  nodes that do not propagate on), the boundary the propagation stopped at, and
+  the frontier a push-through started from are each marked, and the status bar
+  says when a push-through is under way.
+- Color the nodes by the propagation, by their hue, their surface normals, their
+  current salience (bright: salient, likely to be sampled as a goal; grey: not;
+  "Emphasize low salience" inverts this), their object ID, or the region of the
+  primitive they belong to; toggle normal glyphs, the propagation tree, and the
+  other channels' nodes.
+- "Step" recovers the salience by one step (or ten) without sensing; "Reset"
+  restores it to 1 everywhere, and resets the view (orbiting, panning or zooming
+  the scene otherwise persists across sensing, stepping and recoloring).
+  The goal generator's parameters can be changed on the fly (the salience is
   kept).
 - Hover a node for its features, its neighbors (how many are similar, dissimilar,
-  or on the far side of the surface), whether it spreads, and its inhibition.
+  or on the far side of the surface), whether it propagates, and its salience.
 """
 
 from __future__ import annotations
@@ -61,10 +66,10 @@ from plotly.colors import qualitative, sample_colorscale
 
 from analysis.gui import learned_models
 from analysis.gui.primitives import CONDITION_KEYS, build_condition
-from analysis.gui.spreading_session import PARAMETERS, Session
+from analysis.gui.propagation_session import PARAMETERS, Session
 
 if TYPE_CHECKING:
-    from tbp.monty.frameworks.models.goal_generation import SpreadRecord
+    from tbp.monty.frameworks.models.goal_generation import PropagationRecord
 
 UNREACHED_COLOR = "#d4d4d4"
 SEED_COLOR = "#ff00ff"
@@ -74,6 +79,8 @@ BOUNDARY_COLOR = "#e41a1c"
 FRONTIER_COLOR = "#ff6f00"
 TREE_COLOR = "rgba(60, 60, 60, 0.45)"
 GLYPH_COLOR = "rgba(0, 90, 160, 0.5)"
+# Salience from 0 (grey, hard to see) to 1 (bright and obvious).
+SALIENCE_COLORSCALE = [[0.0, "#e6e6e6"], [0.5, "#fdae6b"], [1.0, "#d94801"]]
 ID_COLORS = {
     "square": "#1f77b4",
     "circle": "#ff7f0e",
@@ -96,14 +103,14 @@ REGION_COLORS = {
     "inside": "#e6550d",
     "other": "#bbbbbb",
 }
-COLOR_MODES = ["Spread", "Hue", "Normals", "Inhibition", "Object ID", "Region"]
+COLOR_MODES = ["Propagation", "Hue", "Normals", "Salience", "Object ID", "Region"]
 OVERLAYS = {
     "seeds": "Seeds",
     "current": "Node being reached",
-    "sinks": "Sinks (reached, don't spread on)",
+    "sinks": "Sinks (reached, don't propagate on)",
     "boundary": "Boundary (unreached neighbors)",
     "frontier": "Push-through frontier",
-    "tree": "Spread tree (edges)",
+    "tree": "Propagation tree (edges)",
     "glyphs": "Normal glyphs",
     "ghost": "Other channels",
 }
@@ -114,14 +121,16 @@ DEFAULT_CAMERA = {
 }
 SPEEDS = [1, 2, 5, 10, 25, 50]
 PARAMETER_STEPS = {
-    "num_spread_neighbors": 1,
-    "num_feature_spread_neighbors": 1,
-    "inhibition_decay_steps": 1,
+    "num_propagation_neighbors": 1,
+    "num_feature_propagation_neighbors": 1,
+    "salience_recovery_steps": 1,
+    "salience_reduction": 0.05,
+    "salience_reduction_falloff": 0.1,
     "max_hue_difference": 0.01,
     "max_normal_angle": 5,
     "min_far_side_angle": 5,
     "max_dissimilar_neighbors": 1,
-    "min_spread_fraction": 0.01,
+    "min_propagation_fraction": 0.01,
 }
 
 SESSION = Session(CONDITION_KEYS[0])
@@ -159,7 +168,7 @@ def marker_size(num_nodes: int) -> float:
     return float(np.clip(135 / np.sqrt(max(num_nodes, 1)), 3.6, 9.0))
 
 
-def stage_colors(record: SpreadRecord, progress: int) -> list[str]:
+def stage_colors(record: PropagationRecord, progress: int) -> list[str]:
     """Color the reached nodes by stage and hops.
 
     Returns:
@@ -181,19 +190,43 @@ def stage_colors(record: SpreadRecord, progress: int) -> list[str]:
     return colors[:progress].tolist()
 
 
+def salience_marker(salience: np.ndarray, emphasize_low: bool) -> dict:
+    """Marker settings coloring nodes by salience.
+
+    Args:
+        salience: The salience of each node.
+        emphasize_low: Whether to make the nodes with low salience the bright
+            ones (by default, the salient nodes are bright and the rest grey).
+
+    Returns:
+        Keys to update the nodes' marker with.
+    """
+    colorscale = SALIENCE_COLORSCALE
+    if emphasize_low:
+        colorscale = [[1 - stop, color] for stop, color in reversed(colorscale)]
+    return {
+        "color": salience,
+        "colorscale": colorscale,
+        "cmin": 0,
+        "cmax": 1,
+        "colorbar": {"title": "salience", "thickness": 12, "len": 0.5, "x": 1.0},
+    }
+
+
 def hover_texts(session: Session, channel: str, progress: int) -> list[str]:
     graph = session.graphs[channel]
     labels = session.condition.labels[channel]
-    steps = session.gsg._get_inhibition_steps("primitive", channel, len(graph.pos))
+    salience = session.salience(channel)
     is_id = session.is_id_channel(channel)
-    spread_text = {}
+    propagation_text = {}
     if session.sensing and channel in session.sensing.records:
         record = session.sensing.records[channel]
         for position, node in enumerate(record.node_order[:progress]):
             stage = record.stage[position]
             where = "from seeds" if stage == 0 else f"push-through {stage}"
-            spread_text[int(node)] = (
-                f"reached #{position + 1}, {record.hops[position]} hop(s) {where}"
+            propagation_text[int(node)] = (
+                f"reached #{position + 1}, {record.hops[position]} hop(s) {where}; "
+                f"salience -{record.reduction[position]:.2f}"
             )
     has_hue = "hsv" in graph.feature_mapping
     texts = []
@@ -208,9 +241,9 @@ def hover_texts(session: Session, channel: str, progress: int) -> list[str]:
             if has_hue:
                 text = f"hue {graph.feature('hsv')[node, 0]:.3f} · " + text
             lines.append(text)
-        lines.append(f"inhibition: {steps[node]} steps")
-        if node in spread_text:
-            lines.append(spread_text[node])
+        lines.append(f"salience: {salience[node]:.2f}")
+        if node in propagation_text:
+            lines.append(propagation_text[node])
         texts.append("<br>".join(lines))
     return texts
 
@@ -278,17 +311,20 @@ def build_figure(
     color_mode: str,
     overlays: list,
     camera: dict | None = None,
+    emphasize_low: bool = False,
 ) -> go.Figure:
     """Build the 3D figure of a channel's graph.
 
     Args:
         session: The session.
         channel: The channel whose graph to show.
-        progress: How many nodes of the last spread to show as reached.
+        progress: How many nodes of the last propagation to show as reached.
         color_mode: One of COLOR_MODES.
         overlays: The keys of OVERLAYS to draw.
         camera: The view the user orbited to (as plotly reports it in
             relayoutData["scene.camera"]), or None for the default view.
+        emphasize_low: In the "Salience" color mode, whether to make the nodes
+            with low salience the bright ones rather than the salient nodes.
 
     Returns:
         The figure.
@@ -310,7 +346,7 @@ def build_figure(
 
     marker: dict = {"size": marker_size(num_nodes), "line": {"width": 0}}
     traces = []
-    if color_mode == "Spread":
+    if color_mode == "Propagation":
         colors = np.full(num_nodes, UNREACHED_COLOR, dtype=object)
         if record is not None and progress:
             colors[reached_nodes] = stage_colors(record, progress)
@@ -323,14 +359,9 @@ def build_figure(
     elif color_mode == "Normals":
         rgb = (graph.normals + 1) / 2
         marker["color"] = [mcolors.to_hex(c) for c in rgb]
-    elif color_mode == "Inhibition":
-        marker.update(
-            color=session.inhibition_weights(channel, progress if record else None),
-            colorscale="Reds",
-            cmin=0,
-            cmax=1,
-            colorbar={"title": "inhibition", "thickness": 12, "len": 0.5, "x": 1.0},
-        )
+    elif color_mode == "Salience":
+        salience = session.salience(channel, progress if record else None)
+        marker.update(salience_marker(salience, emphasize_low))
     elif color_mode == "Object ID" and is_id:
         names = [session.id_name(i) for i in graph.feature("object_id")[:, 0]]
         colors = color_table(names, ID_COLORS)
@@ -377,7 +408,9 @@ def build_figure(
             line_trace(pos, pos + length * graph.normals, GLYPH_COLOR, 1.5, "normals")
         )
     if record is not None and progress:
-        traces.extend(spread_overlays(session, channel, record, progress, overlays))
+        traces.extend(
+            propagation_overlays(session, channel, record, progress, overlays)
+        )
 
     figure = go.Figure(traces)
     axis = {"visible": False, "showbackground": False}
@@ -407,10 +440,10 @@ def build_figure(
     return figure
 
 
-def spread_overlays(
-    session: Session, channel: str, record: SpreadRecord, progress: int, overlays
+def propagation_overlays(
+    session: Session, channel: str, record: PropagationRecord, progress: int, overlays
 ) -> list:
-    """The traces marking the special nodes of a spread, up to a point in it.
+    """The traces marking the special nodes of a propagation, up to a point in it.
 
     Returns:
         The traces.
@@ -423,7 +456,7 @@ def spread_overlays(
         children = reached_nodes[has_parent]
         parents = record.predecessor[:progress][has_parent]
         traces.append(
-            line_trace(pos[parents], pos[children], TREE_COLOR, 2, "spread tree")
+            line_trace(pos[parents], pos[children], TREE_COLOR, 2, "propagation tree")
         )
     if "boundary" in overlays:
         reached = np.zeros(len(pos), dtype=bool)
@@ -446,7 +479,7 @@ def spread_overlays(
         sinks = np.intersect1d(reached_nodes, record.sinks)
         traces.append(
             marker_trace(
-                pos, sinks, "sinks: reached, don't spread on", "x", SINK_COLOR, 4
+                pos, sinks, "sinks: reached, don't propagate on", "x", SINK_COLOR, 4
             )
         )
     if "frontier" in overlays:
@@ -481,7 +514,7 @@ def spread_overlays(
 
 
 def status_text(session: Session, channel: str, progress: int):
-    """The status bar: where in the spread the slider is, and what is going on.
+    """The status bar: where in the propagation the slider is, and what is going on.
 
     Returns:
         Dash children and a background color.
@@ -490,8 +523,8 @@ def status_text(session: Session, channel: str, progress: int):
         return "Click a node (or pick a landmark) to sense its location.", "#f0f0f0"
     record = session.sensing.records.get(channel)
     if record is None:
-        reason = session.sensing.no_spread.get(channel, "unknown")
-        return f"No spread on {channel}: {reason}.", "#fde0dd"
+        reason = session.sensing.no_propagation.get(channel, "unknown")
+        return f"No propagation on {channel}: {reason}.", "#fde0dd"
     total = len(record.node_order)
     progress = min(progress, total)
     if progress == 0:
@@ -504,10 +537,12 @@ def status_text(session: Session, channel: str, progress: int):
         html.B(f"{progress} / {total}"),
         f" · node {node}: ",
     ]
+    reduction = f" · salience -{record.reduction[position]:.2f}"
     if stage == 0:
         parts.append("seed" if hops == 0 else f"{hops} hop(s) from the seeds")
+        parts.append(reduction)
         if node in record.sinks:
-            parts.append(" · sink (does not spread on)")
+            parts.append(" · sink (does not propagate on)")
         return parts, "#e8f1fb"
     stalled_at = int(np.count_nonzero(record.stage < stage))
     frontier = int(np.count_nonzero((record.stage == stage) & (record.hops == 0)))
@@ -516,12 +551,13 @@ def status_text(session: Session, channel: str, progress: int):
         if hops == 0
         else f"{hops} hop(s) from the frontier"
     )
+    parts.append(reduction)
     parts.append(
         html.Span(
-            f"  PUSH-THROUGH {stage}: the spread stalled at {stalled_at} nodes, short "
-            f"of min_spread_fraction ({record.min_size:.1f} nodes), so it continued "
-            f"from the {frontier} unreached neighbors of the reached nodes, whatever "
-            "their features, until that many nodes were reached.",
+            f"  PUSH-THROUGH {stage}: the propagation stalled at {stalled_at} nodes, "
+            f"short of min_propagation_fraction ({record.min_size:.1f} nodes), so it "
+            f"continued from the {frontier} unreached neighbors of the reached "
+            "nodes, whatever their features, until that many nodes were reached.",
             style={"marginLeft": "12px", "fontWeight": "bold", "color": "#b35900"},
         )
     )
@@ -529,7 +565,7 @@ def status_text(session: Session, channel: str, progress: int):
 
 
 def summary_children(session: Session):
-    """The sensing summary: what each channel received and how it spread.
+    """The sensing summary: what each channel received and how it propagated.
 
     Returns:
         Dash children.
@@ -570,13 +606,21 @@ def summary_children(session: Session):
         lines = [html.B(channel), html.Br(), f"received {sensing.percepts[channel]}"]
         record = sensing.records.get(channel)
         if record is None:
-            lines += [html.Br(), html.I(f"no spread: {sensing.no_spread[channel]}")]
+            lines += [
+                html.Br(),
+                html.I(f"no propagation: {sensing.no_propagation[channel]}"),
+            ]
         else:
             pushes = int(record.stage.max())
+            salience = session.salience(channel)
             lines += [
                 html.Br(),
                 f"{len(record.node_order)} nodes reached from {len(record.seeds)} "
                 f"seeds; {len(record.sinks)} sinks",
+                html.Br(),
+                f"salience reduced by {record.reduction.max():.2f} (first) to "
+                f"{record.reduction.min():.2f} (last); "
+                f"{int(np.count_nonzero(salience <= 0))} node(s) at 0",
             ]
             if pushes:
                 lines += [
@@ -606,7 +650,7 @@ def details_children(details: dict[str, str]):
     )
 
 
-def slider_marks(record: SpreadRecord | None) -> dict:
+def slider_marks(record: PropagationRecord | None) -> dict:
     if record is None:
         return {0: "0"}
     total = len(record.node_order)
@@ -725,7 +769,7 @@ def build_layout():
             html.Div(
                 [
                     html.H3(
-                        "Inhibition spreading explorer (EvidenceGoalGenerator)",
+                        "Salience propagation explorer (EvidenceGoalGenerator)",
                         style={"margin": "8px 0 2px"},
                     ),
                     html.Div(id="description", children=condition.description),
@@ -785,9 +829,26 @@ def build_layout():
                                 dcc.RadioItems(
                                     id="color-mode",
                                     options=COLOR_MODES,
-                                    value="Spread",
+                                    value="Propagation",
                                     inline=True,
                                     labelStyle={"marginRight": "8px"},
+                                ),
+                                dcc.Checklist(
+                                    id="salience-emphasis",
+                                    options=[
+                                        {
+                                            "label": "Emphasize low salience (invert "
+                                            "the salience colors)",
+                                            "value": "low",
+                                        }
+                                    ],
+                                    value=[],
+                                    style={"fontSize": "11px", "marginTop": "4px"},
+                                ),
+                                html.Div(
+                                    "Salience: bright nodes are salient (likely to be "
+                                    "sampled as a goal), grey ones are not.",
+                                    style={"fontSize": "11px", "color": "#666"},
                                 ),
                             ),
                             section(
@@ -803,10 +864,10 @@ def build_layout():
                                 ),
                             ),
                             section(
-                                "Inhibition",
+                                "Salience",
                                 html.Div(
                                     [
-                                        html.Button("Step (decay)", id="step-btn"),
+                                        html.Button("Step (recover)", id="step-btn"),
                                         html.Button(
                                             "Step x10",
                                             id="step10-btn",
@@ -827,8 +888,10 @@ def build_layout():
                                     ]
                                 ),
                                 html.Div(
-                                    "Sensing a location is also a step: the inhibition "
-                                    "decays before the new spread.",
+                                    "Sensing a location is also a step: the salience "
+                                    "of the nodes the propagation does not reach "
+                                    "recovers by one step. Reset restores it to 1 "
+                                    "everywhere.",
                                     style={"fontSize": "11px", "color": "#666"},
                                 ),
                             ),
@@ -845,7 +908,7 @@ def build_layout():
                                     SESSION,
                                     condition.channels[0],
                                     0,
-                                    "Spread",
+                                    "Propagation",
                                     DEFAULT_OVERLAYS,
                                 ),
                                 config={"displayModeBar": True, "scrollZoom": True},
@@ -979,8 +1042,8 @@ def handle_action(
         actually loaded, which differs from the selected one if loading it
         failed), "channel_options", "landmark_options", "id_options",
         "description" (the latter four None if unchanged), "record" (the
-        displayed channel's spread, if any), "total" (its number of nodes) and
-        "progress" (the slider's new value, or None to keep it).
+        displayed channel's propagation, if any), "total" (its number of nodes)
+        and "progress" (the slider's new value, or None to keep it).
     """
     channel_options = landmark_options = id_options_ = description = None
     if trigger == "condition" and condition_key != session.condition.key:
@@ -999,11 +1062,11 @@ def handle_action(
     elif trigger == "graph" and (node := event_node(click_data)) is not None:
         session.sense(session.graphs[channel].pos[node])
     elif trigger == "step-btn":
-        session.step_inhibition()
+        session.step_salience()
     elif trigger == "step10-btn":
-        session.step_inhibition(10)
+        session.step_salience(10)
     elif trigger == "reset-btn":
-        session.reset_inhibition()
+        session.reset_salience()
     elif isinstance(trigger, dict) and trigger.get("type") == "param":
         session.set_parameters(**parameters)
     elif isinstance(trigger, str) and trigger.startswith("override-"):
@@ -1111,7 +1174,7 @@ def register_callbacks(app: Dash) -> None:
             return no_update if value is None else value
 
         loaded = result["id_options"] is not None  # A new condition was loaded.
-        # The view resets with the inhibition, and when another object is loaded.
+        # The view resets with the salience, and when another object is loaded.
         reset_view = loaded or ctx.triggered_id == "reset-btn"
         return (
             version + 1,
@@ -1188,16 +1251,23 @@ def register_callbacks(app: Dash) -> None:
         Input("progress", "value"),
         Input("channel", "value"),
         Input("color-mode", "value"),
+        Input("salience-emphasis", "value"),
         Input("overlays", "value"),
         State("camera", "data"),
     )
-    def render(_version, progress, channel, color_mode, overlays, camera):
+    def render(_version, progress, channel, color_mode, emphasis, overlays, camera):
         session = SESSION
         if channel not in session.channels:
             channel = session.channels[0]
         progress = int(progress or 0)
         figure = build_figure(
-            session, channel, progress, color_mode, overlays or [], camera
+            session,
+            channel,
+            progress,
+            color_mode,
+            overlays or [],
+            camera,
+            emphasize_low="low" in (emphasis or []),
         )
         text, background = status_text(session, channel, progress)
         style = {
@@ -1232,7 +1302,7 @@ def register_callbacks(app: Dash) -> None:
 
 
 def create_app() -> Dash:
-    app = Dash(__name__, title="Inhibition spreading explorer")
+    app = Dash(__name__, title="Salience propagation explorer")
     app.layout = build_layout()
     register_callbacks(app)
     return app

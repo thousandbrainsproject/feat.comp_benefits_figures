@@ -32,7 +32,7 @@ __all__ = [
     "EvidenceGoalGenerator",
     "GraphGoalGenerator",
     "ParentLMNotProvided",
-    "SpreadRecord",
+    "PropagationRecord",
 ]
 
 logger = logging.getLogger(__name__)
@@ -455,30 +455,34 @@ class GraphGoalGenerator(GoalGenerator):
 
 
 @dataclass(frozen=True)
-class SpreadRecord:
-    """One spread of inhibition by an `EvidenceGoalGenerator`.
+class PropagationRecord:
+    """One propagation of a salience reduction by an `EvidenceGoalGenerator`.
 
     Attributes:
-        graph_id: The graph (the MLH object) the inhibition spread through.
-        input_channel: The input channel whose graph the inhibition spread through,
+        graph_id: The graph (the MLH object) the propagation went through.
+        input_channel: The input channel whose graph the propagation went through,
             i.e. the channel the input was received on.
         object_id: The "object_id" feature value that was received, or None for a
-            spread of similar features from sensory input.
-        node_order: The inhibited nodes, in the order the spread reached them: by
-            increasing number of hops from the seeds (see `_get_spread_order`).
-        seeds: The nodes the spread began from.
+            propagation through similar features from sensory input.
+        node_order: The nodes whose salience was reduced, in the order the
+            propagation reached them: by increasing number of hops from the seeds
+            (see `_get_propagation_order`).
+        seeds: The nodes the propagation began from.
         hops: For each node of `node_order`, the number of hops from the nodes its
-            stage of the spread began from (0 for the seeds, and for the nodes a
-            push-through began from).
-        stage: For each node of `node_order`, the stage of the spread that reached
-            it: 0 for the spread from the seeds, and n for the n-th push-through.
+            stage of the propagation began from (0 for the seeds, and for the
+            nodes a push-through began from).
+        stage: For each node of `node_order`, the stage of the propagation that
+            reached it: 0 for the propagation from the seeds, and n for the n-th
+            push-through.
         predecessor: For each node of `node_order`, the node it was reached from,
             or -1 for the nodes a stage began from.
-        sinks: The reached nodes that do not spread (e.g. because too many of
-            their neighbors store other features or object IDs), where the spread
-            came to a stop.
-        min_size: The number of nodes the spread had to reach before stopping, or
-            0 if it was never pushed through.
+        sinks: The reached nodes that do not propagate (e.g. because too many of
+            their neighbors store other features or object IDs), where the
+            propagation came to a stop.
+        min_size: The number of nodes the propagation had to reach before
+            stopping, or 0 if it was never pushed through.
+        reduction: For each node of `node_order`, the salience reduction applied
+            to it (before clamping its salience at 0), see `_salience_reductions`.
     """
 
     graph_id: str
@@ -491,6 +495,7 @@ class SpreadRecord:
     predecessor: np.ndarray
     sinks: np.ndarray
     min_size: float
+    reduction: np.ndarray
 
 
 class EvidenceGoalGenerator(GraphGoalGenerator):
@@ -502,41 +507,43 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     structure from recent memory, to propose test-points that visit the
     unexplained parts of the object the agent is currently observing.
 
-    Goals are directed at the parts of the model of the most likely
-    object hypothesis (MLH) that the LM's input has not yet explained. Within the
-    MLH graph, each channel storing "object_id" features (input from lower-level
-    LMs, i.e. a compositional model) contributes one candidate per child object (the
-    nodes storing that object ID), and every other (sensory) channel contributes
-    one candidate made up of all of its nodes. Candidates are ranked by their
-    number of uninhibited nodes, and a random uninhibited node of the highest-ranked
-    candidate with any uninhibited node is selected as the location to test.
+    Goals are directed at the parts of the model of the most likely object
+    hypothesis (MLH) that the LM's input has not yet explained. Every node of
+    every channel's graph of the MLH has a salience in [0, 1]: how worthwhile it
+    is to test, from 1 (nothing is known about it) down to 0 (fully explained,
+    cannot be tested). The location to test is sampled from the nodes of all of
+    the channels together, with probability proportional to salience, so that
+    initially (salience uniformly 1) a channel with more nodes (e.g. the sensory
+    channel) is more likely to be sampled than one with fewer (e.g. a channel of
+    object IDs from a lower-level LM, i.e. a compositional model).
 
     Input that the MLH predicts at its current location "explains" part of the
-    model, which is then inhibited from being tested for a while, by spreading
-    through the graph of the channel the input was received on, starting from the
-    nodes nearest the MLH location:
-    - An object ID from a lower-level LM spreads through the nodes storing it.
-    - Sensory input spreads through neighboring nodes with a similar hue and
-      surface normal. Spreading stops wherever the hue or the surface normal
-      changes abruptly, so e.g. on a mug the side of the cylinder (whose normal
-      changes gradually from node to node) is inhibited, but not its rim, bottom
-      or handle, and on a cube a single face is inhibited, but not the other
-      faces. A spread that stops
-      before reaching `min_spread_fraction` of the graph's nodes is pushed
-      through to the neighbors whose features differ.
+    model, whose salience is reduced by `salience_reduction` (falling off along
+    the propagation by `salience_reduction_falloff`), by propagating through the
+    graph of the channel the input was received on, starting from the nodes
+    nearest the MLH location:
+    - An object ID from a lower-level LM propagates through the nodes storing it.
+    - Sensory input propagates through neighboring nodes with a similar hue and
+      surface normal. Propagation stops wherever the hue or the surface normal
+      changes abruptly, so e.g. on a mug it covers the side of the cylinder
+      (whose normal changes gradually from node to node), but not its rim,
+      bottom or handle, and on a cube a single face, but not the other faces. A
+      propagation that stops before reaching `min_propagation_fraction` of the
+      graph's nodes is pushed through to the neighbors whose features differ.
 
-    A node's neighbors are its `num_spread_neighbors` (or, for sensory input,
-    `num_feature_spread_neighbors`) nearest nodes (regardless of their distance),
-    together with the nodes that have it among their own nearest
-    nodes, and it spreads to them only if all of them store the received object ID
-    or, for sensory input, are similar to it (allowing for
-    `max_dissimilar_neighbors` noisy neighbors, which it does not spread to).
-    Spreading therefore covers a contiguous region, including outlying nodes,
+    A node's neighbors are its `num_propagation_neighbors` (or, for sensory
+    input, `num_feature_propagation_neighbors`) nearest nodes (regardless of their
+    distance), together with the nodes that have it among their own nearest
+    nodes, and it propagates to them only if all of them store the received
+    object ID or, for sensory input, are similar to it (allowing for
+    `max_dissimilar_neighbors` noisy neighbors, which it does not propagate to).
+    A propagation therefore covers a contiguous region, including outlying nodes,
     without jumping to disjoint regions (e.g. separate wheels on a car).
-    Inhibition is tracked separately for the graph of each channel, so a location
-    inhibited in one channel's graph can still be tested in another's. Inhibited
-    nodes are not selected for testing until their inhibition has linearly decayed
-    to 0 over `inhibition_decay_steps` steps.
+    Salience is tracked separately for the graph of each channel, so a location
+    explained in one channel's graph can still be tested in another's. Salience
+    recovers linearly to 1 over `salience_recovery_steps` steps, except on the
+    steps on which a propagation reaches the node, so that a part visited
+    repeatedly (with the input explaining it each time) is driven to 0.
     """
 
     def __init__(
@@ -545,14 +552,16 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         desired_object_distance=0.03,
         elapsed_steps_factor=10,
         min_post_goal_success_steps=np.inf,
-        num_spread_neighbors=6,
-        num_feature_spread_neighbors=10,
-        inhibition_decay_steps=50,
+        num_propagation_neighbors=6,
+        num_feature_propagation_neighbors=10,
+        salience_recovery_steps=50,
+        salience_reduction=0.2,
+        salience_reduction_falloff=0.5,
         max_hue_difference: float | None = 0.05,
         max_normal_angle: float | None = 40.0,
         min_far_side_angle=135.0,
         max_dissimilar_neighbors=2,
-        min_spread_fraction: float | None = 0.05,
+        min_propagation_fraction: float | None = 0.05,
         min_hue_saturation=0.1,
         min_hue_value=0.1,
         **kwargs,
@@ -575,18 +584,29 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             min_post_goal_success_steps: Number of steps that must elapse since the
                 last Goal was generated before a new one is considered. Infinity by
                 default, resulting in no Goals being generated.
-            num_spread_neighbors: Number of nearest neighbors of each node that,
-                together with the nodes that have it among their own nearest
-                neighbors, must all store the received object ID for inhibition
-                to spread from the node. Also the number of nodes nearest the MLH
-                location that a spread begins from. Defaults to 6.
-            num_feature_spread_neighbors: Like num_spread_neighbors, but for
-                spreading sensory input through similar features. Larger, as on a
-                wall thinner than the spacing of nodes (e.g. a bowl's), about half
-                of a node's nearest neighbors are on the far side of the wall (see
-                min_far_side_angle), and so are ignored. Defaults to 10.
-            inhibition_decay_steps: Number of steps over which the inhibition of a
-                node linearly decays from 1 to 0. Defaults to 50.
+            num_propagation_neighbors: Number of nearest neighbors of each node
+                that, together with the nodes that have it among their own nearest
+                neighbors, must all store the received object ID for a
+                propagation to continue from the node. Also the number of nodes
+                nearest the MLH location that a propagation begins from. Defaults
+                to 6.
+            num_feature_propagation_neighbors: Like num_propagation_neighbors, but
+                for propagating sensory input through similar features. Larger,
+                as on a wall thinner than the spacing of nodes (e.g. a bowl's),
+                about half of a node's nearest neighbors are on the far side of
+                the wall (see min_far_side_angle), and so are ignored. Defaults
+                to 10.
+            salience_recovery_steps: Number of steps over which the salience of a
+                node linearly recovers from 0 to 1. Defaults to 50.
+            salience_reduction: How much the salience of the first node a
+                propagation reaches is reduced by (salience is clamped at 0).
+                With 0.2, a part has to be explained on five visits before it
+                cannot be tested at all. Defaults to 0.2.
+            salience_reduction_falloff: Fraction by which the reduction falls off
+                along a propagation, linearly in the order the nodes are reached:
+                the last node reached is reduced by salience_reduction * (1 -
+                salience_reduction_falloff). 0 reduces every reached node by the
+                same amount, wherever it is. Defaults to 0.5.
             max_hue_difference: Largest circular distance in hue (in [0, 0.5]) for
                 two features to be similar. Hue is only compared between two
                 chromatic features (see min_hue_saturation and min_hue_value), as
@@ -600,23 +620,23 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             min_far_side_angle: Smallest angle (in degrees) between the surface
                 normals of two neighboring nodes for one to be on the far side of
                 a thin wall from the other (e.g. the inside and outside of a mug),
-                in which case it neither stops spreading nor is spread to.
-                Defaults to 135.
+                in which case it neither stops a propagation nor is propagated
+                to. Defaults to 135.
             max_dissimilar_neighbors: For sensory input, the number of a node's
                 neighbors whose features may differ from its own, without stopping
-                it from spreading to the others (which have similar features). The
-                features stored in learned models are noisy, so with 0 a single
-                noisy neighbor stops a node from spreading; more lets spreading
-                leak across boundaries (e.g. onto a mug's handle). Spreading
-                through object IDs always requires all neighbors to store the ID.
-                Defaults to 2.
-            min_spread_fraction: For sensory input, the fraction of the graph's
-                nodes a spread must reach: when spreading stops before reaching
-                them, it is pushed through to the neighbors whose features differ
-                (see `_get_spread_order`). This keeps fragments of noisy features,
-                and small parts like a mug's handle, from being inhibited a few
-                nodes at a time. None to not push spreading through. Defaults to
-                0.05.
+                it from propagating to the others (which have similar features).
+                The features stored in learned models are noisy, so with 0 a
+                single noisy neighbor stops a node from propagating; more lets
+                propagation leak across boundaries (e.g. onto a mug's handle).
+                Propagation through object IDs always requires all neighbors to
+                store the ID. Defaults to 2.
+            min_propagation_fraction: For sensory input, the fraction of the
+                graph's nodes a propagation must reach: when it stops before
+                reaching them, it is pushed through to the neighbors whose
+                features differ (see `_get_propagation_order`). This keeps
+                fragments of noisy features, and small parts like a mug's handle,
+                from being explained a few nodes at a time. None to not push
+                propagation through. Defaults to 0.05.
             min_hue_saturation: Minimum HSV saturation for a hue to be chromatic.
                 Defaults to 0.1.
             min_hue_value: Minimum HSV value for a hue to be chromatic. Defaults to
@@ -627,69 +647,85 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         self.desired_object_distance = desired_object_distance
         self.elapsed_steps_factor = elapsed_steps_factor
         self.min_post_goal_success_steps = min_post_goal_success_steps
-        self.num_spread_neighbors = num_spread_neighbors
-        self.num_feature_spread_neighbors = num_feature_spread_neighbors
-        self.inhibition_decay_steps = inhibition_decay_steps
+        self.num_propagation_neighbors = num_propagation_neighbors
+        self.num_feature_propagation_neighbors = num_feature_propagation_neighbors
+        self.salience_recovery_steps = salience_recovery_steps
+        self.salience_reduction = salience_reduction
+        self.salience_reduction_falloff = salience_reduction_falloff
         self.max_hue_difference = max_hue_difference
         self.max_normal_angle = max_normal_angle
         self.min_far_side_angle = min_far_side_angle
         self.max_dissimilar_neighbors = max_dissimilar_neighbors
-        self.min_spread_fraction = min_spread_fraction
+        self.min_propagation_fraction = min_propagation_fraction
         self.min_hue_saturation = min_hue_saturation
         self.min_hue_value = min_hue_value
 
     # ======================= Public ==========================
 
     def reset(self):
-        """Reset the inhibition of all nodes, and the MLH at the last Goal."""
+        """Reset the salience of all nodes, and the MLH at the last Goal."""
         super().reset()
-        # Number of steps of inhibition remaining for each node, keyed by
-        # (graph_id, input_channel).
-        self._inhibition_steps: dict[tuple[str, str], np.ndarray] = {}
+        # The salience (in [0, 1]) of each node, keyed by (graph_id, input_channel).
+        self._salience: dict[tuple[str, str], np.ndarray] = {}
         # Keyed by (graph_id, input_channel, number of nodes, number of neighbors).
         self._neighbor_cache: dict[tuple[str, str, int, int], csr_matrix] = {}
-        # For sensory spreading (see `_get_similar_neighbors`), keyed by
+        # For propagating sensory input (see `_get_similar_neighbors`), keyed by
         # (graph_id, input_channel, number of nodes).
         self._similar_neighbors_cache: dict[
             tuple[str, str, int], tuple[csr_matrix, csr_matrix]
         ] = {}
         self._prev_goal_mlh: dict | None = None
-        self.spread_records: list[SpreadRecord] = []
+        self.propagation_records: list[PropagationRecord] = []
 
     def step(self, ctx: RuntimeContext, observations):
-        """Update the inhibition of explained parts of the MLH, then step the GSG.
+        """Update the salience of the parts of the MLH, then step the GSG.
 
-        A new `spread_records` list is created on every step, holding the spreads
-        that took place on that step.
+        A new `propagation_records` list is created on every step, holding the
+        propagations that took place on that step.
         """
-        self.spread_records = []
-        self._decay_inhibition()
-        self._spread_from_observations(observations)
+        self._update_salience(observations)
         super().step(ctx, observations)
 
-    def get_inhibition_weights(self, graph_id, input_channel) -> np.ndarray:
-        """Get the inhibition weight of each node of a graph.
+    def get_salience(self, graph_id, input_channel) -> np.ndarray:
+        """Get the salience of each node of a graph.
 
         TODO make this private, only public for visualization purposes.
 
         Returns:
-            Array with one weight in [0, 1] per node of the graph of the given input
-            channel; nodes with a weight of 0 can be selected for testing.
+            Array with one salience in [0, 1] per node of the graph of the given
+            input channel: how likely the node is to be selected for testing,
+            relative to the others (never, at 0).
         """
         num_nodes = len(self.parent_lm.get_graph(graph_id, input_channel).pos)
-        steps = self._get_inhibition_steps(graph_id, input_channel, num_nodes)
-        return steps / self.inhibition_decay_steps
+        return self._get_salience(graph_id, input_channel, num_nodes)
 
     # ======================= Private ==========================
 
     # ------------------- Main Algorithm -----------------------
 
+    def _update_salience(self, observations) -> None:
+        """Reduce the salience of the parts of the MLH explained by this step's input.
+
+        The input propagates through the MLH's graphs (see
+        `_propagate_from_observations`), which reduces the salience of the nodes
+        it reaches; the salience of every other node recovers by one step.
+        """
+        self.propagation_records = []
+        self._propagate_from_observations(observations)
+        reached: dict[tuple[str, str], list[np.ndarray]] = {}
+        for record in self.propagation_records:
+            key = (record.graph_id, record.input_channel)
+            reached.setdefault(key, []).append(record.node_order)
+        self._recover_salience(
+            {key: np.concatenate(nodes) for key, nodes in reached.items()}
+        )
+
     def _generate_goal(self, ctx: RuntimeContext, observations) -> Goal | None:
         """Generate a Goal that moves the sensor to an unexplained part of the MLH.
 
         Returns:
-            A Goal for the motor system, or a None-type Goal if every node of the
-            MLH object's graphs is inhibited.
+            A Goal for the motor system, or a None-type Goal if no node of the
+            MLH object's graphs has any salience.
         """
         graph_id = self._get_mlh_graph_id()
         if graph_id is None:
@@ -703,7 +739,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
 
         target = self._select_target(ctx, graph_id)
         if target is None:
-            logger.debug(f"All nodes of {graph_id} are fully inhibited; no goal")
+            logger.debug(f"No node of {graph_id} has any salience; no goal")
             return self._generate_none_goal()
 
         input_channel, node_id, object_id = target
@@ -723,53 +759,49 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         return goal
 
     def _select_target(self, ctx: RuntimeContext, graph_id):
-        """Select a random uninhibited node of the largest candidate of the graph.
+        """Sample a node of the graph's channels to test, weighted by salience.
 
-        Each object ID stored on an object-ID channel of the graph is one candidate
-        (the nodes storing it), and every other channel is one candidate (all of its
-        nodes). Candidates are ranked by their number of nodes; the highest-ranked
-        one with any uninhibited node is selected.
+        The nodes of all of the graph's channels are sampled from together, each
+        with probability proportional to its salience, so nodes with no salience
+        are never sampled, and a channel's share of the samples is in proportion
+        to its number of (salient) nodes.
 
         Returns:
-            A tuple of (input_channel, node_id, object_id), where object_id is None
-            for a sensory channel, or None if every node is inhibited.
+            A tuple of (input_channel, node_id, object_id), where object_id is the
+            ID the node stores on an object-ID channel, or None on a sensory
+            channel; or None if no node has any salience.
         """
-        candidates = []
-        candidate_nodes = {}
-        object_id_channels = self._get_object_id_channels(graph_id)
-        for channel in self.parent_lm.get_input_channels_in_graph(graph_id):
-            graph = self.parent_lm.get_graph(graph_id, input_channel=channel)
-            num_nodes = len(graph.pos)
-            if channel in object_id_channels:
-                object_ids = self._get_feature_values(graph, "object_id")[:, 0]
-                for object_id in np.unique(object_ids):
-                    nodes = object_ids == object_id
-                    candidate_nodes[(channel, int(object_id))] = nodes
-                    candidates.append(
-                        (np.count_nonzero(nodes), channel, int(object_id))
-                    )
-            else:
-                candidate_nodes[(channel, None)] = np.ones(num_nodes, dtype=bool)
-                candidates.append((num_nodes, channel, None))
+        channels = self.parent_lm.get_input_channels_in_graph(graph_id)
+        graphs = [
+            self.parent_lm.get_graph(graph_id, input_channel=channel)
+            for channel in channels
+        ]
+        salience = [
+            self._get_salience(graph_id, channel, len(graph.pos))
+            for channel, graph in zip(channels, graphs)
+        ]
+        weights = np.concatenate(salience) if salience else np.empty(0)
+        total = weights.sum()
+        if total <= 0:
+            return None
 
-        candidates.sort(key=lambda candidate: -candidate[0])
+        sample = int(ctx.rng.choice(len(weights), p=weights / total))
+        first_node = np.cumsum([0] + [len(s) for s in salience])
+        index = int(np.searchsorted(first_node, sample, side="right") - 1)
+        channel, graph = channels[index], graphs[index]
+        node_id = sample - int(first_node[index])
+        object_id = None
+        if channel in self._get_object_id_channels(graph_id):
+            object_id = int(self._get_feature_values(graph, "object_id")[node_id, 0])
+        return channel, node_id, object_id
 
-        for _, channel, object_id in candidates:
-            nodes = candidate_nodes[(channel, object_id)]
-            inhibition = self._get_inhibition_steps(graph_id, channel, len(nodes))
-            eligible = np.nonzero(nodes & (inhibition == 0))[0]
-            if len(eligible) > 0:
-                return channel, int(ctx.rng.choice(eligible)), object_id
-
-        return None
-
-    def _spread_from_observations(self, observations) -> None:
-        """Inhibit the parts of the MLH graph explained by this step's input.
+    def _propagate_from_observations(self, observations) -> None:
+        """Reduce the salience of the parts of the MLH explained by this step's input.
 
         Object IDs received from lower-level LMs on an object-ID channel of the MLH
-        graph spread through the nodes storing them, and sensory input received on
-        any other channel of the MLH graph spreads through nodes with similar
-        features.
+        graph propagate through the nodes storing them, and sensory input received
+        on any other channel of the MLH graph propagates through nodes with
+        similar features.
         """
         graph_id = self._get_mlh_graph_id()
         if graph_id is None:
@@ -786,24 +818,24 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 object_id = (percept.non_morphological_features or {}).get("object_id")
                 if percept.sender_type != "LM" or object_id is None:
                     continue
-                self._spread_object_id(
+                self._propagate_object_id(
                     graph_id,
                     channel,
                     int(np.asarray(object_id).flatten()[0]),
                     mlh["location"],
                 )
             elif percept.sender_type == "SM":
-                self._spread_similar_features(graph_id, channel, percept, mlh)
+                self._propagate_similar_features(graph_id, channel, percept, mlh)
 
-    def _spread_object_id(
+    def _propagate_object_id(
         self, graph_id, input_channel, received_id, mlh_location
     ) -> None:
-        """Spread inhibition from the MLH location through nodes storing an ID.
+        """Propagate from the MLH location through the nodes storing an ID.
 
-        Spreading only begins if the received ID is predicted by the MLH, i.e. it
-        is stored by one of the nodes nearest the MLH location that lie within the
-        parent LM's max_match_distance, and all of the nodes nearest the MLH
-        location store it.
+        The propagation only begins if the received ID is predicted by the MLH,
+        i.e. it is stored by one of the nodes nearest the MLH location that lie
+        within the parent LM's max_match_distance, and all of the nodes nearest
+        the MLH location store it.
         """
         graph = self.parent_lm.get_graph(graph_id, input_channel=input_channel)
         stores_id = self._get_feature_values(graph, "object_id")[:, 0] == received_id
@@ -814,40 +846,40 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             return
 
         neighbors = self._get_neighbor_matrix(graph_id, input_channel, graph)
-        # A node spreads to its neighbors if it has any, and all of them store the
-        # received ID, i.e. none of them stores another.
-        spreads = (neighbors.getnnz(axis=1) > 0) & (
+        # A node propagates to its neighbors if it has any, and all of them store
+        # the received ID, i.e. none of them stores another.
+        propagates = (neighbors.getnnz(axis=1) > 0) & (
             neighbors @ (~stores_id).astype(float) == 0
         )
         source, target = neighbors.nonzero()
         propagation = self._edge_matrix(
-            source[spreads[source]], target[spreads[source]], len(stores_id)
+            source[propagates[source]], target[propagates[source]], len(stores_id)
         )
-        self._spread_from_seeds(
+        self._propagate_from_seeds(
             graph_id, input_channel, seeds, propagation, object_id=received_id
         )
 
-    def _spread_similar_features(
+    def _propagate_similar_features(
         self, graph_id, input_channel, percept: Message, mlh
     ) -> None:
-        """Spread inhibition from the MLH location through nodes with similar features.
+        """Propagate from the MLH location through nodes with similar features.
 
-        Spreading only begins if the sensed features are predicted by the MLH, i.e.
-        they are similar to the features of one of the nodes nearest the MLH
-        location that lie within the parent LM's max_match_distance (with the
+        The propagation only begins if the sensed features are predicted by the
+        MLH, i.e. they are similar to the features of one of the nodes nearest the
+        MLH location that lie within the parent LM's max_match_distance (with the
         sensed surface normal rotated into the model's frame by the MLH
         rotation).
         Unlike for object IDs, stored features vary from node to node, so the
-        spread begins from those of the nodes nearest the MLH location that are
-        similar to the nearest such node, rather than requiring all of them to be.
-        Nodes on the far side of a thin wall (see min_far_side_angle) are ignored
-        throughout.
+        propagation begins from those of the nodes nearest the MLH location that
+        are similar to the nearest such node, rather than requiring all of them to
+        be. Nodes on the far side of a thin wall (see min_far_side_angle) are
+        ignored throughout.
         """
         graph = self.parent_lm.get_graph(graph_id, input_channel=input_channel)
-        features = self._get_spread_features(graph)
+        features = self._get_propagation_features(graph)
         if not features:
             return
-        sensed = self._get_sensed_spread_features(percept, mlh["rotation"])
+        sensed = self._get_sensed_propagation_features(percept, mlh["rotation"])
 
         seeds, seed_distances = self._get_nodes_nearest_mlh(graph, mlh["location"])
         nearby = seeds[seed_distances <= self.parent_lm.max_match_distance]
@@ -863,38 +895,42 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         propagation, surface = self._get_similar_neighbors(
             graph_id, input_channel, graph, features
         )
-        self._spread_from_seeds(
+        self._propagate_from_seeds(
             graph_id, input_channel, seeds, propagation, object_id=None, surface=surface
         )
 
-    def _spread_from_seeds(
+    def _propagate_from_seeds(
         self, graph_id, input_channel, seeds, propagation, object_id, surface=None
     ) -> None:
-        """Inhibit the seeds and spread inhibition from them through the graph.
+        """Propagate from seeds through the graph, reducing the reached salience.
 
-        The spread (see `_get_spread_order`) is appended to `spread_records`, with
-        the inhibited nodes in the order they were reached.
+        The propagation (see `_get_propagation_order`) is appended to
+        `propagation_records`, with the reached nodes in the order they were
+        reached, and the salience of each of them is reduced (see
+        `_salience_reductions`).
 
         Args:
-            graph_id: The graph to spread through.
-            input_channel: The input channel whose graph to spread through.
-            seeds: The nodes to begin spreading from.
+            graph_id: The graph to propagate through.
+            input_channel: The input channel whose graph to propagate through.
+            seeds: The nodes to begin propagating from.
             propagation: The propagation matrix of the graph: a sparse
                 (num_nodes x num_nodes) matrix with an edge at (node, neighbor)
-                wherever the node spreads to the neighbor.
+                wherever the node propagates to the neighbor.
             object_id: The received object ID, or None for sensory input.
             surface: For sensory input, the surface matrix of the graph (see
-                `_get_spread_order`); None for object IDs.
+                `_get_propagation_order`); None for object IDs.
         """
-        order, hops, stage, predecessor, min_size = self._get_spread_order(
+        order, hops, stage, predecessor, min_size = self._get_propagation_order(
             seeds, propagation, surface
         )
-        inhibition = self._get_inhibition_steps(
-            graph_id, input_channel, propagation.shape[0]
-        )
-        inhibition[order] = self.inhibition_decay_steps
-        self.spread_records.append(
-            SpreadRecord(
+        salience = self._get_salience(graph_id, input_channel, propagation.shape[0])
+        reduction = self._salience_reductions(len(order))
+        reduced = salience[order] - reduction
+        # Snap to 0 what repeated reductions leave as floating-point residue, so
+        # that fully explained nodes are never sampled.
+        salience[order] = np.where(reduced > 1e-9, reduced, 0.0)
+        self.propagation_records.append(
+            PropagationRecord(
                 graph_id=graph_id,
                 input_channel=input_channel,
                 object_id=object_id,
@@ -905,6 +941,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 predecessor=predecessor,
                 sinks=order[propagation.getnnz(axis=1)[order] == 0],
                 min_size=min_size,
+                reduction=reduction,
             )
         )
         explained = (
@@ -913,45 +950,67 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             else f"storing object ID {object_id}"
         )
         logger.debug(
-            f"Inhibited {len(order)} nodes {explained} on channel "
+            f"Reduced the salience of {len(order)} nodes {explained} on channel "
             f"{input_channel} of {graph_id}"
         )
 
-    def _get_spread_order(
-        self, seeds, propagation, surface=None
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
-        """Spread from seeds through a graph, without inhibiting the reached nodes.
+    def _salience_reductions(self, num_reached) -> np.ndarray:
+        """Get the salience reduction of each node a propagation reached.
 
-        A breadth-first search from the seeds along the edges of the propagation
-        matrix: every reached node reaches the nodes it has edges to, and
-        spreading then continues from each of them. For sensory input, whenever
-        spreading stops having reached fewer than min_spread_fraction of the
-        graph's nodes (e.g. on a fragment of noisy features, or a small part like
-        a mug's handle), it is pushed through: every unreached node that a reached
-        node has an edge to in the surface matrix (i.e. on the same side of the
-        surface, whether or not their features are similar) is reached, and
-        spreading continues from them, but only as many hops as it takes to reach
-        min_spread_fraction of the nodes (so e.g. a spread pushed from the handle
-        onto the side of a mug does not go on to cover the side).
+        The first node reached is reduced by salience_reduction, falling off
+        linearly in the order the nodes were reached to salience_reduction * (1 -
+        salience_reduction_falloff) at the last.
 
         Args:
-            seeds: The nodes to begin spreading from.
+            num_reached: The number of nodes the propagation reached.
+
+        Returns:
+            The reduction of each reached node, in the order they were reached.
+        """
+        scale = np.ones(num_reached)
+        if num_reached > 1:
+            scale -= (
+                self.salience_reduction_falloff
+                * np.arange(num_reached)
+                / (num_reached - 1)
+            )
+        return self.salience_reduction * scale
+
+    def _get_propagation_order(
+        self, seeds, propagation, surface=None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+        """Propagate from seeds through a graph, without changing any salience.
+
+        A breadth-first search from the seeds along the edges of the propagation
+        matrix: every reached node reaches the nodes it has edges to, and the
+        propagation then continues from each of them. For sensory input, whenever
+        the propagation stops having reached fewer than min_propagation_fraction
+        of the graph's nodes (e.g. on a fragment of noisy features, or a small
+        part like a mug's handle), it is pushed through: every unreached node that
+        a reached node has an edge to in the surface matrix (i.e. on the same side
+        of the surface, whether or not their features are similar) is reached, and
+        the propagation continues from them, but only as many hops as it takes to
+        reach min_propagation_fraction of the nodes (so e.g. a propagation pushed
+        from the handle onto the side of a mug does not go on to cover the side).
+
+        Args:
+            seeds: The nodes to begin propagating from.
             propagation: The propagation matrix of the graph (see
-                `_spread_from_seeds`).
+                `_propagate_from_seeds`).
             surface: The surface matrix of the graph: a sparse (num_nodes x
                 num_nodes) matrix with an edge at (node, neighbor) for every
                 neighbor on the same side of the surface, or None to not push
-                spreading through.
+                the propagation through.
 
         Returns:
             The reached nodes, in the order they were reached: by increasing
             number of hops from the seeds, then, after each push, from the nodes
             pushed through to (nodes the same number of hops away are in index
             order); for each of them, its number of hops from the nodes its stage
-            began from, its stage (0 for the spread from the seeds, n for the
-            n-th push-through), and the node it was reached from (-1 for the
-            nodes a stage began from); and the number of nodes the spread had to
-            reach (0 if it was never pushed through).
+            began from, its stage (0 for the propagation from the seeds, n for
+            the n-th push-through), and the node it was reached from (-1 for the
+            nodes a stage began from); and the number of nodes the propagation
+            had to reach (0 if it was never pushed through).
         """
         num_nodes = propagation.shape[0]
         sources = np.asarray(seeds, dtype=int).reshape(-1)
@@ -959,13 +1018,13 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         if len(sources) == 0:
             return empty, empty, empty, empty, 0.0
         min_size = 0
-        if surface is not None and self.min_spread_fraction:
-            min_size = self.min_spread_fraction * num_nodes
+        if surface is not None and self.min_propagation_fraction:
+            min_size = self.min_propagation_fraction * num_nodes
         reached = np.zeros(num_nodes, dtype=bool)
         order, hops, stages, predecessors = [], [], [], []
         stage = 0
         while True:
-            # The number of hops from the sources to each node the spread reaches,
+            # The number of hops from the sources to each node the propagation reaches,
             # by a breadth-first search (inf for the nodes it does not reach), and
             # the node each is reached from (-9999 for the sources).
             stage_hops, predecessor, _ = dijkstra(
@@ -980,8 +1039,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             new = np.flatnonzero(np.isfinite(stage_hops))
             new = new[np.argsort(stage_hops[new], kind="stable")]
             if stage > 0:
-                # Only spread as many hops as reaching min_size nodes takes, i.e.
-                # the hops of the node that reaches it.
+                # Only propagate as many hops as reaching min_size nodes takes,
+                # i.e. the hops of the node that reaches it.
                 needed = int(np.ceil(min_size)) - np.count_nonzero(reached)
                 if needed < len(new):
                     new = new[stage_hops[new] <= stage_hops[new[needed - 1]]]
@@ -993,7 +1052,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             if np.count_nonzero(reached) >= min_size:
                 break
             # Push through: the unreached neighbors (on the same side of the
-            # surface) of the reached nodes become the sources of the next spread.
+            # surface) of the reached nodes become the next stage's sources.
             sources = np.flatnonzero((surface.T @ reached.astype(float) > 0) & ~reached)
             if len(sources) == 0:
                 break
@@ -1009,12 +1068,12 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     def _get_nodes_nearest_mlh(
         self, graph, mlh_location
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Get the num_spread_neighbors nodes of a graph nearest the MLH location.
+        """Get the num_propagation_neighbors nodes of a graph nearest the MLH location.
 
         Returns:
             The nodes, nearest first, and their distances from the MLH location.
         """
-        num_seeds = min(self.num_spread_neighbors, len(graph.pos))
+        num_seeds = min(self.num_propagation_neighbors, len(graph.pos))
         query = np.atleast_2d(np.asarray(mlh_location, dtype=float))
         seeds = np.asarray(
             graph.find_nearest_neighbors(query, num_neighbors=num_seeds)
@@ -1026,8 +1085,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         ).reshape(-1)
         return seeds, distances
 
-    def _get_spread_features(self, graph) -> dict[str, np.ndarray]:
-        """Get the features of every node of a graph that sensory spreading compares.
+    def _get_propagation_features(self, graph) -> dict[str, np.ndarray]:
+        """Get the features of every node of a graph that sensory propagation compares.
 
         Returns:
             Arrays of each compared feature the graph stores, with one row per node:
@@ -1045,8 +1104,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             )
         return features
 
-    def _get_sensed_spread_features(self, percept: Message, rotation) -> dict:
-        """Get the sensed features that sensory spreading compares.
+    def _get_sensed_propagation_features(self, percept: Message, rotation) -> dict:
+        """Get the sensed features that sensory propagation compares.
 
         Args:
             percept: The sensory input.
@@ -1054,7 +1113,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 surface normal into the model's frame.
 
         Returns:
-            The sensed features, in the format of `_get_spread_features` (with one
+            The sensed features, in the format of `_get_propagation_features` (with one
             value per feature, and the normal in the model's frame), for those the
             percept carries.
         """
@@ -1080,7 +1139,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
 
         Args:
             features: The compared features of every node (see
-                `_get_spread_features`).
+                `_get_propagation_features`).
             nodes: The nodes to check.
             reference: The features to compare them to, in the same format (one
                 value per feature).
@@ -1136,7 +1195,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
 
         Args:
             features: The compared features of every node (see
-                `_get_spread_features`).
+                `_get_propagation_features`).
             nodes: The nodes to check.
             reference: The features of the node on the near side.
 
@@ -1152,19 +1211,19 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     def _get_similar_neighbors(
         self, graph_id, input_channel, graph, features
     ) -> tuple[csr_matrix, csr_matrix]:
-        """Get the edges of a graph for spreading through similar features.
+        """Get the edges of a graph for propagating through similar features.
 
         Neighbors on the far side of a thin wall from a node (see
         min_far_side_angle) are not its neighbors here, as they are not part of the
-        same surface. A node spreads to the neighbors with features similar to its
+        same surface. A node propagates to the neighbors with features similar to its
         own if at most max_dissimilar_neighbors of its neighbors are not.
 
         Returns:
-            The propagation matrix (see `_spread_from_seeds`), with an edge from
-            each node to the neighbors it spreads to, and the surface matrix (see
-            `_get_spread_order`), with an edge from each node to every neighbor on
-            the same side of the surface, whether or not their features are
-            similar.
+            The propagation matrix (see `_propagate_from_seeds`), with an edge from
+            each node to the neighbors it propagates to, and the surface matrix
+            (see `_get_propagation_order`), with an edge from each node to every
+            neighbor on the same side of the surface, whether or not their
+            features are similar.
         """
         key = (graph_id, input_channel, len(graph.pos))
         if key not in self._similar_neighbors_cache:
@@ -1173,7 +1232,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 graph_id,
                 input_channel,
                 graph,
-                num_neighbors=self.num_feature_spread_neighbors,
+                num_neighbors=self.num_feature_propagation_neighbors,
             ).nonzero()
             if "normal" in features:
                 cosine = np.sum(
@@ -1187,10 +1246,10 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 {name: values[target] for name, values in features.items()},
             )
             num_dissimilar = np.bincount(source[~similar], minlength=num_nodes)
-            spreads = (surface.getnnz(axis=1) > 0) & (
+            propagates = (surface.getnnz(axis=1) > 0) & (
                 num_dissimilar <= self.max_dissimilar_neighbors
             )
-            keep = similar & spreads[source]
+            keep = similar & propagates[source]
             propagation = self._edge_matrix(source[keep], target[keep], num_nodes)
             self._similar_neighbors_cache[key] = (propagation, surface)
         return self._similar_neighbors_cache[key]
@@ -1228,14 +1287,14 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             input_channel: The input channel of the graph.
             graph: The graph.
             num_neighbors: The number of nearest nodes of each node. Defaults to
-                num_spread_neighbors.
+                num_propagation_neighbors.
 
         Returns:
             Sparse (num_nodes x num_nodes) matrix with a 1 at (node, neighbor) for
             every neighbor of every node (excluding the node itself).
         """
         if num_neighbors is None:
-            num_neighbors = self.num_spread_neighbors
+            num_neighbors = self.num_propagation_neighbors
         pos = np.asarray(graph.pos, dtype=float)
         num_nodes = len(pos)
         key = (graph_id, input_channel, num_nodes, num_neighbors)
@@ -1252,9 +1311,20 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             self._neighbor_cache[key] = neighbors
         return self._neighbor_cache[key]
 
-    def _decay_inhibition(self) -> None:
-        for inhibition in self._inhibition_steps.values():
-            np.maximum(inhibition - 1, 0, out=inhibition)
+    def _recover_salience(self, except_nodes=None) -> None:
+        """Recover the salience of every node by one step, towards 1.
+
+        Args:
+            except_nodes: For each (graph_id, input_channel) key, the nodes whose
+                salience does not recover on this step (those a propagation
+                reached). None for every node to recover.
+        """
+        recovery = 1.0 / self.salience_recovery_steps
+        for key, salience in self._salience.items():
+            recovers = np.ones(len(salience), dtype=bool)
+            if except_nodes and key in except_nodes:
+                recovers[except_nodes[key]] = False
+            salience[recovers] = np.minimum(salience[recovers] + recovery, 1.0)
 
     def _check_need_new_output_goal(
         self,
@@ -1333,18 +1403,18 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 channels.append(channel)
         return channels
 
-    def _get_inhibition_steps(self, graph_id, input_channel, num_nodes) -> np.ndarray:
-        """Get the remaining inhibition steps of each node of a graph.
+    def _get_salience(self, graph_id, input_channel, num_nodes) -> np.ndarray:
+        """Get the salience of each node of a graph (1 until reduced).
 
         Returns:
             Array (stored, so modifiable in place) with one entry per node.
         """
         key = (graph_id, input_channel)
-        inhibition = self._inhibition_steps.get(key)
-        if inhibition is None or len(inhibition) != num_nodes:
-            inhibition = np.zeros(num_nodes, dtype=int)
-            self._inhibition_steps[key] = inhibition
-        return inhibition
+        salience = self._salience.get(key)
+        if salience is None or len(salience) != num_nodes:
+            salience = np.ones(num_nodes, dtype=float)
+            self._salience[key] = salience
+        return salience
 
     # ------------- Goals for a target location on the MLH -------------
 

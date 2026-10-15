@@ -97,8 +97,8 @@ experiment:
             elapsed_steps_factor: 10
             min_post_goal_success_steps: 20
             desired_object_distance: 0.03
-            num_spread_neighbors: 6
-            inhibition_decay_steps: 50
+            num_propagation_neighbors: 6
+            salience_recovery_steps: 50
           region_proposers:
           - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
           telemetry:

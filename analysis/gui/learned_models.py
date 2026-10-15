@@ -6,10 +6,10 @@
 # Use of this source code is governed by the MIT
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
-"""Learned object models as conditions for the spreading explorer.
+"""Learned object models as conditions for the propagation explorer.
 
 Two sets of pretrained models are offered, both read from the checkpoints that
-analysis/scripts/visualize_inhibition_spreading.py uses:
+analysis/scripts/visualize_salience_propagation.py uses:
 
 - "ycb": the 10 distinct YCB objects (mug, bowl, ...) learned by the surface
   agent, with one sensor channel.
@@ -31,7 +31,7 @@ import torch
 from scipy.spatial import KDTree
 
 from analysis.gui.primitives import Condition, Graph
-from analysis.scripts.visualize_inhibition_spreading import (
+from analysis.scripts.visualize_salience_propagation import (
     MODELS,
     label_mug_parts,
     resolve_checkpoint,
