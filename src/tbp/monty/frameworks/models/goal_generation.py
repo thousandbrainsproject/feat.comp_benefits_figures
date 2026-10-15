@@ -580,11 +580,11 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         desired_object_distance=0.03,
         elapsed_steps_trigger=20,
         num_propagation_neighbors=10,
+        max_dissimilar_neighbors=2,
+        min_propagation_fraction: float | None = 0.05,
         salience_recovery_steps=50,
         salience_reduction=0.2,
         salience_reduction_falloff=0.5,
-        max_dissimilar_neighbors=2,
-        min_propagation_fraction: float | None = 0.05,
         **kwargs,
     ) -> None:
         """Initialize the GSG.
@@ -610,17 +610,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 thinner than the spacing of nodes (e.g. a bowl's), about half of a
                 node's nearest neighbors are on the far side of the wall (see
                 `_far_side_pairs`), and so are ignored. Defaults to 10.
-            salience_recovery_steps: Number of steps over which the salience of a
-                node linearly recovers from 0 to 1. Defaults to 50 steps.
-            salience_reduction: How much the salience of the first node a
-                propagation reaches is reduced by (minimum salience is clamped at 0).
-                With 0.2, a part has to be explained on five visits before it
-                will not be tested at all. Defaults to 0.2.
-            salience_reduction_falloff: Fraction by which the reduction falls off
-                along a propagation, linearly in the order the nodes are reached:
-                the last node reached is reduced by salience_reduction * (1 -
-                salience_reduction_falloff). 0 reduces every reached node by the
-                same amount, wherever it is relative to the first node. Defaults to 0.5.
             max_dissimilar_neighbors: For sensory input, the number of a node's
                 neighbors whose features may differ from its own, without stopping
                 it from propagating to the others (which have similar features).
@@ -636,6 +625,17 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 fragments of noisy features, and small parts like a mug's handle,
                 from being explained a few nodes at a time. None to not push
                 propagation through. Defaults to 0.05.
+            salience_recovery_steps: Number of steps over which the salience of a
+                node linearly recovers from 0 to 1. Defaults to 50 steps.
+            salience_reduction: How much the salience of the first node a
+                propagation reaches is reduced by (minimum salience is clamped at 0).
+                With 0.2, a part has to be explained on five visits before it
+                will not be tested at all. Defaults to 0.2.
+            salience_reduction_falloff: Fraction by which the reduction falls off
+                along a propagation, linearly in the order the nodes are reached:
+                the last node reached is reduced by salience_reduction * (1 -
+                salience_reduction_falloff). 0 reduces every reached node by the
+                same amount, wherever it is relative to the first node. Defaults to 0.5.
             **kwargs: Additional keyword arguments.
 
         Raises:
@@ -645,20 +645,26 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         self.desired_object_distance = desired_object_distance
         self.elapsed_steps_trigger = elapsed_steps_trigger
         self.num_propagation_neighbors = num_propagation_neighbors
+        self.max_dissimilar_neighbors = max_dissimilar_neighbors
+        self.min_propagation_fraction = min_propagation_fraction
         self.salience_recovery_steps = salience_recovery_steps
         self.salience_reduction = salience_reduction
         self.salience_reduction_falloff = salience_reduction_falloff
-        self.max_dissimilar_neighbors = max_dissimilar_neighbors
-        self.min_propagation_fraction = min_propagation_fraction
 
-        if salience_reduction_falloff > 1 or salience_reduction_falloff < 0:
-            raise ValueError("salience_reduction_falloff must be in [0, 1]")
+        if num_propagation_neighbors <= 0:
+            raise ValueError("num_propagation_neighbors must be positive")
+        if max_dissimilar_neighbors < 0:
+            raise ValueError("max_dissimilar_neighbors must be positive or 0")
+        if min_propagation_fraction is not None and (
+            min_propagation_fraction > 1 or min_propagation_fraction < 0
+        ):
+            raise ValueError("min_propagation_fraction must be in [0, 1] or None")
         if salience_reduction > 1 or salience_reduction < 0:
             raise ValueError("salience_reduction must be in [0, 1]")
         if salience_recovery_steps < 0:
             raise ValueError("salience_recovery_steps must be positive or 0")
-        if num_propagation_neighbors <= 0:
-            raise ValueError("num_propagation_neighbors must be positive")
+        if salience_reduction_falloff > 1 or salience_reduction_falloff < 0:
+            raise ValueError("salience_reduction_falloff must be in [0, 1]")
 
     # ======================= Public ==========================
 
