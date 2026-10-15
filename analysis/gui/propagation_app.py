@@ -34,6 +34,9 @@ In the app:
   recovers by one step. Override the sensed hue, normal (tilted away from the
   stored one) or object ID to see the goal generator refuse to propagate from
   input the MLH does not predict.
+- Set the age of the MLH hypothesis (as burst sampling tracks it), which every
+  LM step increases by one: nothing propagates until the MLH has survived its
+  first chance of being deleted, i.e. its age exceeds min_age.
 - Scrub the slider, or press play, to step through the propagation in the order
   the nodes were reached. The seeds, the node being reached, the sinks (reached
   nodes that do not propagate on), the boundary the propagation stopped at, and
@@ -66,7 +69,7 @@ from plotly.colors import qualitative, sample_colorscale
 
 from analysis.gui import learned_models
 from analysis.gui.primitives import CONDITION_KEYS, build_condition
-from analysis.gui.propagation_session import PARAMETERS, Session
+from analysis.gui.propagation_session import MIN_AGE, PARAMETERS, Session
 
 if TYPE_CHECKING:
     from tbp.monty.frameworks.models.goal_generation import PropagationRecord
@@ -574,7 +577,16 @@ def summary_children(session: Session):
         html.Div(
             f"LM step {session.step} · {session.condition.title}",
             style={"fontWeight": "bold"},
-        )
+        ),
+        html.Div(
+            f"MLH age {session.mlh_age}: "
+            + (
+                f"survived deletion (> min_age {MIN_AGE}), so input propagates"
+                if session.mlh_established
+                else f"too young to propagate (needs > min_age {MIN_AGE})"
+            ),
+            style={"color": "#333" if session.mlh_established else "#b30000"},
+        ),
     ]
     active = {
         name: value for name, value in session.overrides.items() if value is not None
@@ -825,6 +837,41 @@ def build_layout():
                                 ),
                             ),
                             section(
+                                "MLH age",
+                                html.Div(
+                                    [
+                                        html.Label(
+                                            "age of the MLH hypothesis",
+                                            style={"fontSize": "11px", "flex": "1"},
+                                        ),
+                                        dcc.Input(
+                                            id="mlh-age",
+                                            type="number",
+                                            value=SESSION.mlh_age,
+                                            min=0,
+                                            step=1,
+                                            debounce=True,
+                                            style={"width": "70px", "fontSize": "11px"},
+                                        ),
+                                    ],
+                                    style={
+                                        "display": "flex",
+                                        "alignItems": "center",
+                                        "margin": "2px 0",
+                                    },
+                                ),
+                                html.Div(
+                                    "Burst sampling can delete a hypothesis once its "
+                                    f"age reaches min_age ({MIN_AGE}); the goal "
+                                    "generator only propagates once the MLH has "
+                                    f"survived that, i.e. its age exceeds {MIN_AGE}. "
+                                    "Every LM step (sensing, or Step) ages the MLH "
+                                    f"by one: set it to {MIN_AGE - 1} and sense twice "
+                                    "to see it start propagating.",
+                                    style={"fontSize": "11px", "color": "#666"},
+                                ),
+                            ),
+                            section(
                                 "Color nodes by",
                                 dcc.RadioItems(
                                     id="color-mode",
@@ -1023,6 +1070,7 @@ def handle_action(
     parameters: dict,
     overrides: dict,
     progress,
+    mlh_age=None,
 ) -> dict:
     """Apply a user action to the session, and work out what the UI must update.
 
@@ -1036,14 +1084,16 @@ def handle_action(
         parameters: The goal generator's parameters, as entered.
         overrides: The sensed-feature overrides, as entered.
         progress: The slider's current value.
+        mlh_age: The MLH age, as entered.
 
     Returns:
         The new values of the UI's state: "channel", "condition" (the condition
         actually loaded, which differs from the selected one if loading it
         failed), "channel_options", "landmark_options", "id_options",
         "description" (the latter four None if unchanged), "record" (the
-        displayed channel's propagation, if any), "total" (its number of nodes)
-        and "progress" (the slider's new value, or None to keep it).
+        displayed channel's propagation, if any), "total" (its number of nodes),
+        "progress" (the slider's new value, or None to keep it) and "mlh_age"
+        (the MLH's age after the action).
     """
     channel_options = landmark_options = id_options_ = description = None
     if trigger == "condition" and condition_key != session.condition.key:
@@ -1071,6 +1121,8 @@ def handle_action(
         session.set_parameters(**parameters)
     elif isinstance(trigger, str) and trigger.startswith("override-"):
         session.set_overrides(**overrides)
+    elif trigger == "mlh-age" and mlh_age is not None:
+        session.set_mlh_age(mlh_age)
     if channel not in session.channels:
         channel = session.channels[0]
     record = None
@@ -1092,6 +1144,7 @@ def handle_action(
         "record": record,
         "total": total,
         "progress": new_progress,
+        "mlh_age": session.mlh_age,
     }
 
 
@@ -1115,6 +1168,7 @@ def register_callbacks(app: Dash) -> None:
         Output("player", "disabled"),
         Output("play-btn", "children"),
         Output("camera", "data"),
+        Output("mlh-age", "value"),
         Input("condition", "value"),
         Input("channel", "value"),
         Input("graph", "clickData"),
@@ -1126,6 +1180,7 @@ def register_callbacks(app: Dash) -> None:
         Input("override-hue", "value"),
         Input("override-tilt", "value"),
         Input("override-id", "value"),
+        Input("mlh-age", "value"),
         State("version", "data"),
         State("progress", "value"),
     )
@@ -1141,6 +1196,7 @@ def register_callbacks(app: Dash) -> None:
         override_hue,
         override_tilt,
         override_id,
+        mlh_age,
         version,
         progress,
     ):
@@ -1168,6 +1224,7 @@ def register_callbacks(app: Dash) -> None:
             parameters,
             overrides,
             progress,
+            mlh_age,
         )
 
         def updated(value):
@@ -1195,6 +1252,7 @@ def register_callbacks(app: Dash) -> None:
             True,
             "▶ Play",
             None if reset_view else no_update,
+            result["mlh_age"] if result["mlh_age"] != mlh_age else no_update,
         )
 
     @app.callback(

@@ -545,6 +545,15 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     steps on which a propagation reaches the node, so that a part visited
     repeatedly (with the input explaining it each time) is driven to 0.
 
+    Input only propagates once the MLH estbalishes credibility: when the parent LM's
+    hypotheses updater deletes hypotheses (e.g. `BurstSamplingHypothesesUpdater`,
+    whose `EvidenceSlopeTracker` makes a hypothesis eligible for deletion once its
+    age reaches `min_age`), the MLH must have survived its first chance of being
+    deleted, i.e. its age must exceed `min_age`. Until then, a newly sampled
+    hypothesis that happens to have the most evidence does not reduce the salience
+    of its object (salience still recovers). With an updater that never deletes
+    hypotheses, input always propagates.
+
     Salience is kept per object (graph ID) for the whole episode, and is only
     cleared by `reset` (at the start of each episode), or through natural drift.
     A change of the MLH object or rotation does not reset it; it only prompts a new
@@ -833,10 +842,17 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         Object IDs received from lower-level LMs on an object-ID channel of the MLH
         graph propagate through the nodes storing them, and sensory input received
         on any other channel of the MLH graph propagates through nodes with
-        similar features.
+        similar features. Nothing propagates until the MLH has survived its first
+        chance of being deleted (see `_mlh_survived_deletion`).
         """
         graph_id = self._get_mlh_graph_id()
         if graph_id is None:
+            return
+        if not self._mlh_survived_deletion(graph_id):
+            logger.debug(
+                f"MLH of {graph_id} has not yet survived its first chance of "
+                "deletion; not propagating"
+            )
             return
 
         mlh = self.parent_lm._get_current_mlh()
@@ -1437,6 +1453,34 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         if graph_id not in self.parent_lm.get_all_known_object_ids():
             return None
         return graph_id
+
+    def _mlh_survived_deletion(self, graph_id) -> bool:
+        """Whether the MLH hypothesis has survived its first chance of deletion.
+
+        The parent LM's hypotheses updater (e.g. `BurstSamplingHypothesesUpdater`)
+        tracks the age of each hypothesis of each object in an
+        `EvidenceSlopeTracker`, in the order of the LM's hypotheses (which the
+        MLH's mlh_id indexes). A hypothesis becomes eligible for deletion once its
+        age reaches the tracker's `min_age`; it is considered for deletion at the
+        start of the next update, which ages it to `min_age + 1` if it survives.
+        The parent LM updates its hypotheses before stepping the GSG, so the age
+        read here is the one after this step's update.
+
+        Returns:
+            Whether the MLH's age exceeds `min_age`; True if the hypotheses
+            updater does not track ages (it never deletes hypotheses), and False
+            if it does not track the MLH's.
+        """
+        updater = getattr(self.parent_lm, "hypotheses_updater", None)
+        trackers = getattr(updater, "evidence_slope_trackers", None)
+        if trackers is None:
+            logger.debug(f"No hypothesis trackers configured for propagation to check.")
+            return True
+        tracker = trackers.get(graph_id)
+        mlh_id = self.parent_lm._get_current_mlh()["mlh_id"]
+        if tracker is None or mlh_id is None or mlh_id >= tracker.total_size():
+            return False
+        return bool(tracker.hyp_ages()[mlh_id] > tracker.min_age)
 
     def _get_object_id_channels(self, graph_id) -> list[str]:
         """Get the input channels of a graph that store "object_id" features.

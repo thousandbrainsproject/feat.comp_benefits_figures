@@ -61,6 +61,11 @@ class EvidenceSlopeTracker:
             window_size, dtype=np.float64
         )
 
+    @property
+    def min_age(self) -> int:
+        """Minimum number of updates before a hypothesis can be removed."""
+        return self._min_age
+
     def total_size(self) -> int:
         """Returns the number of tracked hypotheses.
 

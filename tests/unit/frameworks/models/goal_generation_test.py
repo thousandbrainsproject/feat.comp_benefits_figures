@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import unittest
 from collections import Counter
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -26,11 +27,38 @@ from scipy.spatial import KDTree
 from scipy.spatial.transform import Rotation
 
 from tbp.monty.context import RuntimeContext
+from tbp.monty.frameworks.models.evidence_matching.evidence_slope_tracker import (
+    EvidenceSlopeTracker,
+)
 from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
 
 SENSOR_CHANNEL = "patch"
 TOP_ID = "object_a"
 SECOND_ID = "object_b"
+MIN_AGE = EvidenceSlopeTracker().min_age
+# The age of a hypothesis that has survived its first chance of being deleted.
+ESTABLISHED_AGE = MIN_AGE + 1
+
+
+def slope_tracker(*ages) -> EvidenceSlopeTracker:
+    """Build a slope tracker of hypotheses with the given ages.
+
+    Returns:
+        The tracker, with one hypothesis per age, in the order given.
+    """
+    tracker = EvidenceSlopeTracker()
+    tracker.add_hyp(len(ages))
+    tracker._hyp_age[:] = ages
+    return tracker
+
+
+def hypotheses_updater(trackers) -> SimpleNamespace:
+    """A stand-in for a hypotheses updater that tracks hypothesis ages.
+
+    Returns:
+        An object with the updater's evidence_slope_trackers.
+    """
+    return SimpleNamespace(evidence_slope_trackers=trackers)
 
 
 class FakeGraph:
@@ -99,6 +127,7 @@ def gsg_with_graphs(graphs, **gsg_kwargs) -> EvidenceGoalGenerator:
     lm.max_match_distance = 0.01
     lm.buffer.get_first_sensory_input_channel.return_value = SENSOR_CHANNEL
     lm._get_current_mlh.return_value = identity_mlh(TOP_ID)
+    lm.hypotheses_updater = hypotheses_updater({TOP_ID: slope_tracker(ESTABLISHED_AGE)})
     lm.get_graph.side_effect = lambda graph_id, input_channel=None: (
         graphs[graph_id] if input_channel is None else graphs[graph_id][input_channel]
     )
@@ -259,6 +288,8 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         lm.buffer.get_num_steps_post_output_goal_generated.return_value = 30
         lm.get_all_known_object_ids.side_effect = lambda: list(self.graphs.keys())
         lm._get_current_mlh.side_effect = lambda: self.mlh
+        self.trackers = {TOP_ID: slope_tracker(ESTABLISHED_AGE)}
+        lm.hypotheses_updater = hypotheses_updater(self.trackers)
         lm.get_output.return_value = MagicMock(confidence=1.0)
         lm.get_graph.side_effect = lambda graph_id, input_channel=None: (
             self.graphs[graph_id]
@@ -451,6 +482,82 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         )
 
         self.assertTrue(np.all(self.car_salience() == 1))
+
+    # ------------------------- MLH age -------------------------
+
+    def propagates(self) -> bool:
+        """Propagate a recognized wheel, then restore full salience.
+
+        Returns:
+            Whether the input propagated.
+        """
+        self.gsg.reset()
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_0", WHEEL_ID)]
+        )
+        return bool(self.gsg.propagation_records)
+
+    def test_no_propagation_until_mlh_has_survived_a_chance_of_deletion(
+        self,
+    ) -> None:
+        self.trackers[TOP_ID] = slope_tracker(MIN_AGE)
+        self.assertFalse(
+            self.propagates(), "Eligible for deletion, but not yet considered."
+        )
+        self.assertTrue(np.all(self.car_salience() == 1))
+
+        self.trackers[TOP_ID] = slope_tracker(MIN_AGE + 1)
+        self.assertTrue(self.propagates())
+
+    def test_mlh_propagates_on_the_step_it_first_survives_deletion(self) -> None:
+        # Replays the slope tracker's life cycle as the burst sampling updater
+        # drives it: on each step, the hypotheses removable at the start of the
+        # update are considered for deletion, then the update ages them, then
+        # the LM steps the GSG.
+        tracker = EvidenceSlopeTracker()
+        tracker.add_hyp(1)
+        self.trackers[TOP_ID] = tracker
+        first_considered = first_propagated = None
+        for step in range(2 * MIN_AGE):
+            if first_considered is None and tracker.removable_indices_mask()[0]:
+                first_considered = step
+            tracker.update(np.array([float(step)]))
+            if first_propagated is None and self.propagates():
+                first_propagated = step
+
+        self.assertIsNotNone(first_considered)
+        self.assertEqual(first_propagated, first_considered)
+
+    def test_age_of_the_mlh_hypothesis_is_read(self) -> None:
+        self.trackers[TOP_ID] = slope_tracker(ESTABLISHED_AGE, 0)
+
+        self.mlh = {**self.mlh, "mlh_id": 1}
+        self.assertFalse(self.propagates())
+        self.mlh = {**self.mlh, "mlh_id": 0}
+        self.assertTrue(self.propagates())
+
+    def test_no_propagation_if_mlh_age_is_not_tracked(self) -> None:
+        self.mlh = {**self.mlh, "mlh_id": None}
+        self.assertFalse(self.propagates(), "No MLH hypothesis yet.")
+
+        self.mlh = self.mlh_at_node(4)
+        del self.trackers[TOP_ID]
+        self.assertFalse(self.propagates(), "No tracker for the MLH object.")
+
+    def test_always_propagates_if_hypotheses_are_never_deleted(self) -> None:
+        # E.g. the DefaultHypothesesUpdater, which does not track ages.
+        self.gsg.parent_lm.hypotheses_updater = SimpleNamespace()
+
+        self.assertTrue(self.propagates())
+
+    def test_salience_recovers_while_mlh_is_too_young_to_propagate(self) -> None:
+        self.trackers[TOP_ID] = slope_tracker(MIN_AGE)
+        self.salience("learning_module_0")[:] = 0.5
+
+        self.gsg._update_salience([lm_percept("learning_module_0", WHEEL_ID)])
+
+        self.assertEqual(self.gsg.propagation_records, [])
+        nptest.assert_allclose(self.car_salience(), 0.52)
 
     # ------------------------- Salience dynamics -------------------------
 
@@ -783,6 +890,9 @@ class SensoryFeaturePropagationTest(unittest.TestCase):
         lm.max_match_distance = 0.01
         lm.get_all_known_object_ids.side_effect = lambda: [TOP_ID]
         lm._get_current_mlh.side_effect = lambda: self.mlh
+        lm.hypotheses_updater = hypotheses_updater(
+            {TOP_ID: slope_tracker(ESTABLISHED_AGE)}
+        )
         lm.get_graph.side_effect = lambda _graph_id, input_channel=None: (
             {SENSOR_CHANNEL: self.graph} if input_channel is None else self.graph
         )

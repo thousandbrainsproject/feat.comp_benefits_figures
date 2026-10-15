@@ -18,6 +18,10 @@ does not predict), the goal generator propagates from there, reducing the
 salience of the nodes it reaches, and the salience of every other node recovers
 by one step. The `PropagationRecord`s the goal generator logs are kept for
 stepping through the propagations node by node.
+
+The MLH is a single hypothesis whose age (as burst sampling would track it) can
+be set, and grows by one on every LM step; the goal generator only propagates
+once the MLH has survived its first chance of being deleted.
 """
 
 from __future__ import annotations
@@ -30,12 +34,19 @@ from scipy.spatial.transform import Rotation
 
 from analysis.gui import learned_models, primitives
 from analysis.gui.primitives import Condition, Graph
+from tbp.monty.frameworks.models.evidence_matching.evidence_slope_tracker import (
+    EvidenceSlopeTracker,
+)
 from tbp.monty.frameworks.models.goal_generation import (
     EvidenceGoalGenerator,
     PropagationRecord,
 )
 
 MAX_MATCH_DISTANCE = 0.01
+# The age at which burst sampling first considers deleting a hypothesis.
+MIN_AGE = EvidenceSlopeTracker().min_age
+# By default, the MLH has survived its first chance of being deleted.
+DEFAULT_MLH_AGE = MIN_AGE + 1
 # What the sensed features can be overridden with (None: as stored at the node).
 OVERRIDES = {"hue": None, "normal_tilt": None, "object_id": None}
 # The goal generator's parameters the GUI exposes, with their defaults.
@@ -54,9 +65,13 @@ PARAMETERS = {
 
 
 class FakeParentLM:
-    """Serve a condition's graphs through the parent-LM interface the GSG uses."""
+    """Serve a condition's graphs through the parent-LM interface the GSG uses.
 
-    def __init__(self, graphs: dict[str, Graph]):
+    The MLH is the only hypothesis, whose age a burst-sampling-like hypotheses
+    updater tracks in `mlh_tracker` (see `set_mlh_age`).
+    """
+
+    def __init__(self, graphs: dict[str, Graph], mlh_age: int = DEFAULT_MLH_AGE):
         self.graphs = graphs
         self.learning_module_id = "gui_lm"
         self.max_match_distance = MAX_MATCH_DISTANCE
@@ -67,6 +82,15 @@ class FakeParentLM:
             "rotation": Rotation.identity(),
         }
         self.buffer = SimpleNamespace(update_stats=lambda *_args, **_kwargs: None)
+        self.mlh_tracker = EvidenceSlopeTracker()
+        self.mlh_tracker.add_hyp(1)
+        self.hypotheses_updater = SimpleNamespace(
+            evidence_slope_trackers={"primitive": self.mlh_tracker}
+        )
+        self.set_mlh_age(mlh_age)
+
+    def set_mlh_age(self, age: int) -> None:
+        self.mlh_tracker._hyp_age[:] = age
 
     def _get_current_mlh(self):
         return self.mlh
@@ -109,6 +133,9 @@ class Session:
     def __init__(self, condition_key: str, parameters: dict | None = None):
         self.parameters = {**PARAMETERS, **(parameters or {})}
         self.overrides = dict(OVERRIDES)
+        # The age of the MLH hypothesis, as burst sampling tracks it; every LM
+        # step ages it by one.
+        self.mlh_age = DEFAULT_MLH_AGE
         self.step = 0
         self.sensing: Sensing | None = None
         self.log: list[str] = []
@@ -127,7 +154,7 @@ class Session:
         else:
             condition = primitives.build_condition(condition_key)
         self.condition: Condition = condition
-        self.lm = FakeParentLM(self.condition.graphs)
+        self.lm = FakeParentLM(self.condition.graphs, self.mlh_age)
         self.gsg = self._make_gsg()
         self.step = 0
         self.sensing = None
@@ -157,6 +184,24 @@ class Session:
                 for name, value in changed.items()
             )
         )
+
+    def set_mlh_age(self, age: int) -> None:
+        """Set the age of the MLH hypothesis (before the next LM step ages it)."""
+        age = max(int(age), 0)
+        if age == self.mlh_age:
+            return
+        self.mlh_age = age
+        self.lm.set_mlh_age(age)
+        self.log.append(f"MLH age set to {age}")
+
+    @property
+    def mlh_established(self) -> bool:
+        """Whether the MLH has survived its first chance of being deleted."""
+        return self.gsg._mlh_survived_deletion("primitive")
+
+    def _age_mlh(self, num_steps: int) -> None:
+        self.mlh_age += num_steps
+        self.lm.set_mlh_age(self.mlh_age)
 
     def set_parameters(self, **parameters) -> None:
         """Change the goal generator's parameters, keeping the salience."""
@@ -235,6 +280,7 @@ class Session:
         """LM steps without sensing anything: the salience recovers."""
         for _ in range(num_steps):
             self.step += 1
+            self._age_mlh(1)
             self.gsg._recover_salience()
         self.log.append(
             f"Step {self.step}: salience recovered"
@@ -248,13 +294,16 @@ class Session:
         the location, as if the MLH were exactly right; the goal generator
         propagates from the nodes nearest the location, reducing the salience of
         the nodes it reaches, and the salience of the other nodes recovers by one
-        step.
+        step. As in the LM, the MLH hypothesis is aged by the step's update before
+        the goal generator steps, and nothing propagates unless it has survived
+        its first chance of being deleted.
 
         Returns:
             What was sensed and what propagated.
         """
         location = np.asarray(location, dtype=float)
         self.step += 1
+        self._age_mlh(1)
         self.lm.mlh = {**self.lm.mlh, "location": location}
         salience_before = {
             channel: self.salience(channel).copy() for channel in self.channels
@@ -285,7 +334,8 @@ class Session:
             for channel, record in records.items()
         )
         self.log.append(
-            f"Step {self.step}: sensed; propagated on {propagated or 'no channel'}"
+            f"Step {self.step}: sensed (MLH age {self.mlh_age}); propagated on "
+            f"{propagated or 'no channel'}"
         )
         return self.sensing
 
@@ -498,6 +548,11 @@ class Session:
         return text
 
     def _why_no_propagation(self, channel, location, percept) -> str:
+        if not self.mlh_established:
+            return (
+                f"the MLH (age {self.mlh_age}) has not yet survived its first chance "
+                f"of being deleted (its age must exceed min_age = {MIN_AGE})"
+            )
         graph = self.graphs[channel]
         gsg = self.gsg
         seeds, distances = gsg._get_nodes_nearest_mlh(graph, location)
