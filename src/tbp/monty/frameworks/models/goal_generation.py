@@ -577,7 +577,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         self,
         goal_tolerances=None,
         desired_object_distance=0.03,
-        elapsed_steps_factor=10,
+        elapsed_steps_trigger=20,
         min_post_goal_success_steps=np.inf,
         num_propagation_neighbors=6,
         num_feature_propagation_neighbors=10,
@@ -605,9 +605,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 may want to aim for an initially farther distance, while the
                 surface-policy may want to stay quite close to the object. Defaults to
                 0.03.
-            elapsed_steps_factor: Once min_post_goal_success_steps have elapsed, a
-                Goal is generated every elapsed_steps_factor steps, even if the MLH
-                has not changed. Defaults to 10.
+            elapsed_steps_trigger: A Goal is generated every elapsed_steps_trigger
+                steps, even if the MLH has not changed. Defaults to 20.
             min_post_goal_success_steps: Number of steps that must elapse since the
                 last Goal was generated before a new one is considered. Infinity by
                 default, resulting in no Goals being generated.
@@ -624,16 +623,16 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 the wall (see min_far_side_angle), and so are ignored. Defaults
                 to 10.
             salience_recovery_steps: Number of steps over which the salience of a
-                node linearly recovers from 0 to 1. Defaults to 50.
+                node linearly recovers from 0 to 1. Defaults to 50 steps.
             salience_reduction: How much the salience of the first node a
-                propagation reaches is reduced by (salience is clamped at 0).
+                propagation reaches is reduced by (minimum salience is clamped at 0).
                 With 0.2, a part has to be explained on five visits before it
-                cannot be tested at all. Defaults to 0.2.
+                will not be tested at all. Defaults to 0.2.
             salience_reduction_falloff: Fraction by which the reduction falls off
                 along a propagation, linearly in the order the nodes are reached:
                 the last node reached is reduced by salience_reduction * (1 -
                 salience_reduction_falloff). 0 reduces every reached node by the
-                same amount, wherever it is. Defaults to 0.5.
+                same amount, wherever it is relative to the first node. Defaults to 0.5.
             max_hue_difference: Largest circular distance in hue (in [0, 0.5]) for
                 two features to be similar. Hue is only compared between two
                 chromatic features (see min_hue_saturation and min_hue_value), as
@@ -675,7 +674,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         """
         super().__init__(goal_tolerances, **kwargs)
         self.desired_object_distance = desired_object_distance
-        self.elapsed_steps_factor = elapsed_steps_factor
+        self.elapsed_steps_trigger = elapsed_steps_trigger
         self.min_post_goal_success_steps = min_post_goal_success_steps
         self.num_propagation_neighbors = num_propagation_neighbors
         self.num_feature_propagation_neighbors = num_feature_propagation_neighbors
@@ -1401,7 +1400,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         the sensor should explore the tested location for a while. Once
         min_post_goal_success_steps have elapsed, a new Goal is generated if the
         MLH (object or rotation) has changed since the last Goal, or every
-        elapsed_steps_factor steps.
+        elapsed_steps_trigger steps.
 
         Returns:
             Whether the GSG should generate a new output Goal.
@@ -1420,7 +1419,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             logger.debug("Child objects goal indicated: MLH changed")
             return True
 
-        if num_elapsed_steps % self.elapsed_steps_factor == 0:
+        if num_elapsed_steps % self.elapsed_steps_trigger == 0:
             logger.debug("Child objects goal indicated: sufficient steps elapsed")
             return True
 

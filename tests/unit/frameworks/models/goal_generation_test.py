@@ -301,7 +301,7 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         )
         self.gsg = EvidenceGoalGenerator(
             min_post_goal_success_steps=20,
-            elapsed_steps_factor=10,
+            elapsed_steps_trigger=10,
             num_propagation_neighbors=6,
             salience_recovery_steps=50,
             salience_reduction=0.2,
