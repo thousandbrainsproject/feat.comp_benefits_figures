@@ -583,11 +583,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         salience_recovery_steps=50,
         salience_reduction=0.2,
         salience_reduction_falloff=0.5,
-        min_far_side_angle=135.0,
         max_dissimilar_neighbors=2,
         min_propagation_fraction: float | None = 0.05,
-        min_hue_saturation=0.1,
-        min_hue_value=0.1,
         **kwargs,
     ) -> None:
         """Initialize the GSG.
@@ -612,7 +609,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 nearest the MLH location that a propagation begins from. On a wall
                 thinner than the spacing of nodes (e.g. a bowl's), about half of a
                 node's nearest neighbors are on the far side of the wall (see
-                min_far_side_angle), and so are ignored. Defaults to 10.
+                `_far_side_pairs`), and so are ignored. Defaults to 10.
             salience_recovery_steps: Number of steps over which the salience of a
                 node linearly recovers from 0 to 1. Defaults to 50 steps.
             salience_reduction: How much the salience of the first node a
@@ -624,11 +621,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 the last node reached is reduced by salience_reduction * (1 -
                 salience_reduction_falloff). 0 reduces every reached node by the
                 same amount, wherever it is relative to the first node. Defaults to 0.5.
-            min_far_side_angle: Smallest angle (in degrees) between the surface
-                normals of two neighboring nodes for one to be on the far side of
-                a thin wall from the other (e.g. the inside and outside of a mug),
-                in which case it neither stops a propagation nor is propagated
-                to. Defaults to 135.
             max_dissimilar_neighbors: For sensory input, the number of a node's
                 neighbors whose features may differ from its own, without stopping
                 it from propagating to the others (which have similar features).
@@ -644,15 +636,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 fragments of noisy features, and small parts like a mug's handle,
                 from being explained a few nodes at a time. None to not push
                 propagation through. Defaults to 0.05.
-            min_hue_saturation: Minimum HSV saturation for a hue to be chromatic.
-                Two hues are similar if they differ by at most the parent LM's
-                hue tolerance for the channel (see `_get_max_hue_difference`),
-                but hue is only compared between two chromatic features, as it is
-                undefined for achromatic ones; shading can make parts of a dark,
-                colored surface appear achromatic, so a chromatic and an
-                achromatic feature are not treated as different. Defaults to 0.1.
-            min_hue_value: Minimum HSV value for a hue to be chromatic. Defaults to
-                0.1.
             **kwargs: Additional keyword arguments.
 
         Raises:
@@ -665,11 +648,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         self.salience_recovery_steps = salience_recovery_steps
         self.salience_reduction = salience_reduction
         self.salience_reduction_falloff = salience_reduction_falloff
-        self.min_far_side_angle = min_far_side_angle
         self.max_dissimilar_neighbors = max_dissimilar_neighbors
         self.min_propagation_fraction = min_propagation_fraction
-        self.min_hue_saturation = min_hue_saturation
-        self.min_hue_value = min_hue_value
 
         if salience_reduction_falloff > 1 or salience_reduction_falloff < 0:
             raise ValueError("salience_reduction_falloff must be in [0, 1]")
@@ -899,7 +879,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         Unlike for object IDs, stored features vary from node to node, so the
         propagation begins from those of the nodes nearest the MLH location that
         are similar to the nearest such node, rather than requiring all of them to
-        be. Nodes on the far side of a thin wall (see min_far_side_angle) are
+        be. Nodes on the far side of a thin wall (see `_far_side_pairs`) are
         ignored throughout.
         """
         graph = self.parent_lm.get_graph(graph_id, input_channel=input_channel)
@@ -1254,15 +1234,9 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             and "hsv" in features_b
         ):
             hsv_a, hsv_b = features_a["hsv"], features_b["hsv"]
-            chromatic_a = (hsv_a[:, 1] >= self.min_hue_saturation) & (
-                hsv_a[:, 2] >= self.min_hue_value
-            )
-            chromatic_b = (hsv_b[:, 1] >= self.min_hue_saturation) & (
-                hsv_b[:, 2] >= self.min_hue_value
-            )
             hue_difference = np.abs(hsv_a[:, 0] - hsv_b[:, 0])
             hue_difference = np.minimum(hue_difference, 1.0 - hue_difference)
-            similar &= ~(chromatic_a & chromatic_b) | (
+            similar &= ~(self._chromatic(hsv_a) & self._chromatic(hsv_b)) | (
                 hue_difference <= max_hue_difference
             )
         max_normal_angle = self._get_max_normal_angle(input_channel)
@@ -1275,6 +1249,55 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             similar &= cosine >= np.cos(max_normal_angle)
         return similar
 
+    @staticmethod
+    def _chromatic(hsv, min_saturation=0.1, min_value=0.1) -> np.ndarray:
+        """Check which colors have a meaningful hue.
+
+        Hue is only meaningful for a color with enough chroma: a difference
+        between its brightest and darkest RGB channels that is large compared to
+        sensor noise. In HSV, chroma is saturation * value, where value is the
+        brightest channel and saturation is the difference relative to it, so
+        both are needed. Saturation alone does not do: being a ratio, for a dark
+        color it is the ratio of two small, noisy numbers, so a near-black color
+        can have any saturation (e.g. RGB (0.02, 0.01, 0.0) has saturation 1) and
+        an essentially random hue. The minimum value rules out such dark colors,
+        and the minimum saturation rules out greys of any brightness, including
+        near-white: unlike lightness in HSL, a value near 1 does not mean white
+        (e.g. pure red has value 1 and a well-defined hue); white has a value near
+        1 and a saturation near 0, so it is excluded by the minimum saturation, as
+        are washed-out specular highlights.
+
+        Args:
+            hsv: Colors, with one row of (hue, saturation, value) per color.
+            min_saturation: Minimum saturation for a hue to be meaningful.
+            min_value: Minimum value for a hue to be meaningful.
+
+        Returns:
+            Whether each color's hue is meaningful.
+        """
+        return (hsv[:, 1] >= min_saturation) & (hsv[:, 2] >= min_value)
+
+    @staticmethod
+    def _far_side_pairs(normals_a, normals_b, min_far_side_angle=135.0) -> np.ndarray:
+        """Check which pairs of nodes are on opposite sides of a thin wall.
+
+        Two neighboring nodes whose surface normals face away from each other by
+        at least min_far_side_angle (in degrees) are on the far side of a thin
+        wall from each other (e.g. the inside and outside of a mug), so the one
+        neither stops a propagation from the other nor is propagated to.
+
+        Args:
+            normals_a: Unit surface normals, with one row per pair.
+            normals_b: The unit surface normals to compare them to, likewise.
+            min_far_side_angle: Smallest angle between the normals of two nodes
+                on opposite sides of a wall.
+
+        Returns:
+            Whether the nodes of each pair are on opposite sides of a wall.
+        """
+        cosine = np.sum(normals_a * normals_b, axis=-1)
+        return cosine <= np.cos(np.radians(min_far_side_angle))
+
     def _far_side(self, features, nodes, reference) -> np.ndarray:
         """Check which of a set of nodes are on the far side of a thin wall.
 
@@ -1285,13 +1308,12 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             reference: The features of the node on the near side.
 
         Returns:
-            Whether each node's surface normal faces away from the reference's by
-            at least min_far_side_angle (never, if normals are not compared).
+            Whether each node is on the far side of a wall from the reference
+            (see `_far_side_pairs`; never, if normals are not compared).
         """
         if "normal" not in features or "normal" not in reference:
             return np.zeros(len(nodes), dtype=bool)
-        cosine = features["normal"][nodes] @ reference["normal"]
-        return cosine <= np.cos(np.radians(self.min_far_side_angle))
+        return self._far_side_pairs(features["normal"][nodes], reference["normal"])
 
     def _get_similar_neighbors(
         self, graph_id, input_channel, graph, features
@@ -1299,7 +1321,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         """Get the edges of a graph for propagating through similar features.
 
         Neighbors on the far side of a thin wall from a node (see
-        min_far_side_angle) are not its neighbors here, as they are not part of the
+        `_far_side_pairs`) are not its neighbors here, as they are not part of the
         same surface. A node propagates to the neighbors with features similar to its
         own if at most max_dissimilar_neighbors of its neighbors are not.
 
@@ -1317,10 +1339,9 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 graph_id, input_channel, graph
             ).nonzero()
             if "normal" in features:
-                cosine = np.sum(
-                    features["normal"][source] * features["normal"][target], axis=1
+                near_side = ~self._far_side_pairs(
+                    features["normal"][source], features["normal"][target]
                 )
-                near_side = cosine > np.cos(np.radians(self.min_far_side_angle))
                 source, target = source[near_side], target[near_side]
             surface = self._edge_matrix(source, target, num_nodes)
             similar = self._similar_feature_pairs(

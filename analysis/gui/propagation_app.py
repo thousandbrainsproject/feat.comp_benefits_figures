@@ -130,7 +130,6 @@ PARAMETER_STEPS = {
     "salience_reduction_falloff": 0.1,
     "lm_hue_tolerance": 0.01,
     "lm_normal_tolerance": 5,
-    "min_far_side_angle": 5,
     "max_dissimilar_neighbors": 1,
     "min_propagation_fraction": 0.01,
 }

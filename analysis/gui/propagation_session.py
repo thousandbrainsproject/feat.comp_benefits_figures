@@ -61,7 +61,6 @@ PARAMETERS = {
     # normals (the first of its "pose_vectors" tolerances, 30 by default).
     "lm_hue_tolerance": 0.1,
     "lm_normal_tolerance": 30.0,
-    "min_far_side_angle": 135.0,
     "max_dissimilar_neighbors": 2,
     "min_propagation_fraction": 0.05,
 }
