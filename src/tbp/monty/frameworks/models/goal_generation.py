@@ -544,6 +544,24 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     recovers linearly to 1 over `salience_recovery_steps` steps, except on the
     steps on which a propagation reaches the node, so that a part visited
     repeatedly (with the input explaining it each time) is driven to 0.
+
+    Salience is kept per object (graph ID) for the whole episode, and is only
+    cleared by `reset` (at the start of each episode), or through natural drift.
+    A change of the MLH object or rotation does not reset it; it only prompts a new
+    Goal (see `_check_need_new_output_goal`):
+    - Only the MLH's salience is reduced (by propagation) and sampled from, but
+      the salience of every object recovers on every step. If the MLH switches to
+      another object and back, the first object's explained parts are
+      remembered, less the recovery of the steps in between. An object that is
+      not the MLH stops being tracked once its salience has fully recovered.
+    - Salience is indexed by node, i.e. in the object's reference frame, so it
+      remains valid when the MLH rotation changes. However, the nodes past
+      propagations reached were found using the MLH pose at the time (the seeds
+      nearest the MLH location, and sensed surface normals rotated by the MLH
+      rotation); if that pose was wrong, the wrong nodes were reduced, and they
+      are not restored until they recover.
+    - If a non-MLH object's salience drifts to 1.0 for all nodes, then it is no longer
+      tracked. In this sense, salience can be reset even without episode boundaries.
     """
 
     def __init__(
@@ -642,6 +660,9 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             min_hue_value: Minimum HSV value for a hue to be chromatic. Defaults to
                 0.1.
             **kwargs: Additional keyword arguments.
+
+        Raises:
+            ValueError: If a salience or propagation parameter is out of range.
         """
         super().__init__(goal_tolerances, **kwargs)
         self.desired_object_distance = desired_object_distance
@@ -1325,23 +1346,33 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     def _recover_salience(self, except_nodes=None) -> None:
         """Recover the salience of every node by one step, towards 1.
 
+        Every tracked graph recovers, whether or not it is the MLH. Once all of
+        the nodes of a graph that is not the MLH are back at 1, the graph is no
+        longer tracked: its salience is the same as that of a graph never
+        reduced, and is recreated (at 1) if it becomes the MLH again. If
+        salience_recovery_steps is 0, salience does not recover.
+
         Args:
             except_nodes: For each (graph_id, input_channel) key, the nodes whose
                 salience does not recover on this step (those a propagation
                 reached). None for every node to recover.
-
-        If salience_recovery_steps is 0, does nothing.
         """
+        if self.salience_recovery_steps:
+            recovery = 1.0 / self.salience_recovery_steps
+            for key, salience in self._salience.items():
+                recovers = np.ones(len(salience), dtype=bool)
+                if except_nodes and key in except_nodes:
+                    recovers[except_nodes[key]] = False
+                salience[recovers] = np.minimum(salience[recovers] + recovery, 1.0)
 
-        if self.salience_recovery_steps == 0:
-            return
-
-        recovery = 1.0 / self.salience_recovery_steps
-        for key, salience in self._salience.items():
-            recovers = np.ones(len(salience), dtype=bool)
-            if except_nodes and key in except_nodes:
-                recovers[except_nodes[key]] = False
-            salience[recovers] = np.minimum(salience[recovers] + recovery, 1.0)
+        mlh_graph_id = self._get_mlh_graph_id()
+        recovered = [
+            key
+            for key, salience in self._salience.items()
+            if key[0] != mlh_graph_id and np.all(salience >= 1.0)
+        ]
+        for key in recovered:
+            del self._salience[key]
 
     def _check_need_new_output_goal(
         self,

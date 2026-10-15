@@ -499,6 +499,42 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             np.all(self.car_salience()[:10] == 0), "Salience is clamped at 0."
         )
 
+    def test_salience_of_previous_mlh_recovers_and_is_dropped_once_full(
+        self,
+    ) -> None:
+        self.gsg.salience_reduction_falloff = 0.0
+        self.gsg._update_salience([lm_percept("learning_module_0", WHEEL_ID)])
+        self.graphs["other_object"] = {"learning_module_0": car_line_graph()}
+        self.mlh = {**self.mlh, "graph_id": "other_object"}
+
+        for _ in range(9):
+            self.gsg._recover_salience()
+        self.assertIn((TOP_ID, "learning_module_0"), self.gsg._salience)
+        nptest.assert_allclose(
+            self.gsg._salience[(TOP_ID, "learning_module_0")][:10],
+            0.98,
+            err_msg="Not the MLH, but still recovering.",
+        )
+
+        self.gsg._recover_salience()
+        self.assertNotIn((TOP_ID, "learning_module_0"), self.gsg._salience)
+
+        self.mlh = self.mlh_at_node(4)
+        self.assertTrue(
+            np.all(self.car_salience() == 1), "Recreated at 1 as the MLH again."
+        )
+
+    def test_salience_of_mlh_is_kept_once_full(self) -> None:
+        self.gsg._propagate_from_observations(
+            [lm_percept("learning_module_0", WHEEL_ID)]
+        )
+
+        for _ in range(50):
+            self.gsg._recover_salience()
+
+        self.assertIn((TOP_ID, "learning_module_0"), self.gsg._salience)
+        self.assertTrue(np.all(self.car_salience() == 1))
+
     def test_reset_restores_full_salience(self) -> None:
         self.gsg._propagate_from_observations(
             [lm_percept("learning_module_0", WHEEL_ID)]
