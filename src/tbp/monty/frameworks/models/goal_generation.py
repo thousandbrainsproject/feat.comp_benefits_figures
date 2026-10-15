@@ -582,9 +582,9 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         num_propagation_neighbors=10,
         max_dissimilar_neighbors=2,
         min_propagation_fraction: float | None = 0.05,
-        salience_recovery_steps=50,
         salience_reduction=0.2,
         salience_reduction_falloff=0.5,
+        salience_recovery_steps=50,
         **kwargs,
     ) -> None:
         """Initialize the GSG.
@@ -625,8 +625,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 fragments of noisy features, and small parts like a mug's handle,
                 from being explained a few nodes at a time. None to not push
                 propagation through. Defaults to 0.05.
-            salience_recovery_steps: Number of steps over which the salience of a
-                node linearly recovers from 0 to 1. Defaults to 50 steps.
             salience_reduction: How much the salience of the first node a
                 propagation reaches is reduced by (minimum salience is clamped at 0).
                 With 0.2, a part has to be explained on five visits before it
@@ -636,6 +634,9 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 the last node reached is reduced by salience_reduction * (1 -
                 salience_reduction_falloff). 0 reduces every reached node by the
                 same amount, wherever it is relative to the first node. Defaults to 0.5.
+            salience_recovery_steps: Number of steps over which the salience of a
+                node linearly recovers from 0 to 1. 0 to not recover salience. Defaults
+                to 50 steps.
             **kwargs: Additional keyword arguments.
 
         Raises:
@@ -647,9 +648,9 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         self.num_propagation_neighbors = num_propagation_neighbors
         self.max_dissimilar_neighbors = max_dissimilar_neighbors
         self.min_propagation_fraction = min_propagation_fraction
-        self.salience_recovery_steps = salience_recovery_steps
         self.salience_reduction = salience_reduction
         self.salience_reduction_falloff = salience_reduction_falloff
+        self.salience_recovery_steps = salience_recovery_steps
 
         if num_propagation_neighbors <= 0:
             raise ValueError("num_propagation_neighbors must be positive")
@@ -661,10 +662,10 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             raise ValueError("min_propagation_fraction must be in [0, 1] or None")
         if salience_reduction > 1 or salience_reduction < 0:
             raise ValueError("salience_reduction must be in [0, 1]")
-        if salience_recovery_steps < 0:
-            raise ValueError("salience_recovery_steps must be positive or 0")
         if salience_reduction_falloff > 1 or salience_reduction_falloff < 0:
             raise ValueError("salience_reduction_falloff must be in [0, 1]")
+        if salience_recovery_steps < 0:
+            raise ValueError("salience_recovery_steps must be positive or 0")
 
     # ======================= Public ==========================
 
