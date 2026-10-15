@@ -156,8 +156,6 @@ learning_module_0:
     # Tolerance(s) when determining goal success
     goal_tolerances:
       location: 0.015 # distance in meters
-    # Number of necessary steps for a hypothesis-testing action to be considered
-    min_post_goal_success_steps: 5
   hypotheses_updater_args:
     # Look at features associated with (at most) the 10 closest learned points.
     max_nneighbors: 10

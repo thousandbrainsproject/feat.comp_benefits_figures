@@ -50,8 +50,6 @@ experiment:
             - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.NoopEvidenceGraphLMTelemetry
-          gsg:
-            min_post_goal_success_steps: 20
       sensor_modules:
         sensor_module_0:
           # Random rotations often leave the sticker at a steep angle, where the

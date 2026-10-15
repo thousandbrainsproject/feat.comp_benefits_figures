@@ -31,7 +31,6 @@ learning_module_0:
     goal_tolerances:
       location: 0.015
     elapsed_steps_trigger: 20
-    min_post_goal_success_steps: 5
     desired_object_distance: 0.03
 
 learning_module_1:
@@ -58,7 +57,6 @@ learning_module_1:
     goal_tolerances:
       location: 0.015
     elapsed_steps_trigger: 20
-    min_post_goal_success_steps: 5
     desired_object_distance: 0.03
 
 learning_module_2:
@@ -85,7 +83,6 @@ learning_module_2:
     goal_tolerances:
       location: 0.015
     elapsed_steps_trigger: 20
-    min_post_goal_success_steps: 5
     desired_object_distance: 0.03
 
 learning_module_3:
@@ -112,7 +109,6 @@ learning_module_3:
     goal_tolerances:
       location: 0.015
     elapsed_steps_trigger: 20
-    min_post_goal_success_steps: 5
     desired_object_distance: 0.03
 
 learning_module_4:
@@ -139,5 +135,4 @@ learning_module_4:
     goal_tolerances:
       location: 0.015
     elapsed_steps_trigger: 20
-    min_post_goal_success_steps: 5
     desired_object_distance: 0.03

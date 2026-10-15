@@ -44,7 +44,6 @@ experiment:
             goal_tolerances:
               location: 0.015
             elapsed_steps_trigger: 20
-            min_post_goal_success_steps: 5
             desired_object_distance: 0.03
         learning_module_1:
           hypotheses_updater_class: ${monty.class:tbp.monty.frameworks.models.evidence_matching.burst_sampling.BurstSamplingHypothesesUpdater}
@@ -68,7 +67,6 @@ experiment:
             goal_tolerances:
               location: 0.015
             elapsed_steps_trigger: 20
-            min_post_goal_success_steps: 5
             desired_object_distance: 0.03
         learning_module_2:
           hypotheses_updater_class: ${monty.class:tbp.monty.frameworks.models.evidence_matching.burst_sampling.BurstSamplingHypothesesUpdater}
@@ -97,7 +95,6 @@ experiment:
             goal_tolerances:
               location: 0.015
             elapsed_steps_trigger: 20
-            min_post_goal_success_steps: 5
             desired_object_distance: 0.03
       sensor_modules:
         sensor_module_0:

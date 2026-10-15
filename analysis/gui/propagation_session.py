@@ -51,13 +51,16 @@ DEFAULT_MLH_AGE = MIN_AGE + 1
 OVERRIDES = {"hue": None, "normal_tilt": None, "object_id": None}
 # The goal generator's parameters the GUI exposes, with their defaults.
 PARAMETERS = {
-    "num_propagation_neighbors": 6,
-    "num_feature_propagation_neighbors": 10,
+    "num_propagation_neighbors": 10,
     "salience_recovery_steps": 50,
     "salience_reduction": 0.2,
     "salience_reduction_falloff": 0.5,
-    "max_hue_difference": 0.05,
-    "max_normal_angle": 40.0,
+    # The parent LM's tolerances, which the goal generator uses as its largest
+    # differences between similar features: hue (the first of its "hsv"
+    # tolerances, 0.1 in the configs), and the angle in degrees between surface
+    # normals (the first of its "pose_vectors" tolerances, 30 by default).
+    "lm_hue_tolerance": 0.1,
+    "lm_normal_tolerance": 30.0,
     "min_far_side_angle": 135.0,
     "max_dissimilar_neighbors": 2,
     "min_propagation_fraction": 0.05,
@@ -82,6 +85,7 @@ class FakeParentLM:
             "rotation": Rotation.identity(),
         }
         self.buffer = SimpleNamespace(update_stats=lambda *_args, **_kwargs: None)
+        self.tolerances: dict = {}
         self.mlh_tracker = EvidenceSlopeTracker()
         self.mlh_tracker.add_hyp(1)
         self.hypotheses_updater = SimpleNamespace(
@@ -91,6 +95,23 @@ class FakeParentLM:
 
     def set_mlh_age(self, age: int) -> None:
         self.mlh_tracker._hyp_age[:] = age
+
+    def set_tolerances(self, hue: float | None, normal: float | None) -> None:
+        """Set the hue and surface normal tolerances of every channel.
+
+        Args:
+            hue: The hue tolerance of the channels storing hue (None: no hue).
+            normal: The surface normal tolerance, in degrees, which the LM stores
+                in radians (None: no normals).
+        """
+        self.tolerances = {}
+        for channel, graph in self.graphs.items():
+            channel_tolerances = {}
+            if hue and "hsv" in graph.feature_mapping:
+                channel_tolerances["hsv"] = np.array([hue, 1.0, 1.0])
+            if normal:
+                channel_tolerances["pose_vectors"] = np.radians([normal] * 3)
+            self.tolerances[channel] = channel_tolerances
 
     def _get_current_mlh(self):
         return self.mlh
@@ -223,6 +244,9 @@ class Session:
 
     def _make_gsg(self) -> EvidenceGoalGenerator:
         parameters = dict(self.parameters)
+        self.lm.set_tolerances(
+            parameters.pop("lm_hue_tolerance"), parameters.pop("lm_normal_tolerance")
+        )
         if not parameters["min_propagation_fraction"]:
             parameters["min_propagation_fraction"] = None
         gsg = EvidenceGoalGenerator(**parameters)
@@ -389,7 +413,7 @@ class Session:
         graph = self.graphs[channel]
         if self.is_id_channel(channel):
             return None, self.gsg._get_neighbor_matrix("primitive", channel, graph)
-        features = self.gsg._get_propagation_features(graph)
+        features = self.gsg._get_propagation_features(graph, channel)
         return self.gsg._get_similar_neighbors("primitive", channel, graph, features)
 
     def node_details(self, channel, node) -> dict[str, str]:
@@ -428,19 +452,14 @@ class Session:
                 details["hue"] = f"{hsv[0]:.3f} (s {hsv[1]:.2f}, v {hsv[2]:.2f})"
             normal = graph.normals[node]
             details["normal"] = "(" + ", ".join(f"{c:+.2f}" for c in normal) + ")"
-            features = gsg._get_propagation_features(graph)
-            all_neighbors = gsg._get_neighbor_matrix(
-                "primitive",
-                channel,
-                graph,
-                num_neighbors=gsg.num_feature_propagation_neighbors,
-            )
+            features = gsg._get_propagation_features(graph, channel)
+            all_neighbors = gsg._get_neighbor_matrix("primitive", channel, graph)
             targets = all_neighbors.indices[
                 all_neighbors.indptr[node] : all_neighbors.indptr[node + 1]
             ]
             reference = {name: values[node] for name, values in features.items()}
             far = gsg._far_side(features, targets, reference)
-            similar = gsg._similar_features(features, targets[~far], reference)
+            similar = gsg._similar_features(channel, features, targets[~far], reference)
             num_dissimilar = int((~similar).sum())
             details["neighbors"] = (
                 f"{len(targets)}: {far.sum()} on the far side (ignored), "
@@ -572,10 +591,10 @@ class Session:
                 f"not all of the {len(seeds)} nearest nodes store the received ID "
                 f"(some store {', '.join(map(str, others))})"
             )
-        features = gsg._get_propagation_features(graph)
+        features = gsg._get_propagation_features(graph, channel)
         sensed = gsg._get_sensed_propagation_features(percept, self.lm.mlh["rotation"])
         if not features:
             return "the channel stores no features to compare"
-        if not gsg._similar_features(features, seeds[nearby], sensed).any():
+        if not gsg._similar_features(channel, features, seeds[nearby], sensed).any():
             return "the sensed features are not similar to any nearby node's"
         return "no seeds (all nearest nodes are on the far side of the surface)"

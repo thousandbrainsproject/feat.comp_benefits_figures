@@ -98,6 +98,9 @@ from scipy.spatial import KDTree
 from scipy.spatial.transform import Rotation
 
 from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
+from tbp.monty.frameworks.utils.graph_matching_utils import (
+    add_pose_features_to_tolerances,
+)
 
 DEFAULT_OUTPUT_DIR = "~/tbp/results/comp_benefits_figures/salience_propagation"
 MODELS = {
@@ -279,6 +282,21 @@ class FakeParentLM:
         self.learning_module_id = "demo_lm"
         # As configured for LMs 0 and 2 in evidence_3lm_heterarchy
         self.max_match_distance = 0.01
+        # The tolerances the goal generator uses as its largest differences
+        # between similar features: the hue tolerance of the sensor channels (as
+        # configured for LMs 0 and 2 in evidence_3lm_heterarchy, and for the
+        # surface agent's LM), and the default surface normal tolerance.
+        channels = {
+            channel: "hsv" in graph.feature_mapping
+            for graphs in memory.values()
+            for channel, graph in graphs.items()
+        }
+        self.tolerances = add_pose_features_to_tolerances(
+            {
+                channel: {"hsv": np.array([0.1, 1.0, 1.0])} if has_hue else {}
+                for channel, has_hue in channels.items()
+            }
+        )
         self.mlh = None
         self.buffer = SimpleNamespace(update_stats=lambda *_args, **_kwargs: None)
 

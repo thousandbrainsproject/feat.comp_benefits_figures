@@ -159,7 +159,6 @@ Now we specify the learning module config. We define five learning modules with 
     # Tolerance(s) when determining goal success
     goal_tolerances:
       location: 0.015 # distance in meters
-    min_post_goal_success_steps: 5 # Number of necessary steps for a hypothesis
   hypotheses_updater_args:
     max_nneighbors: 10
   feature_weights:

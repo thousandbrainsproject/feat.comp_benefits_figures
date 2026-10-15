@@ -125,12 +125,11 @@ DEFAULT_CAMERA = {
 SPEEDS = [1, 2, 5, 10, 25, 50]
 PARAMETER_STEPS = {
     "num_propagation_neighbors": 1,
-    "num_feature_propagation_neighbors": 1,
     "salience_recovery_steps": 1,
     "salience_reduction": 0.05,
     "salience_reduction_falloff": 0.1,
-    "max_hue_difference": 0.01,
-    "max_normal_angle": 5,
+    "lm_hue_tolerance": 0.01,
+    "lm_normal_tolerance": 5,
     "min_far_side_angle": 5,
     "max_dissimilar_neighbors": 1,
     "min_propagation_fraction": 0.01,

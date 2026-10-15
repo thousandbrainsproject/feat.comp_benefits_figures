@@ -223,7 +223,6 @@ class AdvancedPolicyTest(unittest.TestCase):
         """
         gsg_args = dict(
             elapsed_steps_trigger=10,
-            min_post_goal_success_steps=5,
             desired_object_distance=0.025,
         )
 

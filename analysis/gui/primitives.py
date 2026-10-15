@@ -266,7 +266,8 @@ def _add_islands(surface: Surface) -> None:
     surface.hue_island(-0.025, 0.012, 0.011)
     surface.tilt_island(0.012, -0.015, 0.009)
     # Gentle enough for neighboring normals (up to two spacings apart) to differ by
-    # well under max_normal_angle, while the bump's normals span about 25 degrees.
+    # well under the LM's surface normal tolerance (30 degrees), while the bump's
+    # normals span about 25 degrees.
     surface.bump(0.03, 0.015, sigma=0.009, amplitude=0.006)
 
 
@@ -320,8 +321,8 @@ def build_condition(key: str, seed: int = 0) -> Condition:
             "1. Curved surface, uniform hue",
             "A slightly curved surface whose hue is uniform (up to noise) and whose "
             "normals change gradually. A propagation from anywhere should cover the "
-            "whole surface: neighboring normals differ by far less than "
-            "max_normal_angle.",
+            "whole surface: neighboring normals differ by far less than the LM's "
+            "surface normal tolerance.",
             {SENSOR_CHANNEL: graph},
             {SENSOR_CHANNEL: labels},
             _landmarks(surface, {}),

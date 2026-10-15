@@ -95,9 +95,7 @@ experiment:
             goal_tolerances:
               location: 0.015
             elapsed_steps_trigger: 20
-            min_post_goal_success_steps: 20
             desired_object_distance: 0.03
-            num_propagation_neighbors: 6
             salience_recovery_steps: 50
           region_proposers:
           - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations

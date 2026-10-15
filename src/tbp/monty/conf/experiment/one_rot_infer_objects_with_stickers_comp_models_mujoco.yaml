@@ -52,8 +52,6 @@ experiment:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.NoopEvidenceGraphLMTelemetry
           gsg:
             _target_: tbp.monty.frameworks.models.goal_generation.EvidenceGoalGenerator
-            min_post_goal_success_steps: 5
-            num_propagation_neighbors: 6
             salience_recovery_steps: 50
       sensor_modules:
         sensor_module_0:

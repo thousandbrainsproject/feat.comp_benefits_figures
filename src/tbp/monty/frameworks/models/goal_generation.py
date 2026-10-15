@@ -523,19 +523,20 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     graph of the channel the input was received on, starting from the nodes
     nearest the MLH location:
     - An object ID from a lower-level LM propagates through the nodes storing it.
-    - Sensory input propagates through neighboring nodes with a similar hue and
-      surface normal. Propagation stops wherever the hue or the surface normal
-      changes abruptly, so e.g. on a mug it covers the side of the cylinder
-      (whose normal changes gradually from node to node), but not its rim,
-      bottom or handle, and on a cube a single face, but not the other faces. A
-      propagation that stops before reaching `min_propagation_fraction` of the
-      graph's nodes is pushed through to the neighbors whose features differ.
+    - Sensory input propagates through neighboring nodes with a similar hue
+      and surface normal, within the parent LM's hue and surface normal
+      ("pose_vectors") tolerances for the channel. Propagation stops wherever
+      the hue or the surface normal changes abruptly, so e.g. on a mug it
+      covers the side of the cylinder (whose normal changes gradually from node
+      to node), but not its rim, bottom or handle, and on a cube a single face,
+      but not the other faces. A propagation that stops before reaching
+      `min_propagation_fraction` of the graph's nodes is pushed through to the
+      neighbors whose features differ.
 
-    A node's neighbors are its `num_propagation_neighbors` (or, for sensory
-    input, `num_feature_propagation_neighbors`) nearest nodes (regardless of their
-    distance), together with the nodes that have it among their own nearest
-    nodes, and it propagates to them only if all of them store the received
-    object ID or, for sensory input, are similar to it (allowing for
+    A node's neighbors are its `num_propagation_neighbors` nearest nodes
+    (regardless of their distance), together with the nodes that have it among
+    their own nearest nodes, and it propagates to them only if all of them store
+    the received object ID or, for sensory input, are similar to it (allowing for
     `max_dissimilar_neighbors` noisy neighbors, which it does not propagate to).
     A propagation therefore covers a contiguous region, including outlying nodes,
     without jumping to disjoint regions (e.g. separate wheels on a car).
@@ -578,14 +579,10 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         goal_tolerances=None,
         desired_object_distance=0.03,
         elapsed_steps_trigger=20,
-        min_post_goal_success_steps=np.inf,
-        num_propagation_neighbors=6,
-        num_feature_propagation_neighbors=10,
+        num_propagation_neighbors=10,
         salience_recovery_steps=50,
         salience_reduction=0.2,
         salience_reduction_falloff=0.5,
-        max_hue_difference: float | None = 0.05,
-        max_normal_angle: float | None = 40.0,
         min_far_side_angle=135.0,
         max_dissimilar_neighbors=2,
         min_propagation_fraction: float | None = 0.05,
@@ -607,21 +604,15 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 0.03.
             elapsed_steps_trigger: A Goal is generated every elapsed_steps_trigger
                 steps, even if the MLH has not changed. Defaults to 20.
-            min_post_goal_success_steps: Number of steps that must elapse since the
-                last Goal was generated before a new one is considered. Infinity by
-                default, resulting in no Goals being generated.
             num_propagation_neighbors: Number of nearest neighbors of each node
                 that, together with the nodes that have it among their own nearest
-                neighbors, must all store the received object ID for a
-                propagation to continue from the node. Also the number of nodes
-                nearest the MLH location that a propagation begins from. Defaults
-                to 6.
-            num_feature_propagation_neighbors: Like num_propagation_neighbors, but
-                for propagating sensory input through similar features. Larger,
-                as on a wall thinner than the spacing of nodes (e.g. a bowl's),
-                about half of a node's nearest neighbors are on the far side of
-                the wall (see min_far_side_angle), and so are ignored. Defaults
-                to 10.
+                neighbors, must all store the received object ID (or, for sensory
+                input, have similar features, up to max_dissimilar_neighbors) for
+                a propagation to continue from the node. Also the number of nodes
+                nearest the MLH location that a propagation begins from. On a wall
+                thinner than the spacing of nodes (e.g. a bowl's), about half of a
+                node's nearest neighbors are on the far side of the wall (see
+                min_far_side_angle), and so are ignored. Defaults to 10.
             salience_recovery_steps: Number of steps over which the salience of a
                 node linearly recovers from 0 to 1. Defaults to 50 steps.
             salience_reduction: How much the salience of the first node a
@@ -633,16 +624,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 the last node reached is reduced by salience_reduction * (1 -
                 salience_reduction_falloff). 0 reduces every reached node by the
                 same amount, wherever it is relative to the first node. Defaults to 0.5.
-            max_hue_difference: Largest circular distance in hue (in [0, 0.5]) for
-                two features to be similar. Hue is only compared between two
-                chromatic features (see min_hue_saturation and min_hue_value), as
-                it is undefined for achromatic ones; shading can make parts of a
-                dark, colored surface appear achromatic, so a chromatic and an
-                achromatic feature are not treated as different. None to not
-                compare hue. Defaults to 0.05.
-            max_normal_angle: Largest angle (in degrees) between the surface
-                normals of two neighboring nodes for their features to be similar.
-                None to not compare normals. Defaults to 40.
             min_far_side_angle: Smallest angle (in degrees) between the surface
                 normals of two neighboring nodes for one to be on the far side of
                 a thin wall from the other (e.g. the inside and outside of a mug),
@@ -664,7 +645,12 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 from being explained a few nodes at a time. None to not push
                 propagation through. Defaults to 0.05.
             min_hue_saturation: Minimum HSV saturation for a hue to be chromatic.
-                Defaults to 0.1.
+                Two hues are similar if they differ by at most the parent LM's
+                hue tolerance for the channel (see `_get_max_hue_difference`),
+                but hue is only compared between two chromatic features, as it is
+                undefined for achromatic ones; shading can make parts of a dark,
+                colored surface appear achromatic, so a chromatic and an
+                achromatic feature are not treated as different. Defaults to 0.1.
             min_hue_value: Minimum HSV value for a hue to be chromatic. Defaults to
                 0.1.
             **kwargs: Additional keyword arguments.
@@ -675,14 +661,10 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         super().__init__(goal_tolerances, **kwargs)
         self.desired_object_distance = desired_object_distance
         self.elapsed_steps_trigger = elapsed_steps_trigger
-        self.min_post_goal_success_steps = min_post_goal_success_steps
         self.num_propagation_neighbors = num_propagation_neighbors
-        self.num_feature_propagation_neighbors = num_feature_propagation_neighbors
         self.salience_recovery_steps = salience_recovery_steps
         self.salience_reduction = salience_reduction
         self.salience_reduction_falloff = salience_reduction_falloff
-        self.max_hue_difference = max_hue_difference
-        self.max_normal_angle = max_normal_angle
         self.min_far_side_angle = min_far_side_angle
         self.max_dissimilar_neighbors = max_dissimilar_neighbors
         self.min_propagation_fraction = min_propagation_fraction
@@ -697,8 +679,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             raise ValueError("salience_recovery_steps must be positive or 0")
         if num_propagation_neighbors <= 0:
             raise ValueError("num_propagation_neighbors must be positive")
-        if num_feature_propagation_neighbors <= 0:
-            raise ValueError("num_feature_propagation_neighbors must be positive")
 
     # ======================= Public ==========================
 
@@ -707,8 +687,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         super().reset()
         # The salience (in [0, 1]) of each node, keyed by (graph_id, input_channel).
         self._salience: dict[tuple[str, str], np.ndarray] = {}
-        # Keyed by (graph_id, input_channel, number of nodes, number of neighbors).
-        self._neighbor_cache: dict[tuple[str, str, int, int], csr_matrix] = {}
+        # Keyed by (graph_id, input_channel, number of nodes).
+        self._neighbor_cache: dict[tuple[str, str, int], csr_matrix] = {}
         # For propagating sensory input (see `_get_similar_neighbors`), keyed by
         # (graph_id, input_channel, number of nodes).
         self._similar_neighbors_cache: dict[
@@ -923,20 +903,22 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         ignored throughout.
         """
         graph = self.parent_lm.get_graph(graph_id, input_channel=input_channel)
-        features = self._get_propagation_features(graph)
+        features = self._get_propagation_features(graph, input_channel)
         if not features:
             return
         sensed = self._get_sensed_propagation_features(percept, mlh["rotation"])
 
         seeds, seed_distances = self._get_nodes_nearest_mlh(graph, mlh["location"])
         nearby = seeds[seed_distances <= self.parent_lm.max_match_distance]
-        predicted = nearby[self._similar_features(features, nearby, sensed)]
+        predicted = nearby[
+            self._similar_features(input_channel, features, nearby, sensed)
+        ]
         if len(predicted) == 0:
             return
         reference = {name: values[predicted[0]] for name, values in features.items()}
         seeds = seeds[
             ~self._far_side(features, seeds, reference)
-            & self._similar_features(features, seeds, reference)
+            & self._similar_features(input_channel, features, seeds, reference)
         ]
 
         propagation, surface = self._get_similar_neighbors(
@@ -1132,17 +1114,57 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         ).reshape(-1)
         return seeds, distances
 
-    def _get_propagation_features(self, graph) -> dict[str, np.ndarray]:
+    def _get_max_hue_difference(self, input_channel) -> float | None:
+        """Get the largest hue difference between similar features on a channel.
+
+        This is the parent LM's hue tolerance for the channel (the first entry of
+        its "hsv" tolerances): the circular hue distance (in [0, 0.5]) at which
+        the LM's feature evidence for hue falls to 0.
+
+        Returns:
+            The largest hue difference, or None if the LM has no hue tolerance
+            for the channel (it does not compare hue there), in which case
+            propagation does not compare hue either.
+        """
+        tolerances = getattr(self.parent_lm, "tolerances", None) or {}
+        hsv = tolerances.get(input_channel, {}).get("hsv")
+        if hsv is None:
+            return None
+        return float(np.asarray(hsv, dtype=float).reshape(-1)[0])
+
+    def _get_max_normal_angle(self, input_channel) -> float | None:
+        """Get the largest angle between similar surface normals on a channel.
+
+        This is the parent LM's tolerance for the first pose vector (the surface
+        normal) on the channel, which the LM stores in radians (configured in
+        degrees, 30 by default; see `add_pose_features_to_tolerances`).
+
+        Returns:
+            The largest angle, in radians, or None if the LM has no pose vector
+            tolerance for the channel, in which case propagation does not compare
+            surface normals.
+        """
+        tolerances = getattr(self.parent_lm, "tolerances", None) or {}
+        pose_vectors = tolerances.get(input_channel, {}).get("pose_vectors")
+        if pose_vectors is None:
+            return None
+        return float(np.asarray(pose_vectors, dtype=float).reshape(-1)[0])
+
+    def _get_propagation_features(self, graph, input_channel) -> dict[str, np.ndarray]:
         """Get the features of every node of a graph that sensory propagation compares.
 
         Returns:
             Arrays of each compared feature the graph stores, with one row per node:
             "hsv" (hue, saturation and value) and "normal" (the unit surface
-            normal). Hue is omitted when not compared.
+            normal). Hue is omitted when not compared on the channel (see
+            `_get_max_hue_difference`).
         """
         feature_mapping = graph.feature_mapping or {}
         features = {}
-        if self.max_hue_difference is not None and "hsv" in feature_mapping:
+        if (
+            self._get_max_hue_difference(input_channel) is not None
+            and "hsv" in feature_mapping
+        ):
             features["hsv"] = self._get_feature_values(graph, "hsv")[:, :3]
         if "pose_vectors" in feature_mapping:
             normals = self._get_feature_values(graph, "pose_vectors")[:, :3]
@@ -1162,15 +1184,13 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         Returns:
             The sensed features, in the format of `_get_propagation_features` (with one
             value per feature, and the normal in the model's frame), for those the
-            percept carries.
+            percept carries. Only the features also present in the stored ones are
+            compared.
         """
         non_morphological = percept.non_morphological_features or {}
         morphological = percept.morphological_features or {}
         sensed = {}
-        if (
-            self.max_hue_difference is not None
-            and non_morphological.get("hsv") is not None
-        ):
+        if non_morphological.get("hsv") is not None:
             sensed["hsv"] = np.asarray(non_morphological["hsv"], dtype=float)[:3]
         if morphological.get("pose_vectors") is not None:
             normal = rotation.apply(
@@ -1179,12 +1199,15 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             sensed["normal"] = normal / np.linalg.norm(normal)
         return sensed
 
-    def _similar_features(self, features, nodes, reference) -> np.ndarray:
+    def _similar_features(
+        self, input_channel, features, nodes, reference
+    ) -> np.ndarray:
         """Check which of a set of nodes have features similar to a reference.
 
         Only the features present in both `features` and `reference` are compared.
 
         Args:
+            input_channel: The input channel of the graph the nodes belong to.
             features: The compared features of every node (see
                 `_get_propagation_features`).
             nodes: The nodes to check.
@@ -1195,6 +1218,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             Whether each node's features are similar to the reference.
         """
         return self._similar_feature_pairs(
+            input_channel,
             {name: values[nodes] for name, values in features.items()},
             {
                 name: np.broadcast_to(value, (len(nodes), *np.shape(value)))
@@ -1202,10 +1226,18 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             },
         )
 
-    def _similar_feature_pairs(self, features_a, features_b) -> np.ndarray:
+    def _similar_feature_pairs(
+        self, input_channel, features_a, features_b
+    ) -> np.ndarray:
         """Check which pairs of features are similar.
 
+        Hues are similar if they differ by at most the parent LM's hue tolerance
+        for the channel (see `_get_max_hue_difference`), and surface normals if
+        they differ by at most its surface normal tolerance (see
+        `_get_max_normal_angle`).
+
         Args:
+            input_channel: The input channel the features were received on.
             features_a: Arrays of features, with one row per pair.
             features_b: Arrays of the features to compare them to, likewise.
 
@@ -1215,7 +1247,12 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         """
         num_pairs = len(next(iter(features_a.values()), []))
         similar = np.ones(num_pairs, dtype=bool)
-        if "hsv" in features_a and "hsv" in features_b:
+        max_hue_difference = self._get_max_hue_difference(input_channel)
+        if (
+            max_hue_difference is not None
+            and "hsv" in features_a
+            and "hsv" in features_b
+        ):
             hsv_a, hsv_b = features_a["hsv"], features_b["hsv"]
             chromatic_a = (hsv_a[:, 1] >= self.min_hue_saturation) & (
                 hsv_a[:, 2] >= self.min_hue_value
@@ -1226,15 +1263,16 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             hue_difference = np.abs(hsv_a[:, 0] - hsv_b[:, 0])
             hue_difference = np.minimum(hue_difference, 1.0 - hue_difference)
             similar &= ~(chromatic_a & chromatic_b) | (
-                hue_difference <= self.max_hue_difference
+                hue_difference <= max_hue_difference
             )
+        max_normal_angle = self._get_max_normal_angle(input_channel)
         if (
-            self.max_normal_angle is not None
+            max_normal_angle is not None
             and "normal" in features_a
             and "normal" in features_b
         ):
             cosine = np.sum(features_a["normal"] * features_b["normal"], axis=1)
-            similar &= cosine >= np.cos(np.radians(self.max_normal_angle))
+            similar &= cosine >= np.cos(max_normal_angle)
         return similar
 
     def _far_side(self, features, nodes, reference) -> np.ndarray:
@@ -1276,10 +1314,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         if key not in self._similar_neighbors_cache:
             num_nodes = len(graph.pos)
             source, target = self._get_neighbor_matrix(
-                graph_id,
-                input_channel,
-                graph,
-                num_neighbors=self.num_feature_propagation_neighbors,
+                graph_id, input_channel, graph
             ).nonzero()
             if "normal" in features:
                 cosine = np.sum(
@@ -1289,6 +1324,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 source, target = source[near_side], target[near_side]
             surface = self._edge_matrix(source, target, num_nodes)
             similar = self._similar_feature_pairs(
+                input_channel,
                 {name: values[source] for name, values in features.items()},
                 {name: values[target] for name, values in features.items()},
             )
@@ -1318,35 +1354,29 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             (np.ones(len(source)), (source, target)), shape=(num_nodes, num_nodes)
         )
 
-    def _get_neighbor_matrix(
-        self, graph_id, input_channel, graph, num_neighbors=None
-    ) -> csr_matrix:
+    def _get_neighbor_matrix(self, graph_id, input_channel, graph) -> csr_matrix:
         """Get the two-way nearest-neighbor relations of every node of a graph.
 
-        A node's neighbors are its num_neighbors nearest nodes, together with every
-        node that has it among their own num_neighbors nearest nodes.
-        Nearest-neighbor relations are not mutual, so without the latter, an
-        outlying node (whose nearest nodes all have closer neighbors of their own)
-        could never be reached.
+        A node's neighbors are its num_propagation_neighbors nearest nodes,
+        together with every node that has it among their own
+        num_propagation_neighbors nearest nodes. Nearest-neighbor relations are
+        not mutual, so without the latter, an outlying node (whose nearest nodes
+        all have closer neighbors of their own) could never be reached.
 
         Args:
             graph_id: The graph whose nodes to get the neighbors of.
             input_channel: The input channel of the graph.
             graph: The graph.
-            num_neighbors: The number of nearest nodes of each node. Defaults to
-                num_propagation_neighbors.
 
         Returns:
             Sparse (num_nodes x num_nodes) matrix with a 1 at (node, neighbor) for
             every neighbor of every node (excluding the node itself).
         """
-        if num_neighbors is None:
-            num_neighbors = self.num_propagation_neighbors
         pos = np.asarray(graph.pos, dtype=float)
         num_nodes = len(pos)
-        key = (graph_id, input_channel, num_nodes, num_neighbors)
+        key = (graph_id, input_channel, num_nodes)
         if key not in self._neighbor_cache:
-            k = min(num_neighbors, num_nodes - 1)
+            k = min(self.num_propagation_neighbors, num_nodes - 1)
             if k < 1:
                 neighbors = csr_matrix((num_nodes, num_nodes), dtype=float)
             else:
@@ -1397,19 +1427,14 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         """Determine whether the GSG should generate a new output Goal.
 
         Success in achieving the Goal is not an indication to need a new one, as
-        the sensor should explore the tested location for a while. Once
-        min_post_goal_success_steps have elapsed, a new Goal is generated if the
-        MLH (object or rotation) has changed since the last Goal, or every
-        elapsed_steps_trigger steps.
+        the sensor should explore the tested location for a while. A new Goal is
+        generated if the MLH (object or rotation) has changed since the last Goal,
+        or every elapsed_steps_trigger steps.
 
         Returns:
             Whether the GSG should generate a new output Goal.
         """
         if output_goal_achieved:
-            return False
-
-        num_elapsed_steps = self._get_num_steps_post_output_goal_generated()
-        if num_elapsed_steps <= self.min_post_goal_success_steps:
             return False
 
         if self._get_mlh_graph_id() is None:
@@ -1419,6 +1444,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             logger.debug("Child objects goal indicated: MLH changed")
             return True
 
+        num_elapsed_steps = self._get_num_steps_post_output_goal_generated()
         if num_elapsed_steps % self.elapsed_steps_trigger == 0:
             logger.debug("Child objects goal indicated: sufficient steps elapsed")
             return True
@@ -1473,7 +1499,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         updater = getattr(self.parent_lm, "hypotheses_updater", None)
         trackers = getattr(updater, "evidence_slope_trackers", None)
         if trackers is None:
-            logger.debug(f"No hypothesis trackers configured for propagation to check.")
+            logger.debug("No hypothesis trackers configured for propagation to check.")
             return True
         tracker = trackers.get(graph_id)
         mlh_id = self.parent_lm._get_current_mlh()["mlh_id"]

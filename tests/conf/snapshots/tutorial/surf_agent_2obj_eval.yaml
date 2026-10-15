@@ -48,7 +48,6 @@ experiment:
             _target_: tbp.monty.frameworks.models.goal_generation.EvidenceGoalGenerator
             goal_tolerances:
               location: 0.015
-            min_post_goal_success_steps: 5
           hypotheses_updater_args:
             max_nneighbors: 10
       sensor_modules:

@@ -42,8 +42,6 @@ experiment:
             - _target_: tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations.ExciteGoalLocations
           telemetry:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.NoopEvidenceGraphLMTelemetry
-          gsg:
-            min_post_goal_success_steps: 100
         learning_module_1:
           gsg: null
           # Only report the sticker once its evidence is well clear of the

@@ -31,10 +31,15 @@ from tbp.monty.frameworks.models.evidence_matching.evidence_slope_tracker import
     EvidenceSlopeTracker,
 )
 from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
+from tbp.monty.frameworks.utils.graph_matching_utils import (
+    add_pose_features_to_tolerances,
+)
 
 SENSOR_CHANNEL = "patch"
 TOP_ID = "object_a"
 SECOND_ID = "object_b"
+# The LM's hue tolerance, as configured for the sensor channels of the LMs.
+HUE_TOLERANCE = 0.1
 MIN_AGE = EvidenceSlopeTracker().min_age
 # The age of a hypothesis that has survived its first chance of being deleted.
 ESTABLISHED_AGE = MIN_AGE + 1
@@ -128,6 +133,7 @@ def gsg_with_graphs(graphs, **gsg_kwargs) -> EvidenceGoalGenerator:
     lm.buffer.get_first_sensory_input_channel.return_value = SENSOR_CHANNEL
     lm._get_current_mlh.return_value = identity_mlh(TOP_ID)
     lm.hypotheses_updater = hypotheses_updater({TOP_ID: slope_tracker(ESTABLISHED_AGE)})
+    lm.tolerances = add_pose_features_to_tolerances({SENSOR_CHANNEL: {}})
     lm.get_graph.side_effect = lambda graph_id, input_channel=None: (
         graphs[graph_id] if input_channel is None else graphs[graph_id][input_channel]
     )
@@ -290,6 +296,7 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         lm._get_current_mlh.side_effect = lambda: self.mlh
         self.trackers = {TOP_ID: slope_tracker(ESTABLISHED_AGE)}
         lm.hypotheses_updater = hypotheses_updater(self.trackers)
+        lm.tolerances = add_pose_features_to_tolerances({SENSOR_CHANNEL: {}})
         lm.get_output.return_value = MagicMock(confidence=1.0)
         lm.get_graph.side_effect = lambda graph_id, input_channel=None: (
             self.graphs[graph_id]
@@ -300,7 +307,6 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             self.graphs[graph_id].keys()
         )
         self.gsg = EvidenceGoalGenerator(
-            min_post_goal_success_steps=20,
             elapsed_steps_trigger=10,
             num_propagation_neighbors=6,
             salience_recovery_steps=50,
@@ -772,8 +778,15 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             channel, SENSOR_CHANNEL, "The sensed features explain the sensor graph."
         )
 
-    def test_no_goal_before_min_post_goal_success_steps(self) -> None:
-        self.set_steps_since_goal(20)
+    def test_first_goal_as_soon_as_the_mlh_is_a_known_object(self) -> None:
+        self.set_steps_since_goal(1)
+
+        self.assertTrue(
+            self.gsg._check_need_new_output_goal(make_ctx(), output_goal_achieved=False)
+        )
+
+    def test_no_goal_before_the_mlh_is_a_known_object(self) -> None:
+        self.mlh = {**self.mlh, "graph_id": "no_observations_yet"}
 
         self.assertFalse(
             self.gsg._check_need_new_output_goal(make_ctx(), output_goal_achieved=False)
@@ -800,12 +813,15 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             self.gsg._check_need_new_output_goal(make_ctx(), output_goal_achieved=False)
         )
 
-        self.set_steps_since_goal(21)
+        self.set_steps_since_goal(1)
         self.mlh = self.mlh_at_node(
             4, rotation=Rotation.from_euler("xyz", [0, 0, 90], degrees=True)
         )
         self.assertTrue(
-            self.gsg._check_need_new_output_goal(make_ctx(), output_goal_achieved=False)
+            self.gsg._check_need_new_output_goal(
+                make_ctx(), output_goal_achieved=False
+            ),
+            "A changed MLH prompts a goal on the very next step.",
         )
 
     def test_targets_sensor_nodes_without_compositional_models(self) -> None:
@@ -897,6 +913,9 @@ class SensoryFeaturePropagationTest(unittest.TestCase):
             {SENSOR_CHANNEL: self.graph} if input_channel is None else self.graph
         )
         lm.get_input_channels_in_graph.side_effect = lambda _graph_id: [SENSOR_CHANNEL]
+        lm.tolerances = add_pose_features_to_tolerances(
+            {SENSOR_CHANNEL: {"hsv": np.array([HUE_TOLERANCE, 1, 1])}}
+        )
         self.gsg = EvidenceGoalGenerator()
         self.gsg.parent_lm = lm
 
@@ -983,6 +1002,66 @@ class SensoryFeaturePropagationTest(unittest.TestCase):
         reached = self.propagate_from(25)
 
         nptest.assert_array_equal(reached, ~right)
+
+    def test_hues_within_the_lms_hue_tolerance_are_similar(self) -> None:
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
+        right = points[:, 0] >= 0.02
+        hue_step = 0.8 * HUE_TOLERANCE
+        self.graph = surface_graph(
+            points, [0, 0, 1], hues=np.where(right, hue_step, 0.0)
+        )
+        self.assertTrue(np.all(self.propagate_from(25)))
+
+        self.gsg.parent_lm.tolerances[SENSOR_CHANNEL]["hsv"][0] = 0.5 * hue_step
+        nptest.assert_array_equal(
+            self.propagate_from(25), ~right, "The hue tolerance is read from the LM."
+        )
+
+    def tilted_half_plane(self, tilt_degrees):
+        """A plane whose right half's normals are tilted about the y axis.
+
+        Returns:
+            Whether each node is in the tilted half.
+        """
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
+        right = points[:, 0] >= 0.02
+        tilt = np.radians(tilt_degrees)
+        normals = np.where(
+            right[:, None], [np.sin(tilt), 0.0, np.cos(tilt)], [0.0, 0.0, 1.0]
+        )
+        self.graph = surface_graph(points, normals)
+        return right
+
+    def test_normals_within_the_lms_pose_vector_tolerance_are_similar(self) -> None:
+        right = self.tilted_half_plane(25)
+        self.assertTrue(
+            np.all(self.propagate_from(25)), "Within the default tolerance of 30°."
+        )
+
+        self.gsg.parent_lm.tolerances[SENSOR_CHANNEL]["pose_vectors"][0] = np.radians(
+            20
+        )
+        nptest.assert_array_equal(
+            self.propagate_from(25),
+            ~right,
+            "The surface normal tolerance is read from the LM.",
+        )
+
+    def test_normals_are_not_compared_without_an_lm_pose_vector_tolerance(
+        self,
+    ) -> None:
+        self.tilted_half_plane(60)
+        del self.gsg.parent_lm.tolerances[SENSOR_CHANNEL]["pose_vectors"]
+
+        self.assertTrue(np.all(self.propagate_from(25)))
+
+    def test_hue_is_not_compared_without_an_lm_hue_tolerance(self) -> None:
+        points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)
+        right = points[:, 0] >= 0.02
+        self.graph = surface_graph(points, [0, 0, 1], hues=np.where(right, 0.5, 0.0))
+        del self.gsg.parent_lm.tolerances[SENSOR_CHANNEL]["hsv"]
+
+        self.assertTrue(np.all(self.propagate_from(25)))
 
     def test_achromatic_nodes_do_not_stop_propagation(self) -> None:
         points = plane_points([0, 0, 0], [1, 0, 0], [0, 1, 0], 20, 10)

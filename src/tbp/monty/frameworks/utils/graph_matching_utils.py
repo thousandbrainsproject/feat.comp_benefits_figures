@@ -171,8 +171,12 @@ def get_initial_possible_poses(initial_possible_pose_type) -> list[Rotation] | N
     return initial_possible_poses
 
 
-def add_pose_features_to_tolerances(tolerances, default_tolerances=20) -> dict:
+def add_pose_features_to_tolerances(tolerances, default_tolerances=30) -> dict:
     """Add default `pose_vectors` tolerances if not set.
+
+    The tolerances are given in degrees, and converted to radians. The first is
+    the largest angle between two surface normals for them to be similar, as the
+    `EvidenceGoalGenerator` uses it when propagating sensory input.
 
     Returns:
         Tolerances dictionary with added pose_vectors if not set.

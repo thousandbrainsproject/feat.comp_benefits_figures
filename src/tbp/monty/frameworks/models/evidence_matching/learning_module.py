@@ -142,7 +142,10 @@ class EvidenceGraphLM(GraphLM):
         max_match_distance: Maximum distance of a tested and stored location to
             be matched.
         tolerances: How much can each observed feature deviate from the stored
-            features to still be considered a match.
+            features to still be considered a match. The "pose_vectors" tolerances
+            (in degrees, 30 by default) are not used for evidence, but the first
+            is the largest angle between similar surface normals for the
+            EvidenceGoalGenerator.
         feature_weights: How much should each feature be weighted when calculating
             the evidence update for hypotheses. Weights are stored in a dictionary with
             keys corresponding to features (same as keys in tolerances)
