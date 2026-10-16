@@ -31,7 +31,6 @@ learning_module_0:
     goal_tolerances:
       location: 0.015
     elapsed_steps_trigger: 20
-    desired_object_distance: 0.03
 
 learning_module_1:
   _target_: tbp.monty.frameworks.models.evidence_matching.learning_module.EvidenceGraphLM
@@ -57,7 +56,6 @@ learning_module_1:
     goal_tolerances:
       location: 0.015
     elapsed_steps_trigger: 20
-    desired_object_distance: 0.03
 
 learning_module_2:
   _target_: tbp.monty.frameworks.models.evidence_matching.learning_module.EvidenceGraphLM
@@ -83,7 +81,6 @@ learning_module_2:
     goal_tolerances:
       location: 0.015
     elapsed_steps_trigger: 20
-    desired_object_distance: 0.03
 
 learning_module_3:
   _target_: tbp.monty.frameworks.models.evidence_matching.learning_module.EvidenceGraphLM
@@ -109,7 +106,6 @@ learning_module_3:
     goal_tolerances:
       location: 0.015
     elapsed_steps_trigger: 20
-    desired_object_distance: 0.03
 
 learning_module_4:
   _target_: tbp.monty.frameworks.models.evidence_matching.learning_module.EvidenceGraphLM
@@ -135,4 +131,3 @@ learning_module_4:
     goal_tolerances:
       location: 0.015
     elapsed_steps_trigger: 20
-    desired_object_distance: 0.03

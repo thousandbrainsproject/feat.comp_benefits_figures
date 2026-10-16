@@ -145,24 +145,23 @@ class TriggerTest(unittest.TestCase):
 
 
 class GoalGeometryTest(unittest.TestCase):
-    def test_places_the_agent_on_the_normal_at_the_sensor_distance_looking_back(
-        self,
-    ) -> None:
+    def test_targets_the_patch_location_with_its_surface_normal(self) -> None:
         (goal,) = reorientation()(percept(), sensor_at(70.0, distance=0.08))
-        nptest.assert_allclose(goal.location, SURFACE + [0, 0, 0.08], atol=1e-12)
+        nptest.assert_allclose(goal.location, SURFACE, atol=1e-12)
         nptest.assert_allclose(
-            goal.morphological_features["pose_vectors"][0], [0, 0, -1]
+            goal.morphological_features["pose_vectors"][0], [0, 0, 1]
         )
 
-    def test_a_configured_standoff_overrides_the_distance(self) -> None:
-        (goal,) = reorientation(standoff=0.2)(percept(), sensor_at(70.0, distance=0.08))
-        nptest.assert_allclose(goal.location, SURFACE + [0, 0, 0.2], atol=1e-12)
+    def test_does_not_depend_on_the_sensor_distance(self) -> None:
+        (near,) = reorientation()(percept(), sensor_at(70.0, distance=0.05))
+        (far,) = reorientation()(percept(), sensor_at(70.0, distance=0.2))
+        nptest.assert_allclose(near.location, far.location, atol=1e-12)
 
     def test_uses_a_unit_normal(self) -> None:
-        (goal,) = reorientation(standoff=0.1)(
-            percept(normal=(0, 0, 2.0)), sensor_at(70.0)
+        (goal,) = reorientation()(percept(normal=(0, 0, 2.0)), sensor_at(70.0))
+        nptest.assert_allclose(
+            goal.morphological_features["pose_vectors"][0], [0, 0, 1], atol=1e-12
         )
-        nptest.assert_allclose(goal.location, SURFACE + [0, 0, 0.1], atol=1e-12)
 
 
 class TelemetryTest(unittest.TestCase):

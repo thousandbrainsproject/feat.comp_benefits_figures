@@ -9,12 +9,17 @@
 from __future__ import annotations
 
 import unittest
+from typing import cast
 from unittest.mock import MagicMock
 
 import numpy as np
 import numpy.testing as nptest
+import quaternion as qt
 
-from tbp.monty.cmp import MAX_ATTENTION_WEIGHT
+from tbp.monty.attention.attention_system import AttentionSystem
+from tbp.monty.cmp import MAX_ATTENTION_WEIGHT, MIN_ATTENTION_WEIGHT, AttentionRegion
+from tbp.monty.frameworks.actions.actions import SetAgentPose
+from tbp.monty.frameworks.agents import AgentID
 from tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_locations import (  # noqa: E501
     ExciteGoalLocations,
     sample_ball,
@@ -22,6 +27,20 @@ from tbp.monty.frameworks.models.evidence_matching.region_proposal.excite_goal_l
 from tbp.monty.frameworks.models.evidence_matching.region_proposal.protocol import (
     RegionContext,
 )
+from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
+from tbp.monty.frameworks.models.motor_policies import (
+    JUMP_DISTANCE_FACTOR,
+    JumpToGoal,
+    MotorPolicyResult,
+)
+from tbp.monty.frameworks.models.motor_system_state import (
+    AgentState,
+    MotorSystemState,
+    SensorState,
+)
+from tbp.monty.frameworks.sensors import SensorID
+from tbp.monty.geometry import Rotation
+from tbp.monty.math import DEFAULT_TOLERANCE, VectorXYZ
 
 
 def goal_at(location: np.ndarray | None) -> MagicMock:
@@ -110,3 +129,118 @@ class ExciteGoalLocationsTest(unittest.TestCase):
 
         self.assertAlmostEqual(np.linalg.norm(region.locations, axis=1).max(), 0.05)
         nptest.assert_array_equal(region.weights, np.full(len(region), 0.5))
+
+
+AGENT_ID = AgentID("agent_id_0")
+# The sensed location on the object's surface, in the body frame.
+SENSED_LOCATION = np.array([0.0, 1.5, 0.0])
+# The node of the MLH object the goal targets, 3 cm along the surface from the
+# MLH location (the model's origin), whose surface normal is +Z.
+TARGET_IN_MODEL = np.array([0.03, 0.0, 0.0])
+TARGET_NORMAL = np.array([0.0, 0.0, 1.0])
+
+
+def model_based_goal():
+    """A goal from an EvidenceGoalGenerator for the target node of the MLH.
+
+    Returns:
+        The goal, for an MLH with identity rotation at the sensed location.
+    """
+    lm = MagicMock()
+    lm.learning_module_id = "learning_module_0"
+    lm.buffer.get_first_sensory_input_channel.return_value = "patch"
+    gsg = EvidenceGoalGenerator()
+    gsg.parent_lm = lm
+    return gsg._compute_goal_for_target_loc(
+        observations=[MagicMock(sender_id="patch", location=SENSED_LOCATION)],
+        target_info={
+            "target_loc": TARGET_IN_MODEL,
+            "target_surface_normal": TARGET_NORMAL,
+            "hypothesis_to_test": {
+                "graph_id": "mug",
+                "mlh_id": 0,
+                "location": np.zeros(3),
+                "rotation": Rotation.identity(),
+            },
+            "input_channel": "patch",
+        },
+    )
+
+
+class ModelBasedGoalTest(unittest.TestCase):
+    """A model-based goal survives the attention system and is jumped to."""
+
+    def setUp(self) -> None:
+        self.goal = model_based_goal()
+        self.attention = AttentionSystem()
+        # Another module attends to the patch under fixation, so the grid is not
+        # empty and goals elsewhere must be attended to in order to pass.
+        self.fixated = AttentionRegion.uniform(
+            sample_ball(SENSED_LOCATION, radius=0.005, lattice_steps=2),
+            MAX_ATTENTION_WEIGHT,
+        )
+        self.excited = ExciteGoalLocations()(context_with_goals(self.goal))
+
+    def test_the_goal_is_on_the_surface_with_its_normal(self) -> None:
+        nptest.assert_allclose(self.goal.location, SENSED_LOCATION + TARGET_IN_MODEL)
+        nptest.assert_allclose(
+            self.goal.morphological_features["pose_vectors"][0], TARGET_NORMAL
+        )
+
+    def test_the_goal_is_filtered_out_without_its_excitation(self) -> None:
+        self.assertEqual(self.attention.step([self.goal], [self.fixated]), [])
+
+    def test_the_excited_goal_passes_and_is_jumped_to(self) -> None:
+        (goal,) = self.attention.step([self.goal], [self.fixated, self.excited])
+        self.assertIs(goal, self.goal)
+
+        policy = JumpToGoal(AGENT_ID, SensorID("view_finder"))
+        state = MotorSystemState(
+            {
+                AGENT_ID: AgentState(
+                    sensors={
+                        SensorID("view_finder"): SensorState(
+                            position=cast("VectorXYZ", (0, 0, 0)), rotation=qt.one
+                        )
+                    },
+                    position=cast("VectorXYZ", (0, 0, 0)),
+                    rotation=qt.one,
+                )
+            }
+        )
+        result = policy(
+            ctx=MagicMock(),
+            observations=MagicMock(),
+            state=state,
+            percept=MagicMock(),
+            goal=goal,
+        )
+
+        assert isinstance(result, MotorPolicyResult)
+        self.assertIs(result.attempted_goal, goal)
+        set_agent_pose = result.actions[0]
+        assert isinstance(set_agent_pose, SetAgentPose)
+        # Off the surface along the normal, looking back down it at the goal.
+        nptest.assert_allclose(
+            set_agent_pose.location,
+            goal.location
+            + TARGET_NORMAL * policy.desired_object_distance * JUMP_DISTANCE_FACTOR,
+        )
+        rotation = Rotation.from_quat(qt.as_float_array(set_agent_pose.rotation_quat))
+        nptest.assert_allclose(
+            -rotation.as_matrix()[:, 2], -TARGET_NORMAL, atol=DEFAULT_TOLERANCE
+        )
+
+    def test_an_excited_goal_on_an_inhibited_surface_is_filtered_out(self) -> None:
+        # E.g. InhibitRecognizedObject inhibits a shell around a recognized
+        # object's surface, which the goal now lies within; inhibition dominates.
+        inhibited = AttentionRegion.uniform(
+            sample_ball(self.goal.location, radius=0.01, lattice_steps=4),
+            MIN_ATTENTION_WEIGHT,
+        )
+
+        filtered = self.attention.step(
+            [self.goal], [self.fixated, self.excited, inhibited]
+        )
+
+        self.assertEqual(filtered, [])

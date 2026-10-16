@@ -20,7 +20,7 @@ object.
 Below it, one row per face-on goal the module got executed: the view
 finder's frame just before and just after the jump, with the goal drawn
 into the image -- the sensed surface point, the surface normal it wants to
-look along (an arrow from that point to where the camera should go), and
+look down (an arrow from that point along the normal), and
 the current view ray (the image center) -- and a 3D panel of the same
 geometry: the face's points, the camera before and after the jump, its
 view ray before, and the normal axis it aligned to.
@@ -51,6 +51,9 @@ if TYPE_CHECKING:
 MAX_JUMPS_SHOWN = 3
 # View finder pinhole model: hfov 90 degrees at zoom 1 (see DepthTo3DLocations).
 FOCAL = (1.0, 1.0)
+# Length, in meters, of the drawn normal axis; the goal gives only its direction,
+# the motor system decides how far along it the camera goes.
+NORMAL_AXIS_LENGTH = 0.05
 # Colors: the surface point, the normal axis / goal, the current view ray.
 SURFACE_COLOR = "#00B140"
 GOAL_COLOR = "#FF2DAF"
@@ -166,7 +169,7 @@ def draw_goal_in_frame(ax: Axes, obs: dict, goal: dict) -> None:
     """Draw the face-on goal into a view finder frame.
 
     The sensed surface point, the normal axis to align to (arrow from the
-    surface point to the goal camera position), and the current view ray
+    surface point along the surface normal), and the current view ray
     (the image center), all projected through the frame's camera.
     """
     image = np.asarray(obs["rgba"])
@@ -174,9 +177,9 @@ def draw_goal_in_frame(ax: Axes, obs: dict, goal: dict) -> None:
     shape = image.shape[:2]
     cam_to_world = np.asarray(obs["cam_to_world"], dtype=float)
     surface = np.asarray(goal["surface_location"], dtype=float)
-    camera_goal = np.asarray(goal["location"], dtype=float)
+    axis_end = normal_axis_end(goal)
     (su, sv), s_ok = project(surface, cam_to_world, shape)
-    (gu, gv), g_ok = project(camera_goal, cam_to_world, shape)
+    (gu, gv), g_ok = project(axis_end, cam_to_world, shape)
     center = ((shape[1] - 1) / 2, (shape[0] - 1) / 2)
     ax.plot(
         *center,
@@ -197,8 +200,7 @@ def draw_goal_in_frame(ax: Axes, obs: dict, goal: dict) -> None:
             label="surface point",
         )
         if g_ok:
-            # The goal camera position usually projects outside the frame:
-            # draw the normal axis toward it, clipped to the frame border.
+            # The normal axis may leave the frame: clip it to the frame border.
             (eu, ev), inside = clip_to_frame((su, sv), (gu, gv), shape)
             ax.annotate(
                 "",
@@ -214,11 +216,11 @@ def draw_goal_in_frame(ax: Axes, obs: dict, goal: dict) -> None:
                 markersize=13,
                 markeredgecolor="black",
                 markerfacecolor=GOAL_COLOR if inside else "none",
-                label="goal camera position" + ("" if inside else " (off frame)"),
+                label="surface normal (goal)" + ("" if inside else " (off frame)"),
             )
         else:
-            # The goal position sits on the camera's own axis: the normal
-            # points straight at the viewer, so the axis collapses onto the point.
+            # The axis end sits on the camera's own axis: the normal points
+            # straight at the viewer, so the axis collapses onto the point.
             ax.plot(
                 su,
                 sv,
@@ -226,7 +228,7 @@ def draw_goal_in_frame(ax: Axes, obs: dict, goal: dict) -> None:
                 color=GOAL_COLOR,
                 markersize=13,
                 markeredgecolor="black",
-                label="goal camera position (toward viewer)",
+                label="surface normal (goal, toward viewer)",
             )
     ax.text(
         4,
@@ -265,6 +267,18 @@ def clip_to_frame(
     return (sx + t * dx, sy + t * dy), t >= 1.0
 
 
+def normal_axis_end(goal: dict) -> np.ndarray:
+    """The end of the drawn normal axis of a face-on goal record.
+
+    Returns:
+        The point NORMAL_AXIS_LENGTH from the goal's surface location, along
+        its surface normal (the negated look direction).
+    """
+    surface = np.asarray(goal["surface_location"], dtype=float)
+    look = np.asarray(goal["look_direction"], dtype=float)
+    return surface - look / np.linalg.norm(look) * NORMAL_AXIS_LENGTH
+
+
 def draw_goal_geometry(
     ax: Axes3D, ep: EpisodeTelemetry, jump: int, goal: dict, obs: dict
 ) -> None:
@@ -274,7 +288,7 @@ def draw_goal_geometry(
     after_step = min(jump + 1, len(actions) - 1)
     after = np.asarray(actions[after_step][1]["agent_id_0"]["position"], dtype=float)
     surface = np.asarray(goal["surface_location"], dtype=float)
-    camera_goal = np.asarray(goal["location"], dtype=float)
+    axis_end = normal_axis_end(goal)
     cloud = np.asarray(obs["semantic_3d"], dtype=float)
     cloud = cloud[cloud[:, 3] > 0][::40, :3]
     if len(cloud):
@@ -286,7 +300,7 @@ def draw_goal_geometry(
         label="view ray before",
     )
     ax.plot(
-        *np.vstack([surface, camera_goal]).T,
+        *np.vstack([surface, axis_end]).T,
         color=GOAL_COLOR,
         linewidth=2.5,
         label="normal axis (goal)",
@@ -318,7 +332,7 @@ def draw_goal_geometry(
         depthshade=False,
     )
     points = np.vstack(
-        [cloud, before[None], after[None], surface[None], camera_goal[None]]
+        [cloud, before[None], after[None], surface[None], axis_end[None]]
     )
     center = (points.min(0) + points.max(0)) / 2
     radius = max(float(np.ptp(points, axis=0).max()) / 2, 0.02) * 1.1

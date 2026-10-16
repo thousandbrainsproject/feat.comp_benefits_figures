@@ -381,6 +381,51 @@ def fixme_undo_last_action(
     raise TypeError(f"Invalid action: {last_action}")
 
 
+# Jumps place the agent this many times its desired distance from the goal's
+# surface, so that it starts a bit further away from the object in case the
+# surface is not quite where the goal predicts (e.g. to avoid landing inside it).
+JUMP_DISTANCE_FACTOR = 1.5
+
+
+def set_agent_pose_observing_goal(
+    agent_id: AgentID, goal: Goal, distance: float
+) -> SetAgentPose:
+    """Derive the agent pose from which to observe a goal's surface location.
+
+    A goal specifies a location on a surface, with the surface normal there
+    (pointing away from the object) as its first pose vector. The agent is placed
+    `distance` from the location along the normal, looking back down the normal
+    at the location. The roll of the agent is not specified by the goal, and is
+    set to zero.
+
+    Args:
+        agent_id: The agent to move.
+        goal: The goal to observe.
+        distance: Distance from the goal's location at which to place the agent.
+
+    Returns:
+        A `SetAgentPose` action.
+    """
+    surface_normal = np.asarray(goal.morphological_features["pose_vectors"][0])
+    surface_normal = surface_normal / np.linalg.norm(surface_normal)
+    target_loc = np.asarray(goal.location) + surface_normal * distance
+    target_agent_vec = -surface_normal
+
+    yaw_angle = math.atan2(-target_agent_vec[0], -target_agent_vec[2])
+    pitch_angle = math.asin(target_agent_vec[1])
+
+    # Should rotate by pitch degrees around x, and by yaw degrees around y (and
+    # no change about z, which would correspond to roll)
+    scipy_combined_orientation = Rotation.from_euler("xy", [pitch_angle, yaw_angle])
+    target_quat = qt.quaternion(*scipy_combined_orientation.as_quat())
+
+    return SetAgentPose(
+        agent_id=agent_id,
+        location=target_loc,
+        rotation_quat=target_quat,
+    )
+
+
 class PredefinedPolicy(MotorPolicy):
     """Policy that follows an action sequence read from file.
 
@@ -457,15 +502,25 @@ class JumpToGoal(MotorPolicy):
     _pre_jump_state: AgentState | None
     _undo_actions: list[Action]
 
-    def __init__(self, agent_id: AgentID, sensor_id: SensorID) -> None:
+    def __init__(
+        self,
+        agent_id: AgentID,
+        sensor_id: SensorID,
+        desired_object_distance: float = 0.03,
+    ) -> None:
         """Initialize policy.
 
         Args:
             agent_id: The agent ID
             sensor_id: The sensor ID to use for depth at center calculation.
+            desired_object_distance: The desired distance between the agent and the
+                goal's surface location. Jumps place the agent JUMP_DISTANCE_FACTOR
+                times this distance from it, along the goal's surface normal.
+                Defaults to 0.03.
         """
         self._agent_id = agent_id
         self._sensor_id = sensor_id
+        self.desired_object_distance = desired_object_distance
 
         # TODO: make this part of `__init__()` after `reset()` is removed.
         self._init_JumpToGoal()
@@ -595,26 +650,13 @@ class JumpToGoal(MotorPolicy):
     def _derive_set_agent_pose_from_goal(self, goal: Goal) -> SetAgentPose:
         """Derive the `SetAgentPose` action from the driving goal.
 
-        TODO: The desired_object_distance should be used here to determine SetAgentPose
-        and not in the GoalGenerator.
-
         Returns:
-            A `SetAgentPose` action.
+            A `SetAgentPose` action observing the goal's surface location.
         """
-        target_agent_vec = goal.morphological_features["pose_vectors"][0]
-
-        yaw_angle = math.atan2(-target_agent_vec[0], -target_agent_vec[2])
-        pitch_angle = math.asin(target_agent_vec[1])
-
-        # Should rotate by pitch degrees around x, and by yaw degrees around y (and
-        # no change about z, which would correspond to roll)
-        scipy_combined_orientation = Rotation.from_euler("xy", [pitch_angle, yaw_angle])
-        target_quat = qt.quaternion(*scipy_combined_orientation.as_quat())
-
-        return SetAgentPose(
-            agent_id=self._agent_id,
-            location=goal.location,
-            rotation_quat=target_quat,
+        return set_agent_pose_observing_goal(
+            self._agent_id,
+            goal,
+            distance=self.desired_object_distance * JUMP_DISTANCE_FACTOR,
         )
 
     def _reset_jump_state(self) -> None:
@@ -730,6 +772,7 @@ class InformedPolicy(BasePolicy):
     def __init__(
         self,
         use_goal_driven_actions=False,
+        desired_object_distance=0.025,
         **kwargs,
     ) -> None:
         """Initialize policy.
@@ -737,10 +780,15 @@ class InformedPolicy(BasePolicy):
         Args:
             use_goal_driven_actions: Whether to enable the motor system to
                 attempt to jump (i.e. teleport) the agent to a specified goal.
+            desired_object_distance: The desired distance between the agent and the
+                surface of the object. Jumps place the agent JUMP_DISTANCE_FACTOR
+                times this distance from the goal's surface location, along the
+                goal's surface normal. Defaults to 0.025.
             **kwargs: Additional keyword arguments.
         """
         super().__init__(**kwargs)
         self.use_goal_driven_actions = use_goal_driven_actions
+        self.desired_object_distance = desired_object_distance
 
         # TODO: make this part of `__init__()` after `reset()` is removed.
         self._init_InformedPolicy()
@@ -870,24 +918,12 @@ class InformedPolicy(BasePolicy):
         """Derive the `SetAgentPose` action from the driving goal.
 
         Returns:
-            A `SetAgentPose` action.
+            A `SetAgentPose` action observing the goal's surface location.
         """
-        target_loc = goal.location
-        target_agent_vec = goal.morphological_features["pose_vectors"][0]
-
-        yaw_angle = math.atan2(-target_agent_vec[0], -target_agent_vec[2])
-        pitch_angle = math.asin(target_agent_vec[1])
-
-        # Should rotate by pitch degrees around x, and by yaw degrees around y (and
-        # no change about z, which would correspond to roll)
-        scipy_combined_orientation = Rotation.from_euler("xy", [pitch_angle, yaw_angle])
-
-        target_quat = qt.quaternion(*scipy_combined_orientation.as_quat())
-
-        return SetAgentPose(
-            agent_id=self.agent_id,
-            location=target_loc,
-            rotation_quat=target_quat,
+        return set_agent_pose_observing_goal(
+            self.agent_id,
+            goal,
+            distance=self.desired_object_distance * JUMP_DISTANCE_FACTOR,
         )
 
     def _reset_jump_state(self) -> None:
@@ -1105,21 +1141,21 @@ class SurfacePolicy(InformedPolicy):
     def __init__(
         self,
         alpha,
-        desired_object_distance=0.025,
         **kwargs,
     ) -> None:
         """Initialize policy.
 
+        The desired_object_distance (see `InformedPolicy`) is the distance to
+        maintain from the surface; used for touch_object and move-forward, which
+        also bring the agent onto the surface after a jump.
+
         Args:
-            desired_object_distance: Distance to maintain from the surface; used for
-                touch_object and move-forward. Defaults to 0.025.
             alpha: to what degree should the move_tangentially direction be the
                 same as the last step or totally random? 0~same as before, 1~random walk
-            **kwargs: ?
+            **kwargs: Additional keyword arguments.
         """
         super().__init__(**kwargs)
         self.alpha = alpha
-        self.desired_object_distance = desired_object_distance
 
         self.attempting_to_find_object: bool = False
         self._telemetry = SurfacePolicyTelemetry()

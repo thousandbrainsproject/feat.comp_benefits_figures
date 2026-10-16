@@ -14,7 +14,7 @@ module needs ``save_raw_obs`` on) and the view finder's frames:
 
 1. The view finder's frame. On the step a face-on goal fires, the goal is
    drawn into it -- the sensed surface point and the normal axis it wants
-   to look along (an arrow toward where the camera should go, clipped to
+   to look down (an arrow from that point along the normal, clipped to
    the frame) -- and the frames right after the jump are tagged.
 2. The view angle between the camera's viewing direction and the patch's
    surface normal, revealed as steps pass, with the generator's smoothed
@@ -44,6 +44,7 @@ from analysis.scripts.visualize_view_angle import (
     SURFACE_COLOR,
     clip_to_frame,
     jump_steps,
+    normal_axis_end,
     project,
 )
 from analysis.telemetry import EpisodeTelemetry, available_episodes
@@ -63,8 +64,8 @@ TAG_STEPS = 4
 class GoalInFrame(Panel):
     """The face-on goal drawn into the view finder's frame when it fires.
 
-    On a goal's step: the sensed surface point and the normal axis toward
-    the goal camera position, projected through that frame's camera. For
+    On a goal's step: the sensed surface point and the normal axis along
+    its surface normal, projected through that frame's camera. For
     ``TAG_STEPS`` steps after: a "face-on jump" tag.
     """
 
@@ -80,7 +81,7 @@ class GoalInFrame(Panel):
         Args:
             ax: The axes the frame is drawn on.
             goals: The generator's goal records (``step``,
-                ``surface_location``, ``location``, ``view_angle``).
+                ``surface_location``, ``look_direction``, ``view_angle``).
             cam_to_world: The view finder's camera-to-world transforms, one
                 per frame.
             shape: The frame's ``(H, W)``.
@@ -114,7 +115,7 @@ class GoalInFrame(Panel):
             tick = self._cam_to_world.latest(step)
             cam_to_world = np.asarray(tick.value, dtype=float)
             surface = np.asarray(fired["surface_location"], dtype=float)
-            target = np.asarray(fired["location"], dtype=float)
+            target = normal_axis_end(fired)
             (su, sv), s_ok = project(surface, cam_to_world, self._shape)
             (gu, gv), g_ok = project(target, cam_to_world, self._shape)
             self._surface.set_data([su], [sv])

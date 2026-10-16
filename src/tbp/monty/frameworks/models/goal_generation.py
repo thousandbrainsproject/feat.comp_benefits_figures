@@ -571,7 +571,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     def __init__(
         self,
         goal_tolerances=None,
-        desired_object_distance=0.03,
         elapsed_steps_trigger=20,
         num_propagation_neighbors=10,
         max_dissimilar_neighbors=2,
@@ -586,13 +585,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         Args:
             goal_tolerances: The tolerances for each attribute of the Goal that can be
                 used by the GSG when determining whether a Goal is achieved.
-            desired_object_distance: The desired distance between the agent and the
-                object, which is used to determine whether the agent is close enough to
-                the object to consider it "achieved". Note this need not be the same as
-                the one specified for the motor-system (e.g. the surface-policy), as we
-                may want to aim for an initially farther distance, while the
-                surface-policy may want to stay quite close to the object. Defaults to
-                0.03.
             elapsed_steps_trigger: A Goal is generated every elapsed_steps_trigger
                 steps, even if the MLH has not changed. Defaults to 20.
             num_propagation_neighbors: Number of nearest neighbors of each node
@@ -636,7 +628,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             ValueError: If a salience or propagation parameter is out of range.
         """
         super().__init__(goal_tolerances, **kwargs)
-        self.desired_object_distance = desired_object_distance
         self.elapsed_steps_trigger = elapsed_steps_trigger
         self.num_propagation_neighbors = num_propagation_neighbors
         self.max_dissimilar_neighbors = max_dissimilar_neighbors
@@ -1548,9 +1539,11 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         """Specify a Goal for the motor-actuator.
 
         Based on a target location (in object-centric coordinates) and the associated
-        surface normal of that location, specify a Goal for the motor-actuator,
-        such that any sensors associated with the motor-actuator should be pointed down
-        at and observing the target location (i.e. parallel to the surface normal).
+        surface normal of that location, specify a Goal for the motor-actuator: the
+        target location on the object's surface, and the surface normal there, both
+        in body-centric coordinates. It is up to the motor system to position the
+        sensors associated with the motor-actuator so that they observe the target
+        location, e.g. by looking down the surface normal from some distance.
 
         For the movement to have a high probability of arriving at the desired location,
         the current hypothesis of the object ID and pose used to inform the movement
@@ -1590,22 +1583,13 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         rotated_disp = object_rot.apply(displacement)
 
         # The target location on the object's surface in global/body-centric coordinates
-        proposed_surface_loc = sensory_input.location + rotated_disp
+        target_loc = sensory_input.location + rotated_disp
 
         # Rotate the learned surface normal (which was committed to memory assuming a
         # default 0,0,0 orientation of the object)
         target_surface_normal_rotated = object_rot.apply(
             target_info["target_surface_normal"]
         )
-
-        # Scale the surface normal by the desired distance x1.5 (i.e. so that we start
-        # a bit further away from the object; we will separately move forward if we
-        # are indeed facing it)
-        surface_displacement = (
-            target_surface_normal_rotated * self.desired_object_distance * 1.5
-        )
-
-        target_loc = proposed_surface_loc + surface_displacement
 
         # Extra metadata for logging. 'achieved' and
         # 'matching_step_when_output_goal_set' should be updated at the next step.
@@ -1625,7 +1609,6 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         # experience if the jump succeeds; the LM compares it against the actually
         # sensed displacement to judge success.
         info = {
-            "proposed_surface_loc": proposed_surface_loc,
             "model_frame_target_loc": np.array(target_info["target_loc"]),
             "model_frame_graph_id": target_info["hypothesis_to_test"]["graph_id"],
             "model_frame_input_channel": target_info.get("input_channel"),
@@ -1642,11 +1625,11 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         return Goal(
             location=np.array(target_loc),
             morphological_features={
-                # Note the hypothesis-testing policy does not specify the roll of the
-                # agent, because this is not relevant to the task
+                # Only the surface normal is specified; the curvature directions are
+                # not relevant to observing the target location
                 "pose_vectors": np.array(
                     [
-                        (-1) * target_surface_normal_rotated,
+                        target_surface_normal_rotated,
                         [np.nan, np.nan, np.nan],
                         [np.nan, np.nan, np.nan],
                     ]

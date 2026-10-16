@@ -41,11 +41,12 @@ __all__ = [
 
 
 def specifies_pose(goal: Goal) -> bool:
-    """Whether a goal asks for an agent pose rather than just a place to look at.
+    """Whether a goal asks for a surface pose rather than just a place to look at.
 
     A goal carrying pose vectors (an LM's hypothesis-testing goal, a sensor
-    module's re-orienting goal) wants the agent moved into that pose; one
-    without (a salience goal) only names a location to look toward.
+    module's re-orienting goal) wants the agent moved to look down the surface
+    normal at its location; one without (a salience goal) only names a location
+    to look toward.
 
     Args:
         goal: The goal.

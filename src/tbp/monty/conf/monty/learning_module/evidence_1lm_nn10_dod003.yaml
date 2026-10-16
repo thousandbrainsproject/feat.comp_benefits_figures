@@ -24,4 +24,3 @@ learning_module_0:
     goal_tolerances:
       location: 0.015
     elapsed_steps_trigger: 20
-    desired_object_distance: 0.03

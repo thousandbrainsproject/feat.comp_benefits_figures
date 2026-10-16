@@ -39,6 +39,7 @@ from tbp.monty.frameworks.actions.actions import (
 from tbp.monty.frameworks.agents import AgentID
 from tbp.monty.frameworks.models.abstract_monty_classes import Observations
 from tbp.monty.frameworks.models.motor_policies import (
+    JUMP_DISTANCE_FACTOR,
     InformedPolicy,
     InformedPolicyRandomWalk,
     JumpToGoal,
@@ -243,24 +244,25 @@ class JumpToGoalTest(ParametrizedTestCase):
 
     @given(
         goal_location=vectors_3d(min_value=-1, max_value=1, dtype=np.float64),
-        goal_direction=nonzero_magnitude_vectors(
+        surface_normal=nonzero_magnitude_vectors(
             min_value=-1, max_value=1, dtype=np.float64
         ),
         policy=st.builds(
             JumpToGoal,
             agent_id=st.just(AGENT_ID),
             sensor_id=st.just(SensorID("view_finder")),
+            desired_object_distance=st.floats(min_value=0.0, max_value=0.1),
         ),
     )
-    def test_generates_actions_that_align_forward_axis_with_goal_direction(
+    def test_generates_actions_that_look_down_the_goal_surface_normal(
         self,
         goal_location: np.ndarray,
-        goal_direction: np.ndarray,
+        surface_normal: np.ndarray,
         policy: JumpToGoal,
     ) -> None:
         pose_vectors = np.zeros((3, 3))
-        goal_direction = normalize(goal_direction)
-        pose_vectors[0] = goal_direction
+        surface_normal = normalize(surface_normal)
+        pose_vectors[0] = surface_normal
 
         goal = Goal(
             location=goal_location,
@@ -293,7 +295,12 @@ class JumpToGoalTest(ParametrizedTestCase):
         set_sensor_rotation = policy_result.actions[1]
         assert isinstance(set_sensor_rotation, SetSensorRotation)
 
-        np.testing.assert_array_equal(set_agent_pose.location, goal_location)
+        np.testing.assert_allclose(
+            set_agent_pose.location,
+            goal_location
+            + surface_normal * policy.desired_object_distance * JUMP_DISTANCE_FACTOR,
+            atol=DEFAULT_TOLERANCE,
+        )
         rotation = Rotation.from_quat(
             [
                 # TODO(tslominski-tbp): Needs update when we use QuaternionWXYZ like
@@ -306,7 +313,7 @@ class JumpToGoalTest(ParametrizedTestCase):
         )
         new_forward_axis = -rotation.as_matrix()[:, 2]
         np.testing.assert_allclose(
-            new_forward_axis, goal_direction, atol=DEFAULT_TOLERANCE
+            new_forward_axis, -surface_normal, atol=DEFAULT_TOLERANCE
         )
 
         # Sensor rotation must be identity.
@@ -314,6 +321,25 @@ class JumpToGoalTest(ParametrizedTestCase):
             qt.as_float_array(set_sensor_rotation.rotation_quat),
             qt.as_float_array(qt.one),
             atol=DEFAULT_TOLERANCE,
+        )
+
+    def test_places_agent_desired_object_distance_along_the_surface_normal(
+        self,
+    ) -> None:
+        policy = JumpToGoal(
+            self.agent_id, SensorID("view_finder"), desired_object_distance=0.02
+        )
+        goal = Mock(
+            location=np.array([0.1, 1.5, 0.0]),
+            morphological_features={
+                "pose_vectors": np.array([[0.0, 0.0, 1.0], [np.nan] * 3, [np.nan] * 3]),
+            },
+        )
+
+        set_agent_pose = policy._derive_set_agent_pose_from_goal(goal)
+
+        np.testing.assert_allclose(
+            set_agent_pose.location, [0.1, 1.5, 0.02 * JUMP_DISTANCE_FACTOR]
         )
 
     @parametrize("has_post_jump_goal", [(True,), (False,)])
@@ -410,7 +436,7 @@ class JumpToGoalTest(ParametrizedTestCase):
 
     @given(
         goal_location=vectors_3d(min_value=-1, max_value=1, dtype=np.float64),
-        goal_direction=nonzero_magnitude_vectors(
+        surface_normal=nonzero_magnitude_vectors(
             min_value=-1, max_value=1, dtype=np.float64
         ),
         policy=st.builds(
@@ -427,12 +453,12 @@ class JumpToGoalTest(ParametrizedTestCase):
         self,
         depth_at_center_mock: Mock,
         goal_location: np.ndarray,
-        goal_direction: np.ndarray,
+        surface_normal: np.ndarray,
         policy: JumpToGoal,
     ) -> None:
         pose_vectors = np.zeros((3, 3))
-        goal_direction = normalize(goal_direction)
-        pose_vectors[0] = goal_direction
+        surface_normal = normalize(surface_normal)
+        pose_vectors[0] = surface_normal
 
         first_goal = Mock(
             location=np.zeros(3),
@@ -471,7 +497,12 @@ class JumpToGoalTest(ParametrizedTestCase):
         set_sensor_rotation = policy_result.actions[1]
         assert isinstance(set_sensor_rotation, SetSensorRotation)
 
-        np.testing.assert_array_equal(set_agent_pose.location, goal_location)
+        np.testing.assert_allclose(
+            set_agent_pose.location,
+            goal_location
+            + surface_normal * policy.desired_object_distance * JUMP_DISTANCE_FACTOR,
+            atol=DEFAULT_TOLERANCE,
+        )
         rotation = Rotation.from_quat(
             [
                 # TODO(tslominski-tbp): Needs update when we use QuaternionWXYZ like
@@ -484,7 +515,7 @@ class JumpToGoalTest(ParametrizedTestCase):
         )
         new_forward_axis = -rotation.as_matrix()[:, 2]
         np.testing.assert_allclose(
-            new_forward_axis, goal_direction, atol=DEFAULT_TOLERANCE
+            new_forward_axis, -surface_normal, atol=DEFAULT_TOLERANCE
         )
 
         # Sensor rotation must be identity.
@@ -631,6 +662,34 @@ class InformedPolicyGoalDrivenActionsTest(unittest.TestCase):
             morphological_features={
                 "pose_vectors": np.eye(3),
             },
+        )
+
+    def test_jump_looks_down_the_goal_surface_normal_from_desired_distance(
+        self,
+    ) -> None:
+        policy = InformedPolicy(
+            use_goal_driven_actions=True,
+            desired_object_distance=0.02,
+            action_sampler=Mock(),
+            agent_id=self.agent_id,
+        )
+        goal = Mock(
+            location=np.array([0.1, 1.5, 0.0]),
+            morphological_features={
+                "pose_vectors": np.array([[0.0, 1.0, 0.0], [np.nan] * 3, [np.nan] * 3]),
+            },
+        )
+
+        set_agent_pose = policy._derive_set_agent_pose_from_goal(goal)
+
+        np.testing.assert_allclose(
+            set_agent_pose.location, [0.1, 1.5 + 0.02 * JUMP_DISTANCE_FACTOR, 0.0]
+        )
+        rotation = Rotation.from_quat(
+            qt.as_float_array(set_agent_pose.rotation_quat)  # type: ignore[arg-type]
+        )
+        np.testing.assert_allclose(
+            -rotation.as_matrix()[:, 2], [0.0, -1.0, 0.0], atol=DEFAULT_TOLERANCE
         )
 
     def test_reports_attempted_goal_when_starting_a_jump(self) -> None:

@@ -817,8 +817,33 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             goal.info["model_frame_target_loc"] - self.mlh["location"],
         )
         nptest.assert_allclose(
-            goal.info["proposed_surface_loc"],
+            goal.location,
             self.sensor_percept.location + goal.info["predicted_displacement"],
+        )
+
+    def test_goal_is_the_target_surface_location_with_its_surface_normal(
+        self,
+    ) -> None:
+        self.sensor_percept.location = np.array([0.01, 0.0, 0.0])
+        self.salience("learning_module_0")[:] = 0.0
+        self.salience("learning_module_1")[:] = 0.0
+        self.salience(SENSOR_CHANNEL)[:] = 0.0
+        self.salience(SENSOR_CHANNEL)[2] = 1.0
+
+        goal = self.gsg._generate_goal(make_ctx(), [self.sensor_percept])
+
+        # The MLH has identity rotation, so the goal is the target node itself,
+        # displaced from the MLH location as the sensor is: on the surface, not
+        # displaced off it, and with the stored surface normal, not its negation.
+        sensor_graph = self.gsg.parent_lm.get_graph(TOP_ID, SENSOR_CHANNEL)
+        nptest.assert_allclose(
+            goal.location,
+            self.sensor_percept.location + sensor_graph.pos[2] - self.mlh["location"],
+        )
+        normal_start = sensor_graph.feature_mapping["pose_vectors"][0]
+        nptest.assert_allclose(
+            goal.morphological_features["pose_vectors"][0],
+            sensor_graph.x[2, normal_start : normal_start + 3],
         )
 
     # ------------------------- Triggering -------------------------

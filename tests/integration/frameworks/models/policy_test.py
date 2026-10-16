@@ -14,6 +14,7 @@ from tbp.monty.context import RuntimeContext
 from tbp.monty.frameworks.experiments.monty_experiment import MontyExperiment
 from tbp.monty.frameworks.models.abstract_monty_classes import LearningModule
 from tbp.monty.frameworks.models.motor_policies import (
+    JUMP_DISTANCE_FACTOR,
     SurfacePolicyCurvatureInformed,
 )
 from tbp.monty.hydra import instantiate_experiment
@@ -219,7 +220,6 @@ class PolicyTest(unittest.TestCase):
         """
         gsg_args = dict(
             elapsed_steps_trigger=10,
-            desired_object_distance=0.025,
         )
 
         graph_lm = EvidenceGraphLM(
@@ -918,6 +918,7 @@ class PolicyTest(unittest.TestCase):
             "target_surface_normal": np.array([0.0, 1.0, 0.0]),
             "hypothesis_to_test": {
                 "graph_id": "dummy_object",
+                "mlh_id": 0,
                 "location": np.array([0.1, 0.1, 0.1]),
                 "rotation": Rotation.from_euler(
                     "xyz", object_orientation, degrees=True
@@ -985,16 +986,17 @@ class PolicyTest(unittest.TestCase):
 
         Should work across a variety of parameter settings.
         """
-        lm, gsg_args = self.initialize_lm_with_gsg()
+        lm, _ = self.initialize_lm_with_gsg()
 
         policy: SurfacePolicyCurvatureInformed = hydra.utils.instantiate(
             self.policy_cfg_fragment
         )
         policy.reset()
 
-        # The target displacement of the agent from the object; used to determine
-        # the validity of the final agent location
-        surface_displacement = gsg_args["desired_object_distance"] * 1.5
+        # The target displacement of the agent from the object, which the motor
+        # policy adds to the goal's surface location; used to determine the
+        # validity of the final agent location
+        surface_displacement = policy.desired_object_distance * JUMP_DISTANCE_FACTOR
 
         ctx = RuntimeContext(rng=np.random.RandomState())
 
@@ -1012,12 +1014,13 @@ class PolicyTest(unittest.TestCase):
             target_location_on_object=[0.2, 0.2, 0.2],
         )
 
-        assert np.all(
-            np.isclose(motor_goal_location, [0.1, 1.6 + surface_displacement, 0.2])
-        ), "Goal location is not as expected"
+        # The goal is on the surface
+        assert np.all(np.isclose(motor_goal_location, [0.1, 1.6, 0.2])), (
+            "Goal location is not as expected"
+        )
 
-        # Pointing down
-        assert np.all(np.isclose(motor_goal_direction, [0, -1.0, 0])), (
+        # Surface normal pointing up
+        assert np.all(np.isclose(motor_goal_direction, [0, 1.0, 0])), (
             "Goal pose is not as expected"
         )
 
@@ -1046,13 +1049,12 @@ class PolicyTest(unittest.TestCase):
             target_location_on_object=[0.1, 0.2, 0.1],
         )
 
-        # Surface displacement is negative, because object is flipped in x-axis
-        assert np.all(
-            np.isclose(motor_goal_location_2, [0, 1.4 - surface_displacement, 0.1])
-        ), "Goal location is not as expected"
+        assert np.all(np.isclose(motor_goal_location_2, [0, 1.4, 0.1])), (
+            "Goal location is not as expected"
+        )
 
-        # Pointing up, because object is flipped in y-axis
-        assert np.all(np.isclose(motor_goal_direction_2, [0, 1.0, 0])), (
+        # Surface normal pointing down, because object is flipped in x-axis
+        assert np.all(np.isclose(motor_goal_direction_2, [0, -1.0, 0])), (
             "Goal pose is not as expected"
         )
 
@@ -1083,11 +1085,14 @@ class PolicyTest(unittest.TestCase):
 
         # Below results manually verified
         assert np.all(
-            np.isclose(motor_goal_location_3, [0.18586463, 1.58288073, -0.04139085])
+            np.isclose(
+                motor_goal_location_3 + motor_goal_direction_3 * surface_displacement,
+                [0.18586463, 1.58288073, -0.04139085],
+            )
         ), "Goal location is not as expected"
 
         assert np.all(
-            np.isclose(motor_goal_direction_3, [-0.965738, 0.09413407, -0.24184476])
+            np.isclose(motor_goal_direction_3, [0.965738, -0.09413407, 0.24184476])
         ), "Goal pose is not as expected"
 
         assert np.all(

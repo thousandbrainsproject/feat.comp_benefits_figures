@@ -75,13 +75,14 @@ class FaceOnReorientation(SMGoalGenerator):
     normal at the patch (the percept's first pose vector), smoothed over the
     last ``window`` measured steps so a single saccade does not count. When
     the smoothed angle and this step's own angle both exceed
-    ``max_view_angle``, it proposes a goal placing the agent on the surface
-    normal, at the patch's current distance, looking back at the patch --
-    a pose, so the motor system's jump policy re-orients the view; exploration
-    then carries on as usual from the new vantage. The goal sits off the
-    surface, so pair this with a region proposer that excites it (see
+    ``max_view_angle``, it proposes a goal at the patch's surface location,
+    with the surface normal there as its pose -- so the motor system's jump
+    policy re-orients the view, placing the agent on the normal (at the
+    policy's own distance from the surface) looking back at the patch;
+    exploration then carries on as usual from the new vantage. Pair this with
+    a region proposer that excites the goal (see
     ``sm_region_proposal.ExciteGoalLocations``), or the attention system
-    filters it out.
+    filters it out unless another module attends to the patch.
 
     Nothing is proposed until ``window`` views have been measured. Goals are
     one-off (proposed on a single step), count as achieved when the first
@@ -95,7 +96,6 @@ class FaceOnReorientation(SMGoalGenerator):
         max_view_angle: float = 45.0,
         window: int = 5,
         min_steps_between_goals: int = 20,
-        standoff: float | None = None,
         confidence: float = 1.0,
     ) -> None:
         """Initialize the generator.
@@ -109,16 +109,12 @@ class FaceOnReorientation(SMGoalGenerator):
                 over before it is compared with ``max_view_angle``.
             min_steps_between_goals: Sensor steps that must pass after a goal
                 before another is proposed.
-            standoff: Distance from the surface, in meters, to place the agent
-                at; the sensor's current distance from the patch when None,
-                keeping the viewing distance.
             confidence: The confidence of the goals; the motor system executes
                 the highest-confidence goal when several modules propose one.
         """
         self.max_view_angle = max_view_angle
         self.window = window
         self.min_steps_between_goals = min_steps_between_goals
-        self.standoff = standoff
         self.confidence = confidence
         self._init_episode()
 
@@ -172,7 +168,7 @@ class FaceOnReorientation(SMGoalGenerator):
 
         if not self._should_reorient(smoothed):
             return []
-        goal, record = self._face_on_goal(percept, sensor_state)
+        goal, record = self._face_on_goal(percept)
         self._pending = record
         self._goal_records.append(record)
         self._steps_since_goal = 0
@@ -188,8 +184,8 @@ class FaceOnReorientation(SMGoalGenerator):
             ``view_angle`` and ``smoothed_view_angle`` with one entry per
             sensor step (NaN where nothing was measured), and ``goals``, one
             record per proposed goal: the ``step`` it was proposed on, the
-            goal's ``location`` and ``look_direction``, the
-            ``surface_location`` it was computed from, the ``view_angle``
+            goal's ``surface_location``, the ``look_direction`` it asks to
+            view it along (the negated surface normal), the ``view_angle``
             that triggered it, and whether it was ``achieved`` (None until
             the next measured view).
         """
@@ -234,10 +230,8 @@ class FaceOnReorientation(SMGoalGenerator):
             or self._steps_since_goal > self.min_steps_between_goals
         )
 
-    def _face_on_goal(
-        self, percept: Message, sensor_state: SensorState
-    ) -> tuple[Goal, dict[str, Any]]:
-        """An agent pose on the patch's surface normal, looking back at the patch.
+    def _face_on_goal(self, percept: Message) -> tuple[Goal, dict[str, Any]]:
+        """The patch's surface location, with its surface normal, to look down at.
 
         Returns:
             The goal and its telemetry record.
@@ -245,24 +239,16 @@ class FaceOnReorientation(SMGoalGenerator):
         normal = np.asarray(percept.morphological_features["pose_vectors"], float)[0]
         normal = normal / np.linalg.norm(normal)
         surface_loc = np.asarray(percept.location, dtype=float)
-        standoff = self.standoff
-        if standoff is None:
-            standoff = float(
-                np.linalg.norm(
-                    surface_loc - np.asarray(sensor_state.position, dtype=float)
-                )
-            )
-        location = surface_loc + normal * standoff
         logger.debug(
             f"Face-on goal from {percept.sender_id}: view angle "
-            f"{self._view_angle:.1f} deg, standoff {standoff:.3f} m"
+            f"{self._view_angle:.1f} deg"
         )
         goal = Goal(
-            location=location,
+            location=surface_loc,
             morphological_features={
-                # Look along the negated normal; roll is left unspecified.
+                # Only the surface normal is specified; roll is left unspecified.
                 "pose_vectors": np.array(
-                    [-normal, [np.nan] * 3, [np.nan] * 3], dtype=float
+                    [normal, [np.nan] * 3, [np.nan] * 3], dtype=float
                 ),
                 "pose_fully_defined": None,
                 "on_object": 1,
@@ -278,7 +264,6 @@ class FaceOnReorientation(SMGoalGenerator):
         )
         record = dict(
             step=self._step,
-            location=location,
             look_direction=-normal,
             surface_location=surface_loc,
             view_angle=self._view_angle,
