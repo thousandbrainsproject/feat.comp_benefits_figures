@@ -31,12 +31,20 @@ In the app:
   its nearest node, which then propagate, reducing the salience of the nodes
   they reach (by salience_reduction, less for nodes reached later if
   salience_reduction_falloff > 0), while the salience of every other node
-  recovers by one step. Override the sensed hue, normal (tilted away from the
-  stored one) or object ID to see the goal generator refuse to propagate from
-  input the MLH does not predict.
+  relaxes by one step towards rest (0.5). Override the sensed hue, normal
+  (tilted away from the stored one) or object ID to see the goal generator
+  refuse to propagate from input the MLH does not predict.
+- "Sample goal" samples a goal's target as the goal generator would (in
+  proportion to salience, across all channels), and shows its hypothetical
+  propagation, through the target's channel, which raises the salience of the
+  part the target is on to 1 (not an LM step). "Go to goal" then senses the
+  target's location (one LM step), whose input reduces that salience: going to
+  the same part again and again drives it below the rest of the object, until
+  goals are sampled elsewhere.
 - Set the age of the MLH hypothesis (as burst sampling tracks it), which every
-  LM step increases by one: nothing propagates until the MLH has survived its
-  first chance of being deleted, i.e. its age exceeds min_age.
+  LM step increases by one: nothing propagates, and no goal is sampled, until
+  the MLH has survived its first chance of being deleted, i.e. its age exceeds
+  min_age.
 - Scrub the slider, or press play, to step through the propagation in the order
   the nodes were reached. The seeds, the node being reached, the sinks (reached
   nodes that do not propagate on), the boundary the propagation stopped at, and
@@ -47,8 +55,8 @@ In the app:
   "Emphasize low salience" inverts this), their object ID, or the region of the
   primitive they belong to; toggle normal glyphs, the propagation tree, and the
   other channels' nodes.
-- "Step" recovers the salience by one step (or ten) without sensing; "Reset"
-  restores it to 1 everywhere, and resets the view (orbiting, panning or zooming
+- "Step" relaxes the salience by one step (or ten) without sensing; "Reset"
+  restores it to rest everywhere, and resets the view (orbiting, panning or zooming
   the scene otherwise persists across sensing, stepping and recoloring).
   The goal generator's parameters can be changed on the fly (the salience is
   kept).
@@ -80,9 +88,11 @@ CURRENT_COLOR = "#ffd600"
 SINK_COLOR = "#111111"
 BOUNDARY_COLOR = "#e41a1c"
 FRONTIER_COLOR = "#ff6f00"
+GOAL_COLOR = "#00b140"
 TREE_COLOR = "rgba(60, 60, 60, 0.45)"
 GLYPH_COLOR = "rgba(0, 90, 160, 0.5)"
-# Salience from 0 (grey, hard to see) to 1 (bright and obvious).
+# Salience from 0 (grey, hard to see), through rest (0.5), to 1 (bright and
+# obvious, highlighted by a goal).
 SALIENCE_COLORSCALE = [[0.0, "#e6e6e6"], [0.5, "#fdae6b"], [1.0, "#d94801"]]
 ID_COLORS = {
     "square": "#1f77b4",
@@ -125,7 +135,7 @@ DEFAULT_CAMERA = {
 SPEEDS = [1, 2, 5, 10, 25, 50]
 PARAMETER_STEPS = {
     "num_propagation_neighbors": 1,
-    "salience_recovery_steps": 1,
+    "salience_relaxation_steps": 1,
     "salience_reduction": 0.05,
     "salience_reduction_falloff": 0.1,
     "lm_hue_tolerance": 0.01,
@@ -225,9 +235,14 @@ def hover_texts(session: Session, channel: str, progress: int) -> list[str]:
         for position, node in enumerate(record.node_order[:progress]):
             stage = record.stage[position]
             where = "from seeds" if stage == 0 else f"push-through {stage}"
+            change = (
+                "salience raised to 1 (goal)"
+                if record.hypothetical
+                else f"salience -{record.reduction[position]:.2f}"
+            )
             propagation_text[int(node)] = (
                 f"reached #{position + 1}, {record.hops[position]} hop(s) {where}; "
-                f"salience -{record.reduction[position]:.2f}"
+                + change
             )
     has_hue = "hsv" in graph.feature_mapping
     texts = []
@@ -412,6 +427,18 @@ def build_figure(
         traces.extend(
             propagation_overlays(session, channel, record, progress, overlays)
         )
+    if session.goal is not None and session.goal[0] == channel:
+        traces.append(
+            marker_trace(
+                pos,
+                [session.goal[1]],
+                "goal target",
+                "diamond-open",
+                GOAL_COLOR,
+                14,
+                {"width": 4, "color": GOAL_COLOR},
+            )
+        )
 
     figure = go.Figure(traces)
     axis = {"visible": False, "showbackground": False}
@@ -521,7 +548,11 @@ def status_text(session: Session, channel: str, progress: int):
         Dash children and a background color.
     """
     if session.sensing is None:
-        return "Click a node (or pick a landmark) to sense its location.", "#f0f0f0"
+        return (
+            "Click a node (or pick a landmark) to sense its location, or sample a "
+            "goal.",
+            "#f0f0f0",
+        )
     record = session.sensing.records.get(channel)
     if record is None:
         reason = session.sensing.no_propagation.get(channel, "unknown")
@@ -535,16 +566,20 @@ def status_text(session: Session, channel: str, progress: int):
     stage = int(record.stage[position])
     hops = int(record.hops[position])
     parts = [
-        html.B(f"{progress} / {total}"),
+        html.B(("goal " if record.hypothetical else "") + f"{progress} / {total}"),
         f" · node {node}: ",
     ]
-    reduction = f" · salience -{record.reduction[position]:.2f}"
+    reduction = (
+        " · salience raised to 1"
+        if record.hypothetical
+        else f" · salience -{record.reduction[position]:.2f}"
+    )
     if stage == 0:
         parts.append("seed" if hops == 0 else f"{hops} hop(s) from the seeds")
         parts.append(reduction)
         if node in record.sinks:
             parts.append(" · sink (does not propagate on)")
-        return parts, "#e8f1fb"
+        return parts, "#e3f6e8" if record.hypothetical else "#e8f1fb"
     stalled_at = int(np.count_nonzero(record.stage < stage))
     frontier = int(np.count_nonzero((record.stage == stage) & (record.hops == 0)))
     parts.append(
@@ -579,9 +614,11 @@ def summary_children(session: Session):
         html.Div(
             f"MLH age {session.mlh_age}: "
             + (
-                f"survived deletion (> min_age {MIN_AGE}), so input propagates"
+                f"survived deletion (> min_age {MIN_AGE}), so input propagates "
+                "and goals are sampled"
                 if session.mlh_established
-                else f"too young to propagate (needs > min_age {MIN_AGE})"
+                else f"too young to propagate or sample goals (needs > min_age "
+                f"{MIN_AGE})"
             ),
             style={"color": "#333" if session.mlh_established else "#b30000"},
         ),
@@ -605,6 +642,9 @@ def summary_children(session: Session):
         children.append(html.Div("No location sensed yet."))
         return children
     sensing = session.sensing
+    if sensing.goal_target is not None:
+        children.extend(goal_summary(session, sensing))
+        return children
     children.append(
         html.Div(
             "Sensed location: ("
@@ -643,6 +683,48 @@ def summary_children(session: Session):
                 ]
         children.append(html.Div(lines, style={"marginTop": "6px"}))
     return children
+
+
+def goal_summary(session: Session, sensing) -> list:
+    """The goal summary: its target, and the part its propagation highlighted.
+
+    Returns:
+        Dash children.
+    """
+    channel, _ = sensing.goal_target
+    record = sensing.records.get(channel)
+    lines = [
+        html.B(f"Goal sampled at step {sensing.step}"),
+        html.Br(),
+        f"on {channel}: {sensing.percepts[channel].removeprefix('goal target: ')}",
+        html.Br(),
+        "at ("
+        + ", ".join(f"{c:.3f}" for c in sensing.location)
+        + ")"
+        + ("" if session.goal else " (gone to, or superseded by a sensing)"),
+        html.Br(),
+    ]
+    if record is None:
+        lines.append(html.I(sensing.no_propagation[channel]))
+    else:
+        lines.append(
+            f"hypothetical propagation from {len(record.seeds)} seeds raised "
+            f"{len(record.node_order)} nodes to salience 1"
+        )
+        if int(record.stage.max()):
+            lines += [
+                html.Br(),
+                html.Span(
+                    f"{int(record.stage.max())} push-through(s) to reach "
+                    f"{record.min_size:.1f} nodes",
+                    style={"color": "#b35900"},
+                ),
+            ]
+    lines += [
+        html.Br(),
+        html.I("Other channels are not highlighted; Go to goal senses the target."),
+    ]
+    return [html.Div(lines, style={"marginTop": "6px", "color": "#0b6b2e"})]
 
 
 def details_children(details: dict[str, str]):
@@ -861,8 +943,9 @@ def build_layout():
                                 html.Div(
                                     "Burst sampling can delete a hypothesis once its "
                                     f"age reaches min_age ({MIN_AGE}); the goal "
-                                    "generator only propagates once the MLH has "
-                                    f"survived that, i.e. its age exceeds {MIN_AGE}. "
+                                    "generator only propagates (and samples goals) "
+                                    "once the MLH has survived that, i.e. its age "
+                                    f"exceeds {MIN_AGE}. "
                                     "Every LM step (sensing, or Step) ages the MLH "
                                     f"by one: set it to {MIN_AGE - 1} and sense twice "
                                     "to see it start propagating.",
@@ -892,7 +975,8 @@ def build_layout():
                                 ),
                                 html.Div(
                                     "Salience: bright nodes are salient (likely to be "
-                                    "sampled as a goal), grey ones are not.",
+                                    "sampled as a goal), grey ones are not; orange "
+                                    "is at rest (0.5).",
                                     style={"fontSize": "11px", "color": "#666"},
                                 ),
                             ),
@@ -912,7 +996,7 @@ def build_layout():
                                 "Salience",
                                 html.Div(
                                     [
-                                        html.Button("Step (recover)", id="step-btn"),
+                                        html.Button("Step (relax)", id="step-btn"),
                                         html.Button(
                                             "Step x10",
                                             id="step10-btn",
@@ -935,8 +1019,34 @@ def build_layout():
                                 html.Div(
                                     "Sensing a location is also a step: the salience "
                                     "of the nodes the propagation does not reach "
-                                    "recovers by one step. Reset restores it to 1 "
+                                    "relaxes by one step towards rest (0.5), from "
+                                    "above or below. Reset restores it to rest "
                                     "everywhere.",
+                                    style={"fontSize": "11px", "color": "#666"},
+                                ),
+                            ),
+                            section(
+                                "Goals",
+                                html.Div(
+                                    [
+                                        html.Button(
+                                            "Sample goal", id="sample-goal-btn"
+                                        ),
+                                        html.Button(
+                                            "Go to goal",
+                                            id="go-to-goal-btn",
+                                            style={"marginLeft": "6px"},
+                                        ),
+                                    ]
+                                ),
+                                html.Div(
+                                    "Sample goal: a target sampled in proportion to "
+                                    "salience (across all channels, the displayed "
+                                    "one switching to the target's), whose "
+                                    "hypothetical propagation raises the salience "
+                                    "of its part of the target's channel to 1; not "
+                                    "an LM step. Go to goal: sense the target (one "
+                                    "LM step), reducing that salience.",
                                     style={"fontSize": "11px", "color": "#666"},
                                 ),
                             ),
@@ -1009,7 +1119,7 @@ def build_layout():
                     html.Div(
                         style={"width": "330px", "flex": "none"},
                         children=[
-                            section("Last sensing", html.Div(id="summary")),
+                            section("Last sensing or goal", html.Div(id="summary")),
                             section("Hovered node", html.Div(id="details")),
                             section(
                                 "Log",
@@ -1056,6 +1166,15 @@ def event_node(event_data) -> int | None:
     if point.get("curveNumber") != 0 or point.get("pointNumber") is None:
         return None
     return int(point["pointNumber"])
+
+
+# The buttons whose action needs nothing but the session.
+BUTTON_ACTIONS = {
+    "step-btn": lambda session: session.step_salience(),
+    "step10-btn": lambda session: session.step_salience(10),
+    "reset-btn": lambda session: session.reset_salience(),
+    "go-to-goal-btn": lambda session: session.go_to_goal(),
+}
 
 
 def handle_action(
@@ -1109,12 +1228,11 @@ def handle_action(
         session.sense(session.condition.landmarks[landmark])
     elif trigger == "graph" and (node := event_node(click_data)) is not None:
         session.sense(session.graphs[channel].pos[node])
-    elif trigger == "step-btn":
-        session.step_salience()
-    elif trigger == "step10-btn":
-        session.step_salience(10)
-    elif trigger == "reset-btn":
-        session.reset_salience()
+    elif trigger in BUTTON_ACTIONS:
+        BUTTON_ACTIONS[trigger](session)
+    elif trigger == "sample-goal-btn":
+        if session.sample_goal() is not None:
+            channel = session.goal[0]
     elif isinstance(trigger, dict) and trigger.get("type") == "param":
         session.set_parameters(**parameters)
     elif isinstance(trigger, str) and trigger.startswith("override-"):
@@ -1128,7 +1246,14 @@ def handle_action(
         record = session.sensing.records.get(channel)
     total = len(record.node_order) if record is not None else 0
     new_progress = None
-    if trigger in ("graph", "landmark", "condition", "reset-btn"):
+    if trigger in (
+        "graph",
+        "landmark",
+        "condition",
+        "reset-btn",
+        "sample-goal-btn",
+        "go-to-goal-btn",
+    ):
         new_progress = total
     elif trigger == "channel":
         new_progress = min(progress, total) if progress else total
@@ -1174,6 +1299,8 @@ def register_callbacks(app: Dash) -> None:
         Input("step-btn", "n_clicks"),
         Input("step10-btn", "n_clicks"),
         Input("reset-btn", "n_clicks"),
+        Input("sample-goal-btn", "n_clicks"),
+        Input("go-to-goal-btn", "n_clicks"),
         Input({"type": "param", "name": ALL}, "value"),
         Input("override-hue", "value"),
         Input("override-tilt", "value"),
@@ -1190,6 +1317,8 @@ def register_callbacks(app: Dash) -> None:
         _step_clicks,
         _step10_clicks,
         _reset_clicks,
+        _sample_goal_clicks,
+        _go_to_goal_clicks,
         _parameter_values,
         override_hue,
         override_tilt,

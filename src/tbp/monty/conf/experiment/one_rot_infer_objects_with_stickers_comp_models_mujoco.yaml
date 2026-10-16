@@ -52,7 +52,7 @@ experiment:
             _target_: tbp.monty.frameworks.models.evidence_matching.telemetry.NoopEvidenceGraphLMTelemetry
           gsg:
             _target_: tbp.monty.frameworks.models.goal_generation.EvidenceGoalGenerator
-            salience_recovery_steps: 50
+            salience_relaxation_steps: 50
       sensor_modules:
         sensor_module_0:
           # Random rotations often leave the sticker at a steep angle, where the

@@ -457,15 +457,21 @@ class GraphGoalGenerator(GoalGenerator):
 
 @dataclass(frozen=True)
 class PropagationRecord:
-    """One propagation of a salience reduction by an `EvidenceGoalGenerator`.
+    """One propagation of salience by an `EvidenceGoalGenerator`.
+
+    Either a propagation of sensed input, which reduces the salience of the nodes
+    it reaches, or a hypothetical one, from the target of a Goal as if its
+    location were sensed, which raises their salience to MAX_SALIENCE.
 
     Attributes:
         graph_id: The graph (the MLH object) the propagation went through.
         input_channel: The input channel whose graph the propagation went through,
-            i.e. the channel the input was received on.
-        object_id: The "object_id" feature value that was received, or None for a
-            propagation through similar features from sensory input.
-        node_order: The nodes whose salience was reduced, in the order the
+            i.e. the channel the input was received on (or the Goal's target was
+            selected from).
+        object_id: The "object_id" feature value that was received (or that the
+            Goal's target stores), or None for a propagation through similar
+            sensory features.
+        node_order: The nodes whose salience was changed, in the order the
             propagation reached them: by increasing number of hops from the seeds
             (see `_get_propagation_order`).
         seeds: The nodes the propagation began from.
@@ -483,7 +489,10 @@ class PropagationRecord:
         min_size: The number of nodes the propagation had to reach before
             stopping, or 0 if it was never pushed through.
         reduction: For each node of `node_order`, the salience reduction applied
-            to it (before clamping its salience at 0), see `_salience_reductions`.
+            to it (before clamping its salience at 0), see `_salience_reductions`;
+            0 for a hypothetical propagation.
+        hypothetical: Whether the propagation was from the target of a Goal,
+            raising the salience of the nodes it reached to MAX_SALIENCE.
     """
 
     graph_id: str
@@ -497,6 +506,7 @@ class PropagationRecord:
     sinks: np.ndarray
     min_size: float
     reduction: np.ndarray
+    hypothetical: bool = False
 
 
 class EvidenceGoalGenerator(GraphGoalGenerator):
@@ -511,18 +521,33 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     Goals are directed at the parts of the model of the most likely object
     hypothesis (MLH) that the LM's input has not yet explained. Every node of
     every channel's graph of the MLH has a salience in [0, 1]: how worthwhile it
-    is to test, from 1 (nothing is known about it) down to 0 (fully explained,
-    cannot be tested). The location to test is sampled from the nodes of all of
-    the channels together, with probability proportional to salience, so that
-    initially (salience uniformly 1) a channel with more nodes (e.g. the sensory
-    channel) is more likely to be sampled than one with fewer (e.g. a channel of
-    object IDs from a lower-level LM, i.e. a compositional model).
+    is to test, at rest 0.5 (`RESTING_SALIENCE`: no more or less worthwhile than
+    any other node), up to 1 (about to be tested by a Goal), and down to 0
+    (fully explained, cannot be tested). The location to test is sampled from the
+    nodes of all of the channels together, with probability proportional to
+    salience, so that initially (salience uniformly at rest) a channel with more
+    nodes (e.g. the sensory channel) is more likely to be sampled than one with
+    fewer (e.g. a channel of object IDs from a lower-level LM, i.e. a
+    compositional model).
 
     Input that the MLH predicts at its current location "explains" part of the
     model, whose salience is reduced by `salience_reduction` (falling off along
     the propagation by `salience_reduction_falloff`), by propagating through the
     graph of the channel the input was received on, starting from the nodes
     nearest the MLH location, through neighboring nodes with similar features.
+
+    When a Goal is generated, the part of the model its target belongs to is
+    highlighted: a hypothetical propagation, as if the target's location were
+    sensed (with the features the target stores), goes through the graph of the
+    channel the target was selected from, raising the salience of the nodes it
+    reaches to 1 rather than reducing it. If the Goal is achieved, the input
+    sensed there then reduces that salience on each step the part is explained
+    (e.g. from 1 to 0.8, 0.6, ...), so that the sensor dwells on the part until
+    its salience falls below that of the rest of the object, and the next Goal
+    is likely to be elsewhere. Only the target's channel is highlighted, so e.g.
+    a target on a logo highlights the logo, not the rest of the object it is
+    on.
+
     Object IDs and sensory features are propagated alike, differing only in the
     features compared:
     - On a channel receiving object IDs from a lower-level LM, the object ID,
@@ -552,13 +577,14 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     age reaches `min_age`), the MLH must have survived its first chance of being
     deleted, i.e. its age must exceed `min_age`. Until then, a newly sampled
     hypothesis that happens to have the most evidence does not reduce the salience
-    of its object (salience still recovers), nor is a Goal generated to test it.
+    of its object (salience still relaxes), nor is a Goal generated to test it.
     With an updater that never deletes hypotheses, input always propagates, and
     Goals are generated as soon as the MLH is a known object.
 
     The salience of the nodes is kept in a `ModelSalience` (`model_salience`),
-    which documents how it recovers (over `salience_recovery_steps` steps, except
-    on the steps a node's salience is reduced), and how long it is kept: per
+    which documents how it relaxes back to rest from above or below (over
+    `salience_relaxation_steps` steps, except on the steps a node's salience is
+    reduced), and how long it is kept: per
     object, for the whole episode, including while the MLH is another object. A
     change of the MLH object or rotation does not reset it; it only prompts a new
     Goal (see `_check_need_new_output_goal`). As salience is indexed by node, in
@@ -566,7 +592,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     however, the nodes past propagations reached were found using the MLH pose at
     the time (the seeds nearest the MLH location, and sensed surface normals
     rotated by the MLH rotation), so if that pose was wrong, the wrong nodes were
-    reduced, and they are not restored until they recover.
+    reduced, and they are not restored until they relax.
     """
 
     def __init__(
@@ -578,7 +604,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         min_propagation_fraction: float | None = 0.05,
         salience_reduction=0.2,
         salience_reduction_falloff=0.5,
-        salience_recovery_steps=50,
+        salience_relaxation_steps=50,
         **kwargs,
     ) -> None:
         """Initialize the GSG.
@@ -593,7 +619,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 neighbors, must have similar features (e.g. store the same object
                 ID), up to max_dissimilar_neighbors, for a propagation to continue
                 from the node. Also the number of nodes
-                nearest the MLH location that a propagation begins from. On a wall
+                nearest the MLH location (or a Goal's target) that a propagation
+                begins from. On a wall
                 thinner than the spacing of nodes (e.g. a bowl's), about half of a
                 node's nearest neighbors are on the far side of the wall (see
                 `_far_side_pairs`), and so are ignored. Defaults to 10.
@@ -613,16 +640,17 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 propagation through. Defaults to 0.05.
             salience_reduction: How much the salience of the first node a
                 propagation reaches is reduced by (minimum salience is clamped at 0).
-                With 0.2, a part has to be explained on five visits before it
-                will not be tested at all. Defaults to 0.2.
+                With 0.2, a part highlighted by a Goal (at salience 1) has to be
+                explained on five visits before it will not be tested at all.
+                Defaults to 0.2.
             salience_reduction_falloff: Fraction by which the reduction falls off
                 along a propagation, linearly in the order the nodes are reached:
                 the last node reached is reduced by salience_reduction * (1 -
                 salience_reduction_falloff). 0 reduces every reached node by the
                 same amount, wherever it is relative to the first node. Defaults to 0.5.
-            salience_recovery_steps: Number of steps over which the salience of a
-                node linearly recovers from 0 to 1 (see `ModelSalience`). 0 to not
-                recover salience. Defaults to 50 steps.
+            salience_relaxation_steps: Number of steps over which the salience of
+                a node linearly relaxes to rest (0.5) from either 0 or 1 (see
+                `ModelSalience`). 0 to not relax salience. Defaults to 50 steps.
             **kwargs: Additional keyword arguments.
 
         Raises:
@@ -635,7 +663,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         self.min_propagation_fraction = min_propagation_fraction
         self.salience_reduction = salience_reduction
         self.salience_reduction_falloff = salience_reduction_falloff
-        self.model_salience = ModelSalience(salience_recovery_steps)
+        self.model_salience = ModelSalience(salience_relaxation_steps)
 
         if num_propagation_neighbors <= 0:
             raise ValueError("num_propagation_neighbors must be positive")
@@ -665,13 +693,17 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         ] = {}
         self._prev_goal_mlh: dict | None = None
         self.propagation_records: list[PropagationRecord] = []
+        self.goal_propagation_record: PropagationRecord | None = None
 
     def step(self, ctx: RuntimeContext, observations):
         """Update the salience of the parts of the MLH, then step the GSG.
 
         A new `propagation_records` list is created on every step, holding the
-        propagations that took place on that step.
+        propagations of sensed input that took place on that step, and
+        `goal_propagation_record` holds the hypothetical propagation from the
+        target of the Goal generated on that step, if any.
         """
+        self.goal_propagation_record = None
         self._update_salience(observations)
         super().step(ctx, observations)
 
@@ -683,7 +715,8 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         Returns:
             Array with one salience in [0, 1] per node of the graph of the given
             input channel: how likely the node is to be selected for testing,
-            relative to the others (never, at 0).
+            relative to the others (never, at 0; RESTING_SALIENCE when nothing is
+            known about it).
         """
         num_nodes = len(self.parent_lm.get_graph(graph_id, input_channel).pos)
         return self.model_salience.get(graph_id, input_channel, num_nodes)
@@ -697,7 +730,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
 
         The input propagates through the MLH's graphs (see
         `_propagate_from_observations`), which reduces the salience of the nodes
-        it reaches; the salience of every other node recovers by one step.
+        it reaches; the salience of every other node relaxes by one step.
         """
         self.propagation_records = []
         self._propagate_from_observations(observations)
@@ -705,7 +738,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         for record in self.propagation_records:
             key = (record.graph_id, record.input_channel)
             reached.setdefault(key, []).append(record.node_order)
-        self.model_salience.recover(
+        self.model_salience.relax(
             except_nodes={key: np.concatenate(nodes) for key, nodes in reached.items()},
             mlh_graph_id=self._get_mlh_graph_id(),
         )
@@ -727,7 +760,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             "rotation": mlh["rotation"],
         }
 
-        target = self._select_target(ctx, graph_id)
+        target = self._propose_target(ctx, graph_id)
         if target is None:
             logger.debug(f"No node of {graph_id} has any salience; no goal")
             return self._generate_none_goal()
@@ -747,6 +780,19 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             f"(node {node_id}) of {graph_id}"
         )
         return goal
+
+    def _propose_target(self, ctx: RuntimeContext, graph_id):
+        """Sample a node to test, and highlight the part of the model it is on.
+
+        Returns:
+            The target, as returned by `_select_target`, whose part of the model
+            has had its salience raised (see `_excite_target_region`); or None if
+            no node has any salience.
+        """
+        target = self._select_target(ctx, graph_id)
+        if target is not None:
+            self._excite_target_region(graph_id, *target)
+        return target
 
     def _select_target(self, ctx: RuntimeContext, graph_id):
         """Sample a node of the graph's channels to test, weighted by salience.
@@ -837,7 +883,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         if not sensed:
             return
 
-        seeds, seed_distances = self._get_nodes_nearest_mlh(graph, mlh["location"])
+        seeds, seed_distances = self._get_nearest_nodes(graph, mlh["location"])
         nearby = seeds[seed_distances <= self.parent_lm.max_match_distance]
         predicted = nearby[
             self._similar_features(input_channel, features, nearby, sensed)
@@ -845,10 +891,7 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         if len(predicted) == 0:
             return
         reference = {name: values[predicted[0]] for name, values in features.items()}
-        seeds = seeds[
-            ~self._far_side(features, seeds, reference)
-            & self._similar_features(input_channel, features, seeds, reference)
-        ]
+        seeds = self._seeds_like(input_channel, features, seeds, reference)
 
         propagation, surface = self._get_similar_neighbors(
             graph_id, input_channel, graph, features
@@ -862,15 +905,92 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             object_id=sensed.get("object_id"),
         )
 
-    def _propagate_from_seeds(
-        self, graph_id, input_channel, seeds, propagation, surface, object_id
+    def _excite_target_region(
+        self, graph_id, input_channel, node_id, object_id=None
     ) -> None:
-        """Propagate from seeds through the graph, reducing the reached salience.
+        """Raise the salience of the part of the model a Goal's target is on.
 
-        The propagation (see `_get_propagation_order`) is appended to
-        `propagation_records`, with the reached nodes in the order they were
-        reached, and the salience of each of them is reduced (see
-        `_salience_reductions`).
+        A hypothetical propagation, as if the target's location were sensed, with
+        the features the target stores: it begins from those of the nodes nearest
+        the target that are similar to it (as `_propagate` begins from those
+        nearest the MLH location that are similar to the sensed input), and
+        continues through the graph of the target's channel as a propagation of
+        sensed input would, but raises the salience of the nodes it reaches to
+        MAX_SALIENCE rather than reducing it. It is recorded in
+        `goal_propagation_record`. Only the graph of the target's channel is
+        propagated through.
+
+        Args:
+            graph_id: The graph (the MLH object) the target is a node of.
+            input_channel: The input channel whose graph the target is a node of.
+            node_id: The target node.
+            object_id: The object ID the target stores, or None on a sensory
+                channel.
+        """
+        graph = self.parent_lm.get_graph(graph_id, input_channel=input_channel)
+        num_nodes = len(graph.pos)
+        features = self._get_propagation_features(graph, input_channel)
+        if not features:
+            # Nothing to compare, so sensing the target would not propagate.
+            self.model_salience.excite(graph_id, input_channel, num_nodes, [node_id])
+            return
+        reference = {name: values[node_id] for name, values in features.items()}
+        seeds, _ = self._get_nearest_nodes(graph, graph.pos[node_id])
+        seeds = self._seeds_like(input_channel, features, seeds, reference)
+        if node_id not in seeds:
+            seeds = np.concatenate([[node_id], seeds])
+
+        propagation, surface = self._get_similar_neighbors(
+            graph_id, input_channel, graph, features
+        )
+        self._propagate_from_seeds(
+            graph_id,
+            input_channel,
+            seeds,
+            propagation,
+            surface,
+            object_id=object_id,
+            hypothetical=True,
+        )
+
+    def _seeds_like(self, input_channel, features, candidates, reference):
+        """Get the candidate seeds with features similar to a reference node's.
+
+        Args:
+            input_channel: The input channel of the graph the candidates belong to.
+            features: The compared features of every node (see
+                `_get_propagation_features`).
+            candidates: The nodes that may be seeds.
+            reference: The features of the reference node.
+
+        Returns:
+            The candidates that are not on the far side of a thin wall from the
+            reference (see `_far_side_pairs`), and whose features are similar to
+            its features, in the order given.
+        """
+        return candidates[
+            ~self._far_side(features, candidates, reference)
+            & self._similar_features(input_channel, features, candidates, reference)
+        ]
+
+    def _propagate_from_seeds(
+        self,
+        graph_id,
+        input_channel,
+        seeds,
+        propagation,
+        surface,
+        object_id,
+        hypothetical=False,
+    ) -> None:
+        """Propagate from seeds through the graph, changing the reached salience.
+
+        The propagation (see `_get_propagation_order`) is recorded, with the
+        reached nodes in the order they were reached: for input that was sensed,
+        it is appended to `propagation_records`, and the salience of each reached
+        node is reduced (see `_salience_reductions`); for a hypothetical
+        propagation from a Goal's target, it is kept in `goal_propagation_record`,
+        and the salience of each reached node is raised to MAX_SALIENCE.
 
         Args:
             graph_id: The graph to propagate through.
@@ -881,38 +1001,50 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
                 wherever the node propagates to the neighbor.
             surface: The surface matrix of the graph (see
                 `_get_propagation_order`).
-            object_id: The received object ID, or None for sensory input.
+            object_id: The received object ID (or the one a Goal's target
+                stores), or None for sensory features.
+            hypothetical: Whether the propagation is from a Goal's target rather
+                than sensed input.
         """
         order, hops, stage, predecessor, min_size = self._get_propagation_order(
             seeds, propagation, surface
         )
-        reduction = self._salience_reductions(len(order))
-        self.model_salience.reduce(
-            graph_id, input_channel, propagation.shape[0], order, reduction
-        )
-        self.propagation_records.append(
-            PropagationRecord(
-                graph_id=graph_id,
-                input_channel=input_channel,
-                object_id=object_id,
-                node_order=order,
-                seeds=np.asarray(seeds, dtype=int).reshape(-1),
-                hops=hops,
-                stage=stage,
-                predecessor=predecessor,
-                sinks=order[propagation.getnnz(axis=1)[order] == 0],
-                min_size=min_size,
-                reduction=reduction,
+        num_nodes = propagation.shape[0]
+        if hypothetical:
+            reduction = np.zeros(len(order))
+            self.model_salience.excite(graph_id, input_channel, num_nodes, order)
+        else:
+            reduction = self._salience_reductions(len(order))
+            self.model_salience.reduce(
+                graph_id, input_channel, num_nodes, order, reduction
             )
+        record = PropagationRecord(
+            graph_id=graph_id,
+            input_channel=input_channel,
+            object_id=object_id,
+            node_order=order,
+            seeds=np.asarray(seeds, dtype=int).reshape(-1),
+            hops=hops,
+            stage=stage,
+            predecessor=predecessor,
+            sinks=order[propagation.getnnz(axis=1)[order] == 0],
+            min_size=min_size,
+            reduction=reduction,
+            hypothetical=hypothetical,
         )
-        explained = (
+        if hypothetical:
+            self.goal_propagation_record = record
+        else:
+            self.propagation_records.append(record)
+        nodes = (
             "with similar features"
             if object_id is None
             else f"storing object ID {object_id}"
         )
+        change = "Raised the salience of" if hypothetical else "Reduced the salience of"
         logger.debug(
-            f"Reduced the salience of {len(order)} nodes {explained} on channel "
-            f"{input_channel} of {graph_id}"
+            f"{change} {len(order)} nodes {nodes} on channel {input_channel} of "
+            f"{graph_id}"
         )
 
     def _salience_reductions(self, num_reached) -> np.ndarray:
@@ -1026,16 +1158,17 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
             min_size if stage > 0 else 0.0,
         )
 
-    def _get_nodes_nearest_mlh(
-        self, graph, mlh_location
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Get the num_propagation_neighbors nodes of a graph nearest the MLH location.
+    def _get_nearest_nodes(self, graph, location) -> tuple[np.ndarray, np.ndarray]:
+        """Get the num_propagation_neighbors nodes of a graph nearest a location.
+
+        The location is in the model's frame, e.g. the MLH location, or a Goal's
+        target.
 
         Returns:
-            The nodes, nearest first, and their distances from the MLH location.
+            The nodes, nearest first, and their distances from the location.
         """
         num_seeds = min(self.num_propagation_neighbors, len(graph.pos))
-        query = np.atleast_2d(np.asarray(mlh_location, dtype=float))
+        query = np.atleast_2d(np.asarray(location, dtype=float))
         seeds = np.asarray(
             graph.find_nearest_neighbors(query, num_neighbors=num_seeds)
         ).reshape(-1)

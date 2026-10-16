@@ -15,13 +15,19 @@ placed wherever the user last sensed. Sensing a location is one step of the LM:
 every channel receives the features (or object ID) stored at its node nearest
 the location (unless overridden, to see the goal generator reject input the MLH
 does not predict), the goal generator propagates from there, reducing the
-salience of the nodes it reaches, and the salience of every other node recovers
-by one step. The `PropagationRecord`s the goal generator logs are kept for
-stepping through the propagations node by node.
+salience of the nodes it reaches, and the salience of every other node relaxes
+by one step towards rest (0.5). The `PropagationRecord`s the goal generator logs
+are kept for stepping through the propagations node by node.
+
+A goal can be sampled as the goal generator would sample it, from the salience
+of the nodes: its hypothetical propagation from the target, through the graph of
+the target's channel, raises the salience of the part of the model the target
+is on to 1. Sampling a goal is not an LM step (the goal is generated on the step
+just taken); going to the goal is one, sensing the target's location.
 
 The MLH is a single hypothesis whose age (as burst sampling would track it) can
-be set, and grows by one on every LM step; the goal generator only propagates
-once the MLH has survived its first chance of being deleted.
+be set, and grows by one on every LM step; the goal generator only propagates,
+and generates goals, once the MLH has survived its first chance of being deleted.
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ from scipy.spatial.transform import Rotation
 
 from analysis.gui import learned_models, primitives
 from analysis.gui.primitives import Condition, Graph
+from tbp.monty.context import RuntimeContext
 from tbp.monty.frameworks.models.evidence_matching.evidence_slope_tracker import (
     EvidenceSlopeTracker,
 )
@@ -41,6 +48,7 @@ from tbp.monty.frameworks.models.goal_generation import (
     EvidenceGoalGenerator,
     PropagationRecord,
 )
+from tbp.monty.frameworks.models.model_salience import RESTING_SALIENCE, relaxed
 
 MAX_MATCH_DISTANCE = 0.01
 # The age at which burst sampling first considers deleting a hypothesis.
@@ -52,7 +60,7 @@ OVERRIDES = {"hue": None, "normal_tilt": None, "object_id": None}
 # The goal generator's parameters the GUI exposes, with their defaults.
 PARAMETERS = {
     "num_propagation_neighbors": 10,
-    "salience_recovery_steps": 50,
+    "salience_relaxation_steps": 50,
     "salience_reduction": 0.2,
     "salience_reduction_falloff": 0.5,
     # The parent LM's tolerances, which the goal generator uses as its largest
@@ -127,16 +135,19 @@ class FakeParentLM:
 
 @dataclass
 class Sensing:
-    """One sensing of a location: what each channel received, and what propagated.
+    """One sensing of a location, or one goal: what propagated, and from what.
 
     Attributes:
-        step: The LM step the sensing took place on.
-        location: The sensed location (the MLH location).
-        percepts: For each channel, a summary of what it received.
+        step: The LM step the sensing (or goal) took place on.
+        location: The sensed location (the MLH location), or the goal's target.
+        percepts: For each channel, a summary of what it received (or, for a
+            goal, of its target).
         records: The propagation on each channel that propagated.
         no_propagation: For each channel that did not propagate, why.
         salience_before: For each channel, the salience of its nodes before the
             propagation (for showing the salience as a propagation progresses).
+        goal_target: For a goal, the (channel, node) of its target, whose
+            hypothetical propagation raised salience; None for a sensing.
     """
 
     step: int
@@ -145,6 +156,7 @@ class Sensing:
     records: dict[str, PropagationRecord]
     no_propagation: dict[str, str]
     salience_before: dict[str, np.ndarray] = field(default_factory=dict)
+    goal_target: tuple[str, int] | None = None
 
 
 class Session:
@@ -158,6 +170,10 @@ class Session:
         self.mlh_age = DEFAULT_MLH_AGE
         self.step = 0
         self.sensing: Sensing | None = None
+        # The (channel, node) of the goal last sampled, until it is gone to (or
+        # anything else is sensed).
+        self.goal: tuple[str, int] | None = None
+        self.rng = np.random.RandomState(0)
         self.log: list[str] = []
         self.set_condition(condition_key)
 
@@ -178,6 +194,7 @@ class Session:
         self.gsg = self._make_gsg()
         self.step = 0
         self.sensing = None
+        self.goal = None
         self.overrides = dict(OVERRIDES)
         self.log = [f"Loaded {self.condition.title}"]
 
@@ -235,7 +252,7 @@ class Session:
         self.parameters.update(changed)
         salience = self.gsg.model_salience
         self.gsg = self._make_gsg()
-        salience.recovery_steps = self.gsg.model_salience.recovery_steps
+        salience.relaxation_steps = self.gsg.model_salience.relaxation_steps
         self.gsg.model_salience = salience
         self.log.append(
             "Parameters: "
@@ -295,21 +312,101 @@ class Session:
     # ----------------------------------------------------------- actions
 
     def reset_salience(self) -> None:
-        """Restore every node's salience to 1 and forget the last sensing."""
+        """Restore every node to rest, and forget the last sensing and goal."""
         self.gsg.model_salience.reset()
         self.sensing = None
-        self.log.append(f"Step {self.step}: salience reset")
+        self.goal = None
+        self.log.append(f"Step {self.step}: salience reset to rest")
 
     def step_salience(self, num_steps: int = 1) -> None:
-        """LM steps without sensing anything: the salience recovers."""
+        """LM steps without sensing anything: the salience relaxes towards rest."""
         for _ in range(num_steps):
             self.step += 1
             self._age_mlh(1)
-            self.gsg.model_salience.recover(mlh_graph_id="primitive")
+            self.gsg.model_salience.relax(mlh_graph_id="primitive")
         self.log.append(
-            f"Step {self.step}: salience recovered"
+            f"Step {self.step}: salience relaxed"
             + (f" ({num_steps} steps)" if num_steps > 1 else "")
         )
+
+    def sample_goal(self) -> Sensing | None:
+        """Sample a goal as the goal generator would, highlighting its target's part.
+
+        Not an LM step: the goal is generated on the step just taken. The target
+        is sampled from the nodes of every channel in proportion to their
+        salience, and a hypothetical propagation from it, through the graph of
+        its channel only, raises the salience of the nodes it reaches to 1 (see
+        `EvidenceGoalGenerator._propose_target`). It replaces the last sensing as
+        the propagation to step through; `go_to_goal` then senses the target.
+
+        Returns:
+            The goal's propagation, or None if no goal was generated (the MLH is
+            too young, or no node has any salience).
+        """
+        if not self.mlh_established:
+            self.log.append(
+                f"Step {self.step}: no goal, the MLH (age {self.mlh_age}) has not "
+                f"yet survived its first chance of being deleted"
+            )
+            return None
+        salience_before = {
+            channel: self.salience(channel).copy() for channel in self.channels
+        }
+        self.gsg.goal_propagation_record = None
+        target = self.gsg._propose_target(RuntimeContext(rng=self.rng), "primitive")
+        if target is None:
+            self.log.append(f"Step {self.step}: no goal, no node has any salience")
+            return None
+        channel, node, object_id = target
+        record = self.gsg.goal_propagation_record
+        description = f"node {node} ({self.condition.labels[channel][node]})"
+        if object_id is not None:
+            description += f", storing object ID {self.id_name(object_id)}"
+        no_propagation = {
+            other: "a goal only highlights its target's channel"
+            for other in self.channels
+            if other != channel
+        }
+        if record is None:
+            no_propagation[channel] = (
+                "the channel stores no features to propagate; only the target is "
+                "highlighted"
+            )
+        self.goal = (channel, node)
+        self.sensing = Sensing(
+            step=self.step,
+            location=np.asarray(self.graphs[channel].pos[node], dtype=float),
+            percepts={
+                other: f"goal target: {description}" if other == channel else "-"
+                for other in self.channels
+            },
+            records={} if record is None else {channel: record},
+            no_propagation=no_propagation,
+            salience_before=salience_before,
+            goal_target=(channel, node),
+        )
+        reached = 1 if record is None else len(record.node_order)
+        self.log.append(
+            f"Step {self.step}: goal sampled at {description} on {channel}; "
+            f"highlighted {reached} node(s)"
+        )
+        return self.sensing
+
+    def go_to_goal(self) -> Sensing | None:
+        """Move to the last sampled goal: one LM step, sensing its target's location.
+
+        Every channel senses what its node nearest the target stores, as when
+        clicking the target (honoring any sensed-feature overrides).
+
+        Returns:
+            What was sensed and what propagated, or None if there is no goal.
+        """
+        if self.goal is None:
+            self.log.append(f"Step {self.step}: no goal to go to; sample one first")
+            return None
+        channel, node = self.goal
+        self.log.append(f"Step {self.step + 1}: going to the goal (node {node})")
+        return self.sense(self.graphs[channel].pos[node])
 
     def sense(self, location) -> Sensing:
         """Sense a location: one LM step, with input to every channel.
@@ -317,15 +414,17 @@ class Session:
         Each channel receives the features (or object ID) stored at its node nearest
         the location, as if the MLH were exactly right; the goal generator
         propagates from the nodes nearest the location, reducing the salience of
-        the nodes it reaches, and the salience of the other nodes recovers by one
+        the nodes it reaches, and the salience of the other nodes relaxes by one
         step. As in the LM, the MLH hypothesis is aged by the step's update before
         the goal generator steps, and nothing propagates unless it has survived
-        its first chance of being deleted.
+        its first chance of being deleted. A goal sampled on the previous step is
+        forgotten, whether or not this is its location.
 
         Returns:
             What was sensed and what propagated.
         """
         location = np.asarray(location, dtype=float)
+        self.goal = None
         self.step += 1
         self._age_mlh(1)
         self.lm.mlh = {**self.lm.mlh, "location": location}
@@ -373,7 +472,7 @@ class Session:
     # ------------------------------------------------------------ queries
 
     def salience(self, channel, progress=None) -> np.ndarray:
-        """Get the salience (0 to 1) of each node of a channel.
+        """Get the salience (0 to 1, 0.5 at rest) of each node of a channel.
 
         Args:
             channel: The channel.
@@ -390,17 +489,16 @@ class Session:
         if progress is None or record is None or progress >= len(record.node_order):
             return current
         # Mid-propagation: the nodes reached so far show their actual salience;
-        # the ones not reached yet what they had before the propagation, plus the
-        # recovery of the steps since (none on the step they were reached).
+        # the ones not reached yet what they had before the propagation, relaxed
+        # by the steps since (none on the step they were reached).
         before = self.sensing.salience_before[channel]
         if len(before) != num_nodes:
             return current
         pending = record.node_order[progress:]
-        recovery_steps = self.gsg.model_salience.recovery_steps
-        recovered = (
-            (self.step - self.sensing.step) / recovery_steps if recovery_steps else 0.0
+        amount = (self.step - self.sensing.step) * (
+            self.gsg.model_salience.relaxation_rate
         )
-        current[pending] = np.minimum(before[pending] + recovered, 1.0)
+        current[pending] = relaxed(before[pending], amount)
         return current
 
     def edge_matrices(self, channel):
@@ -428,6 +526,8 @@ class Session:
             "node": f"{node} on {channel}",
             "region": str(self.condition.labels[channel][node]),
         }
+        if self.goal == (channel, node):
+            details["goal"] = "target of the sampled goal"
         if self.is_id_channel(channel):
             object_id = int(graph.feature("object_id")[node, 0])
             details["object ID"] = f"{self.id_name(object_id)} ({object_id})"
@@ -462,16 +562,22 @@ class Session:
         else:
             details["propagates"] = f"yes, to its {similar.sum()} similar neighbors"
         salience = float(self.salience(channel)[node])
-        if salience >= 1:
-            details["salience"] = "1.00 (full)"
+        if salience == RESTING_SALIENCE:
+            details["salience"] = f"{salience:.2f} (at rest)"
         else:
-            recovery_steps = gsg.model_salience.recovery_steps
-            remaining = int(np.ceil((1 - salience) * recovery_steps))
-            details["salience"] = f"{salience:.2f}" + (
-                " (never sampled)" if salience <= 0 else ""
-            )
-            details["recovery"] = (
-                f"back to 1 in {remaining} step(s)" if recovery_steps else "never"
+            if salience > RESTING_SALIENCE:
+                state = "highlighted by a goal"
+            elif salience <= 0:
+                state = "explained, never sampled"
+            else:
+                state = "explained"
+            details["salience"] = f"{salience:.2f} ({state})"
+            rate = gsg.model_salience.relaxation_rate
+            remaining = int(np.ceil(round(abs(salience - RESTING_SALIENCE) / rate, 9)))
+            details["relaxation"] = (
+                f"back to rest ({RESTING_SALIENCE}) in {remaining} step(s)"
+                if rate
+                else "never"
             )
         if self.sensing is not None and channel in self.sensing.records:
             record = self.sensing.records[channel]
@@ -479,13 +585,18 @@ class Session:
             if len(position):
                 position = int(position[0])
                 stage = int(record.stage[position])
+                change = (
+                    "salience raised to 1 (goal)"
+                    if record.hypothetical
+                    else f"salience reduced by {record.reduction[position]:.2f}"
+                )
                 details["last propagation"] = (
                     f"reached #{position + 1} of {len(record.node_order)}, "
                     f"{record.hops[position]} hop(s) "
                     + ("from the seeds" if stage == 0 else f"into push-through {stage}")
                     + (" (seed)" if node in record.seeds else "")
                     + (" (sink)" if node in record.sinks else "")
-                    + f"; salience reduced by {record.reduction[position]:.2f}"
+                    + f"; {change}"
                 )
             else:
                 details["last propagation"] = "not reached"
@@ -564,7 +675,7 @@ class Session:
             )
         graph = self.graphs[channel]
         gsg = self.gsg
-        seeds, distances = gsg._get_nodes_nearest_mlh(graph, location)
+        seeds, distances = gsg._get_nearest_nodes(graph, location)
         nearby = distances <= self.lm.max_match_distance
         if not nearby.any():
             return (

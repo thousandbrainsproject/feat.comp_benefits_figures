@@ -97,6 +97,7 @@ from scipy.spatial import KDTree
 from scipy.spatial.transform import Rotation
 
 from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
+from tbp.monty.frameworks.models.model_salience import RESTING_SALIENCE
 from tbp.monty.frameworks.utils.graph_matching_utils import (
     add_pose_features_to_tolerances,
 )
@@ -386,7 +387,9 @@ class Propagator:
                     channel_order[reached] = np.arange(len(reached)) / max(
                         len(reached) - 1, 1
                     )
-            reached_nodes.append(self.gsg.get_salience(graph_id, channel) < 1)
+            reached_nodes.append(
+                self.gsg.get_salience(graph_id, channel) < RESTING_SALIENCE
+            )
             order.append(channel_order)
         return np.concatenate(reached_nodes), np.concatenate(order)
 
@@ -747,7 +750,7 @@ def plot_compartments(memory, _mug, objects):
 
 
 def simulate_visits(propagator, graph_id, first_seed, rng):
-    """Visit every node of a graph as inference would, without salience recovering.
+    """Visit every node of a graph as inference would, without salience relaxing.
 
     Beginning with the first seed, the sensed features of a seed node propagate,
     and the next seed is sampled uniformly from the nodes not yet reached, until

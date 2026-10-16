@@ -31,6 +31,10 @@ from tbp.monty.frameworks.models.evidence_matching.evidence_slope_tracker import
     EvidenceSlopeTracker,
 )
 from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
+from tbp.monty.frameworks.models.model_salience import (
+    MAX_SALIENCE,
+    RESTING_SALIENCE,
+)
 from tbp.monty.frameworks.utils.graph_matching_utils import (
     add_pose_features_to_tolerances,
 )
@@ -311,7 +315,7 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         self.gsg = EvidenceGoalGenerator(
             elapsed_steps_trigger=10,
             num_propagation_neighbors=6,
-            salience_recovery_steps=50,
+            salience_relaxation_steps=50,
             salience_reduction=0.2,
             salience_reduction_falloff=0.5,
         )
@@ -361,7 +365,7 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             [self.sensor_percept, lm_percept("learning_module_0", WHEEL_ID)]
         )
 
-        reduced = np.nonzero(self.car_salience() < 1)[0]
+        reduced = np.nonzero(self.car_salience() < RESTING_SALIENCE)[0]
         nptest.assert_array_equal(
             reduced,
             np.arange(10),
@@ -385,7 +389,9 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         )
 
         salience = self.gsg.get_salience(TOP_ID, "learning_module_0")
-        self.assertTrue(np.all(salience < 1), "Every node should be reached.")
+        self.assertTrue(
+            np.all(salience < RESTING_SALIENCE), "Every node should be reached."
+        )
 
     def test_propagation_is_recorded_in_the_order_nodes_were_reached(self) -> None:
         self.gsg._propagate_from_observations(
@@ -430,7 +436,8 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         (record,) = self.gsg.propagation_records
         nptest.assert_allclose(record.reduction, np.linspace(0.2, 0.1, 10))
         nptest.assert_allclose(
-            self.car_salience()[record.node_order], 1 - np.linspace(0.2, 0.1, 10)
+            self.car_salience()[record.node_order],
+            RESTING_SALIENCE - np.linspace(0.2, 0.1, 10),
         )
 
     def test_reduction_is_uniform_without_falloff(self) -> None:
@@ -440,8 +447,8 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             [lm_percept("learning_module_0", WHEEL_ID)]
         )
 
-        nptest.assert_allclose(self.car_salience()[:10], 0.8)
-        nptest.assert_allclose(self.car_salience()[10:], 1.0)
+        nptest.assert_allclose(self.car_salience()[:10], RESTING_SALIENCE - 0.2)
+        nptest.assert_allclose(self.car_salience()[10:], RESTING_SALIENCE)
 
     def test_full_falloff_leaves_the_last_node_reached_unreduced(self) -> None:
         self.gsg.salience_reduction_falloff = 1.0
@@ -453,7 +460,7 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         (record,) = self.gsg.propagation_records
         self.assertAlmostEqual(record.reduction[0], 0.2)
         self.assertAlmostEqual(record.reduction[-1], 0.0)
-        self.assertEqual(self.car_salience()[record.node_order[-1]], 1.0)
+        self.assertEqual(self.car_salience()[record.node_order[-1]], RESTING_SALIENCE)
 
     def test_propagation_records_only_hold_the_current_steps_propagations(
         self,
@@ -476,7 +483,7 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             [lm_percept("learning_module_0", WHEEL_ID)]
         )
 
-        self.assertTrue(np.all(self.car_salience() == 1))
+        self.assertTrue(np.all(self.car_salience() == RESTING_SALIENCE))
 
     def test_propagates_from_the_nearest_nodes_storing_the_received_id(self) -> None:
         # At the border between the wheel and the body, the nearest nodes store
@@ -489,7 +496,9 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
 
         (record,) = self.gsg.propagation_records
         self.assertTrue(np.all(record.seeds < 10), "Only wheel nodes are seeds.")
-        nptest.assert_array_equal(np.nonzero(self.car_salience() < 1)[0], np.arange(10))
+        nptest.assert_array_equal(
+            np.nonzero(self.car_salience() < RESTING_SALIENCE)[0], np.arange(10)
+        )
 
     def test_nodes_storing_other_ids_do_not_stop_propagation(self) -> None:
         # A wheel with one noisy node storing the body's ID in its middle.
@@ -506,7 +515,7 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         )
 
         nptest.assert_array_equal(
-            self.car_salience() < 1,
+            self.car_salience() < RESTING_SALIENCE,
             object_ids == WHEEL_ID,
             "Up to max_dissimilar_neighbors neighbors may store another ID, so the "
             "propagation goes past the noisy node, but does not reach it.",
@@ -529,7 +538,9 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             [lm_percept("learning_module_0", WHEEL_ID)]
         )
 
-        nptest.assert_array_equal(np.nonzero(self.car_salience() < 1)[0], np.arange(10))
+        nptest.assert_array_equal(
+            np.nonzero(self.car_salience() < RESTING_SALIENCE)[0], np.arange(10)
+        )
 
     def test_propagation_through_a_small_id_region_is_pushed_through(self) -> None:
         # A logo of 3 nodes at the end of a line of 100, fewer than
@@ -559,7 +570,7 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             [lm_percept("learning_module_5", WHEEL_ID)]
         )
 
-        self.assertTrue(np.all(self.car_salience() == 1))
+        self.assertTrue(np.all(self.car_salience() == RESTING_SALIENCE))
 
     # ------------------------- MLH age -------------------------
 
@@ -582,7 +593,7 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         self.assertFalse(
             self.propagates(), "Eligible for deletion, but not yet considered."
         )
-        self.assertTrue(np.all(self.car_salience() == 1))
+        self.assertTrue(np.all(self.car_salience() == RESTING_SALIENCE))
 
         self.trackers[TOP_ID] = slope_tracker(MIN_AGE + 1)
         self.assertTrue(self.propagates())
@@ -628,42 +639,44 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
 
         self.assertTrue(self.propagates())
 
-    def test_salience_recovers_while_mlh_is_too_young_to_propagate(self) -> None:
+    def test_salience_relaxes_while_mlh_is_too_young_to_propagate(self) -> None:
         self.trackers[TOP_ID] = slope_tracker(MIN_AGE)
-        self.salience("learning_module_0")[:] = 0.5
+        self.salience("learning_module_0")[:] = 0.3
 
         self.gsg._update_salience([lm_percept("learning_module_0", WHEEL_ID)])
 
         self.assertEqual(self.gsg.propagation_records, [])
-        nptest.assert_allclose(self.car_salience(), 0.52)
+        nptest.assert_allclose(self.car_salience(), 0.31)
 
     # ------------------------- Salience dynamics -------------------------
-    # How salience recovers is tested with ModelSalience; these test how the
-    # GSG's propagation and recovery combine on each step.
+    # How salience relaxes is tested with ModelSalience; these test how the
+    # GSG's propagation and relaxation combine on each step.
 
-    def test_reached_nodes_do_not_recover_on_the_step_they_are_reached(
+    def test_reached_nodes_do_not_relax_on_the_step_they_are_reached(
         self,
     ) -> None:
         self.gsg.salience_reduction_falloff = 0.0
-        self.salience("learning_module_0")[:] = 0.5
-        self.salience("learning_module_1")[:] = 0.5
+        self.salience("learning_module_0")[:] = 0.3
+        self.salience("learning_module_1")[:] = 0.7
 
         self.gsg._update_salience([lm_percept("learning_module_0", WHEEL_ID)])
 
-        nptest.assert_allclose(self.car_salience()[:10], 0.3, err_msg="Reduced only.")
-        nptest.assert_allclose(self.car_salience()[10:], 0.52)
+        nptest.assert_allclose(self.car_salience()[:10], 0.1, err_msg="Reduced only.")
+        nptest.assert_allclose(self.car_salience()[10:], 0.31)
         nptest.assert_allclose(
             self.gsg.get_salience(TOP_ID, "learning_module_1"),
-            0.52,
-            err_msg="Nodes of other channels recover.",
+            0.69,
+            err_msg="Nodes of other channels relax, from above as from below.",
         )
 
     def test_repeated_visits_drive_salience_to_zero(self) -> None:
         self.gsg.salience_reduction_falloff = 0.0
 
-        for visit in range(1, 6):
+        for visit in range(1, 4):
             self.gsg._update_salience([lm_percept("learning_module_0", WHEEL_ID)])
-            nptest.assert_allclose(self.car_salience()[:10], 1 - 0.2 * visit)
+            nptest.assert_allclose(
+                self.car_salience()[:10], max(RESTING_SALIENCE - 0.2 * visit, 0)
+            )
         self.assertTrue(np.all(self.car_salience()[:10] == 0))
 
         self.gsg._update_salience([lm_percept("learning_module_0", WHEEL_ID)])
@@ -671,7 +684,17 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             np.all(self.car_salience()[:10] == 0), "Salience is clamped at 0."
         )
 
-    def test_salience_of_previous_mlh_recovers_and_is_dropped_once_full(
+    def test_visits_reduce_highlighted_salience_through_rest_to_zero(self) -> None:
+        # The wheel, highlighted by a Goal, is then sensed on every step.
+        self.gsg.salience_reduction_falloff = 0.0
+        self.salience("learning_module_0")[:10] = MAX_SALIENCE
+
+        for visit in range(1, 6):
+            self.gsg._update_salience([lm_percept("learning_module_0", WHEEL_ID)])
+            nptest.assert_allclose(self.car_salience()[:10], 1 - 0.2 * visit)
+        self.assertTrue(np.all(self.car_salience()[:10] == 0))
+
+    def test_salience_of_previous_mlh_relaxes_and_is_dropped_once_at_rest(
         self,
     ) -> None:
         self.gsg.salience_reduction_falloff = 0.0
@@ -679,13 +702,14 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         self.graphs["other_object"] = {"learning_module_0": car_line_graph()}
         self.mlh = {**self.mlh, "graph_id": "other_object"}
 
-        for _ in range(9):
+        # Reduced to 0.3, the wheel relaxes back to rest by 0.01 a step.
+        for _ in range(19):
             self.gsg._update_salience([])
         self.assertIn((TOP_ID, "learning_module_0"), self.gsg.model_salience.tracked())
         nptest.assert_allclose(
             self.salience("learning_module_0")[:10],
-            0.98,
-            err_msg="Not the MLH, but still recovering.",
+            0.49,
+            err_msg="Not the MLH, but still relaxing.",
         )
 
         self.gsg._update_salience([])
@@ -695,10 +719,11 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
 
         self.mlh = self.mlh_at_node(4)
         self.assertTrue(
-            np.all(self.car_salience() == 1), "Recreated at 1 as the MLH again."
+            np.all(self.car_salience() == RESTING_SALIENCE),
+            "Recreated at rest as the MLH again.",
         )
 
-    def test_salience_of_mlh_is_kept_once_full(self) -> None:
+    def test_salience_of_mlh_is_kept_once_at_rest(self) -> None:
         self.gsg._propagate_from_observations(
             [lm_percept("learning_module_0", WHEEL_ID)]
         )
@@ -707,16 +732,16 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             self.gsg._update_salience([])
 
         self.assertIn((TOP_ID, "learning_module_0"), self.gsg.model_salience.tracked())
-        self.assertTrue(np.all(self.car_salience() == 1))
+        self.assertTrue(np.all(self.car_salience() == RESTING_SALIENCE))
 
-    def test_reset_restores_full_salience(self) -> None:
+    def test_reset_restores_resting_salience(self) -> None:
         self.gsg._propagate_from_observations(
             [lm_percept("learning_module_0", WHEEL_ID)]
         )
 
         self.gsg.reset()
 
-        self.assertTrue(np.all(self.car_salience() == 1))
+        self.assertTrue(np.all(self.car_salience() == RESTING_SALIENCE))
 
     # ------------------------- Selection -------------------------
 
@@ -776,6 +801,101 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
         self.salience(SENSOR_CHANNEL)[2] = 1.0
         channel, node_id, object_id = self.gsg._select_target(make_ctx(), TOP_ID)
         self.assertEqual((channel, node_id, object_id), (SENSOR_CHANNEL, 2, None))
+
+    # ------------------------- Goal highlighting -------------------------
+
+    def test_goal_target_highlights_its_part_of_its_channel(self) -> None:
+        self.gsg._excite_target_region(TOP_ID, "learning_module_0", 3, WHEEL_ID)
+
+        nptest.assert_array_equal(
+            np.flatnonzero(self.car_salience() == MAX_SALIENCE),
+            np.arange(10),
+            "The target's wheel is highlighted, not the body or the second wheel.",
+        )
+        self.assertTrue(np.all(self.car_salience()[10:] == RESTING_SALIENCE))
+        for channel in ("learning_module_1", SENSOR_CHANNEL):
+            self.assertTrue(
+                np.all(self.salience(channel) == RESTING_SALIENCE),
+                f"Only the target's channel is highlighted, not {channel}.",
+            )
+
+    def test_goal_propagation_is_recorded_as_hypothetical(self) -> None:
+        self.gsg._excite_target_region(TOP_ID, "learning_module_0", 3, WHEEL_ID)
+
+        record = self.gsg.goal_propagation_record
+        self.assertTrue(record.hypothetical)
+        self.assertEqual(record.input_channel, "learning_module_0")
+        self.assertEqual(record.object_id, WHEEL_ID)
+        self.assertIn(3, record.seeds)
+        nptest.assert_array_equal(np.sort(record.node_order), np.arange(10))
+        nptest.assert_array_equal(record.reduction, 0)
+        self.assertEqual(
+            self.gsg.propagation_records, [], "Not a propagation of sensed input."
+        )
+
+    def test_goal_highlights_from_its_target_not_the_mlh_location(self) -> None:
+        self.mlh = self.mlh_at_node(30)  # On the second wheel
+
+        self.gsg._excite_target_region(TOP_ID, "learning_module_0", 3, WHEEL_ID)
+
+        nptest.assert_array_equal(
+            np.flatnonzero(self.car_salience() == MAX_SALIENCE), np.arange(10)
+        )
+
+    def test_goal_highlights_explained_nodes_again(self) -> None:
+        self.salience("learning_module_0")[:10] = 0.0
+
+        self.gsg._excite_target_region(TOP_ID, "learning_module_0", 3, WHEEL_ID)
+
+        nptest.assert_array_equal(self.car_salience()[:10], MAX_SALIENCE)
+
+    def test_generated_goal_highlights_the_part_of_its_target(self) -> None:
+        self.salience("learning_module_1")[:] = 0.0
+        self.salience(SENSOR_CHANNEL)[:] = 0.0
+        self.salience("learning_module_0")[:] = 0.0
+        self.salience("learning_module_0")[3] = 1.0
+
+        goal = self.gsg._generate_goal(make_ctx(), [self.sensor_percept])
+
+        self.assertEqual(goal.info["target_node_id"], 3)
+        nptest.assert_array_equal(self.car_salience()[:10], MAX_SALIENCE)
+        nptest.assert_array_equal(self.car_salience()[10:], 0.0)
+        self.assertEqual(
+            self.gsg.goal_propagation_record.input_channel,
+            goal.info["model_frame_input_channel"],
+        )
+
+    def test_goal_propagation_record_only_holds_the_current_steps_goal(self) -> None:
+        self.gsg._excite_target_region(TOP_ID, "learning_module_0", 3, WHEEL_ID)
+        self.trackers[TOP_ID] = slope_tracker(MIN_AGE)  # No goal on this step.
+
+        self.gsg.step(make_ctx(), [self.sensor_percept])
+
+        self.assertIsNone(self.gsg.goal_propagation_record)
+
+    def test_sensor_dwells_on_a_highlighted_part_until_it_is_least_salient(
+        self,
+    ) -> None:
+        # A Goal highlights the wheel, which is then sensed on every step.
+        self.gsg.salience_reduction_falloff = 0.0
+        self.gsg._excite_target_region(TOP_ID, "learning_module_0", 3, WHEEL_ID)
+
+        def wheel_share() -> float:
+            counts = self.sample_targets(num_samples=1000)
+            return sum(counts[("learning_module_0", node)] for node in range(10)) / (
+                sum(
+                    count
+                    for (channel, _), count in counts.items()
+                    if channel == "learning_module_0"
+                )
+            )
+
+        # 10 of the car's 35 nodes, twice as salient as the rest.
+        self.assertGreater(wheel_share(), 10 / 35)
+        for _ in range(4):
+            self.gsg._update_salience([lm_percept("learning_module_0", WHEEL_ID)])
+        nptest.assert_allclose(self.car_salience()[:10], 0.2)
+        self.assertLess(wheel_share(), 10 / 35, "Now less salient than the rest.")
 
     def test_no_goal_when_no_node_has_salience(self) -> None:
         self.salience("learning_module_0")[:] = 0.0
@@ -1143,7 +1263,7 @@ class SensoryFeaturePropagationTest(unittest.TestCase):
         }
         self.gsg.reset()
         self.gsg._propagate_from_observations([percept])
-        return self.gsg.get_salience(TOP_ID, SENSOR_CHANNEL) < 1
+        return self.gsg.get_salience(TOP_ID, SENSOR_CHANNEL) < RESTING_SALIENCE
 
     def test_propagates_across_a_face_but_not_around_an_edge(self) -> None:
         # Two faces of a cube meeting at an edge.
@@ -1158,6 +1278,21 @@ class SensoryFeaturePropagationTest(unittest.TestCase):
 
         self.assertTrue(np.all(reached[:100]), "The sensed face is reached.")
         self.assertFalse(np.any(reached[100:]), "The adjacent face is not.")
+
+    def test_goal_target_highlights_its_face_but_not_around_an_edge(self) -> None:
+        top = plane_points([0, 0, 0.02], [1, 0, 0], [0, 1, 0], 10, 10)
+        side = plane_points([0.02, 0, 0], [0, 0, 1], [0, 1, 0], 10, 10)
+        self.graph = surface_graph(
+            np.vstack([top, side]),
+            np.vstack([np.tile([0, 0, 1], (100, 1)), np.tile([1, 0, 0], (100, 1))]),
+        )
+        self.gsg.reset()
+
+        self.gsg._excite_target_region(TOP_ID, SENSOR_CHANNEL, 155)
+
+        salience = self.gsg.get_salience(TOP_ID, SENSOR_CHANNEL)
+        nptest.assert_array_equal(salience[100:], MAX_SALIENCE)
+        nptest.assert_array_equal(salience[:100], RESTING_SALIENCE)
 
     def test_propagates_around_a_cylinder_but_not_onto_its_cap(self) -> None:
         radius = 0.02
@@ -1557,7 +1692,7 @@ class ObjectIdPropagationTest(unittest.TestCase):
             ]
         )
         return {
-            channel: self.gsg.get_salience(TOP_ID, channel) < 1
+            channel: self.gsg.get_salience(TOP_ID, channel) < RESTING_SALIENCE
             for channel in self.graphs
         }
 
