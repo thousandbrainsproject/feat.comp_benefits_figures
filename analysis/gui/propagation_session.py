@@ -20,7 +20,9 @@ by one step towards rest (0.5). The `PropagationRecord`s the goal generator logs
 are kept for stepping through the propagations node by node.
 
 A goal can be sampled as the goal generator would sample it, from the salience
-of the nodes: its hypothetical propagation from the target, through the graph of
+of the nodes, or its target selected (any node with salience, as the goal
+generator could have sampled it): its hypothetical propagation from the target,
+through the graph of
 the target's channel, raises the salience of the part of the model the target
 is on to 1. Sampling a goal is not an LM step (the goal is generated on the step
 just taken); going to the goal is one, sensing the target's location.
@@ -174,6 +176,8 @@ class Session:
         # anything else is sensed).
         self.goal: tuple[str, int] | None = None
         self.rng = np.random.RandomState(0)
+        # Why the last action did not generate a goal, for the user to see.
+        self.notice: str | None = None
         self.log: list[str] = []
         self.set_condition(condition_key)
 
@@ -343,21 +347,101 @@ class Session:
             The goal's propagation, or None if no goal was generated (the MLH is
             too young, or no node has any salience).
         """
-        if not self.mlh_established:
-            self.log.append(
-                f"Step {self.step}: no goal, the MLH (age {self.mlh_age}) has not "
-                f"yet survived its first chance of being deleted"
-            )
+        if not self.goals_allowed():
             return None
-        salience_before = {
-            channel: self.salience(channel).copy() for channel in self.channels
-        }
+        salience_before = self._salience_snapshot()
         self.gsg.goal_propagation_record = None
         target = self.gsg._propose_target(RuntimeContext(rng=self.rng), "primitive")
         if target is None:
-            self.log.append(f"Step {self.step}: no goal, no node has any salience")
+            self._refuse_goal("no node has any salience")
             return None
-        channel, node, object_id = target
+        return self._record_goal(*target, salience_before, how="sampled")
+
+    def select_goal(self, channel, node) -> Sensing | None:
+        """Select a goal's target, as if the goal generator had sampled it.
+
+        As `sample_goal`, but with the given target: its hypothetical propagation
+        raises the salience of its part of its channel's graph to 1. A node with
+        no salience cannot be a goal's target, as the goal generator never samples
+        it.
+
+        Returns:
+            The goal's propagation, or None if no goal was selected (the MLH is
+            too young, or the node has no salience).
+        """
+        if not self.goals_allowed():
+            return None
+        if self.salience(channel)[node] <= 0:
+            self._refuse_goal(
+                f"node {node} of {channel} has no salience (0), so it cannot be a "
+                "goal's target"
+            )
+            return None
+        object_id = None
+        if self.is_id_channel(channel):
+            object_id = int(self.graphs[channel].feature("object_id")[node, 0])
+        salience_before = self._salience_snapshot()
+        self.gsg.goal_propagation_record = None
+        self.gsg._excite_target_region("primitive", channel, node, object_id)
+        return self._record_goal(
+            channel, node, object_id, salience_before, how="selected"
+        )
+
+    def goal_candidates(self, channel, node) -> list[tuple[str, int]]:
+        """Get the channels' nodes a goal at a channel's node could be taken from.
+
+        Returns:
+            The (channel, node) given first, then for each other channel whose
+            graph has a node within max_match_distance of its location (i.e. it
+            is represented there), its nearest node.
+        """
+        location = self.graphs[channel].pos[node]
+        candidates = [(channel, int(node))]
+        for other in self.channels:
+            if other == channel:
+                continue
+            nearest = self.nearest_node(other, location)
+            distance = np.linalg.norm(self.graphs[other].pos[nearest] - location)
+            if distance <= self.lm.max_match_distance:
+                candidates.append((other, nearest))
+        return candidates
+
+    def goals_allowed(self) -> bool:
+        """Check that the goal generator generates goals, as the MLH is old enough.
+
+        Returns:
+            Whether goals can be generated; if not, the reason is noted.
+        """
+        if self.mlh_established:
+            return True
+        self._refuse_goal(
+            f"the MLH (age {self.mlh_age}) has not yet survived its first chance of "
+            "being deleted"
+        )
+        return False
+
+    def _refuse_goal(self, reason: str) -> None:
+        self.notice = f"No goal: {reason}."
+        self.log.append(f"Step {self.step}: no goal, {reason}")
+
+    def _salience_snapshot(self) -> dict[str, np.ndarray]:
+        return {channel: self.salience(channel).copy() for channel in self.channels}
+
+    def _record_goal(
+        self, channel, node, object_id, salience_before, how: str
+    ) -> Sensing:
+        """Keep a goal whose target's part was highlighted as the last propagation.
+
+        Args:
+            channel: The channel of the goal's target.
+            node: The goal's target node.
+            object_id: The object ID the target stores, or None.
+            salience_before: The salience of every channel before the goal.
+            how: How the target was chosen ("sampled" or "selected").
+
+        Returns:
+            The goal's propagation.
+        """
         record = self.gsg.goal_propagation_record
         description = f"node {node} ({self.condition.labels[channel][node]})"
         if object_id is not None:
@@ -387,7 +471,7 @@ class Session:
         )
         reached = 1 if record is None else len(record.node_order)
         self.log.append(
-            f"Step {self.step}: goal sampled at {description} on {channel}; "
+            f"Step {self.step}: goal {how} at {description} on {channel}; "
             f"highlighted {reached} node(s)"
         )
         return self.sensing
@@ -402,6 +486,7 @@ class Session:
             What was sensed and what propagated, or None if there is no goal.
         """
         if self.goal is None:
+            self.notice = "No goal to go to: sample or select one first."
             self.log.append(f"Step {self.step}: no goal to go to; sample one first")
             return None
         channel, node = self.goal

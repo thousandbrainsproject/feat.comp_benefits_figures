@@ -25,7 +25,8 @@ In the app:
   object-ID channels with noisy or striped IDs), or a learned model (the 10
   distinct YCB objects learned by the surface agent, or the compositional
   objects learned by LM 2 of the compositional Monty, with their object-ID
-  channels), and the channel whose graph to display.
+  channels), and the channel whose graph to display, or all of them
+  superimposed (told apart by their node symbols).
 - Click a node (or pick a landmark) to sense its location: that is one step of
   the LM, on which every channel receives the features or object ID stored at
   its nearest node, which then propagate, reducing the salience of the nodes
@@ -37,7 +38,11 @@ In the app:
 - "Sample goal" samples a goal's target as the goal generator would (in
   proportion to salience, across all channels), and shows its hypothetical
   propagation, through the target's channel, which raises the salience of the
-  part the target is on to 1 (not an LM step). "Go to goal" then senses the
+  part the target is on to 1 (not an LM step). Or, with "Clicking a node" set
+  to select a goal, click a node to take it as the target, as if it had been
+  sampled (not a node with no salience, which is never sampled); with every
+  channel superimposed, a dropdown asks which channel's model to take it from
+  when several channels have a node there. "Go to goal" then senses the
   target's location (one LM step), whose input reduces that salience: going to
   the same part again and again drives it below the rest of the object, until
   goals are sampled elsewhere.
@@ -67,6 +72,7 @@ In the app:
 from __future__ import annotations
 
 import argparse
+import json
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -117,6 +123,14 @@ REGION_COLORS = {
     "other": "#bbbbbb",
 }
 COLOR_MODES = ["Propagation", "Hue", "Normals", "Salience", "Object ID", "Region"]
+# The "Displayed channel" value showing every channel's graph, superimposed.
+ALL_CHANNELS = "__all__"
+# The node symbols telling the channels apart when they are superimposed.
+CHANNEL_SYMBOLS = ["circle", "square", "diamond", "cross", "x"]
+CLICK_MODES = [
+    {"label": "Sense its location", "value": "sense"},
+    {"label": "Select it as a goal", "value": "goal"},
+]
 OVERLAYS = {
     "seeds": "Seeds",
     "current": "Node being reached",
@@ -151,6 +165,38 @@ CONDITION_OPTIONS = [
 
 
 # ------------------------------------------------------------------- figure
+
+
+def displayed_channels(session: Session, channel: str) -> list[str]:
+    """The channels whose graphs are shown: one, or all of them superimposed.
+
+    Returns:
+        The channels, in the order their node traces are drawn.
+    """
+    return list(session.channels) if channel == ALL_CHANNELS else [channel]
+
+
+def channel_options(session: Session) -> list[dict]:
+    """Dropdown options for the displayed channel.
+
+    Returns:
+        Dash dropdown options: each channel, then all of them if there are several.
+    """
+    options = [{"label": channel, "value": channel} for channel in session.channels]
+    if len(session.channels) > 1:
+        options.append({"label": "all (superimposed)", "value": ALL_CHANNELS})
+    return options
+
+
+def last_record(session: Session, channel: str) -> PropagationRecord | None:
+    """The last propagation (of a sensing or a goal) on a channel, if any.
+
+    Returns:
+        The propagation record, or None.
+    """
+    if session.sensing is None:
+        return None
+    return session.sensing.records.get(channel)
 
 
 def color_table(names, preset: dict) -> dict[str, str]:
@@ -224,7 +270,9 @@ def salience_marker(salience: np.ndarray, emphasize_low: bool) -> dict:
     }
 
 
-def hover_texts(session: Session, channel: str, progress: int) -> list[str]:
+def hover_texts(
+    session: Session, channel: str, progress: int, show_channel: bool = False
+) -> list[str]:
     graph = session.graphs[channel]
     labels = session.condition.labels[channel]
     salience = session.salience(channel)
@@ -247,7 +295,11 @@ def hover_texts(session: Session, channel: str, progress: int) -> list[str]:
     has_hue = "hsv" in graph.feature_mapping
     texts = []
     for node in range(len(graph.pos)):
-        lines = [f"<b>node {node}</b> · {labels[node]}"]
+        lines = [
+            f"<b>node {node}</b> · "
+            + (f"{channel} · " if show_channel else "")
+            + str(labels[node])
+        ]
         if is_id:
             object_id = int(graph.feature("object_id")[node, 0])
             lines.append(f"object ID: {session.id_name(object_id)}")
@@ -320,6 +372,147 @@ def legend_marker(name, color, symbol="circle", size=6):
     )
 
 
+def node_marker(
+    session: Session,
+    channel: str,
+    progress: int,
+    color_mode: str,
+    emphasize_low: bool,
+    tables: dict[str, dict[str, str]],
+) -> tuple[dict, list]:
+    """Color a channel's nodes.
+
+    Args:
+        session: The session.
+        channel: The channel.
+        progress: How many nodes of the channel's last propagation to color as
+            reached.
+        color_mode: One of COLOR_MODES.
+        emphasize_low: See `build_figure`.
+        tables: The color of each object ID name ("Object ID") and region label
+            ("Region"), shared by the displayed channels.
+
+    Returns:
+        The nodes' marker settings, and the legend entries for their colors.
+    """
+    graph = session.graphs[channel]
+    num_nodes = len(graph.pos)
+    record = last_record(session, channel)
+    marker: dict = {"size": marker_size(num_nodes), "line": {"width": 0}}
+    legend = []
+    if color_mode == "Propagation":
+        colors = np.full(num_nodes, UNREACHED_COLOR, dtype=object)
+        if record is not None and progress:
+            colors[record.node_order[:progress]] = stage_colors(record, progress)
+        marker["color"] = colors.tolist()
+        legend.append(legend_marker("reached: hops from seeds (dark→light)", "#3b528b"))
+        legend.append(legend_marker("pushed through: hops from frontier", "#fd8d3c"))
+    elif color_mode == "Hue" and "hsv" in graph.feature_mapping:
+        hsv = np.clip(graph.feature("hsv"), 0, 1)
+        marker["color"] = [mcolors.to_hex(c) for c in mcolors.hsv_to_rgb(hsv)]
+    elif color_mode == "Normals":
+        rgb = (graph.normals + 1) / 2
+        marker["color"] = [mcolors.to_hex(c) for c in rgb]
+    elif color_mode == "Salience":
+        salience = session.salience(channel, progress if record else None)
+        marker.update(salience_marker(salience, emphasize_low))
+    elif color_mode == "Object ID" and session.is_id_channel(channel):
+        names = [session.id_name(i) for i in graph.feature("object_id")[:, 0]]
+        colors = tables["Object ID"]
+        marker["color"] = [colors[name] for name in names]
+        legend.extend(legend_marker(name, colors[name]) for name in sorted(set(names)))
+    else:  # Region, or a mode the channel has no features for.
+        labels = session.condition.labels[channel]
+        colors = tables["Region"]
+        marker["color"] = [colors[label] for label in labels]
+        legend.extend(
+            legend_marker(label, colors[label]) for label in sorted(set(labels))
+        )
+    return marker, legend
+
+
+def channel_overlays(
+    session: Session,
+    channel: str,
+    record: PropagationRecord | None,
+    progress: int,
+    overlays,
+) -> list:
+    """The traces drawn over a channel's nodes: glyphs, propagation, goal target.
+
+    Returns:
+        The traces.
+    """
+    graph = session.graphs[channel]
+    traces = []
+    if "glyphs" in overlays:
+        length = 0.004
+        traces.append(
+            line_trace(
+                graph.pos,
+                graph.pos + length * graph.normals,
+                GLYPH_COLOR,
+                1.5,
+                "normals",
+            )
+        )
+    if record is not None and progress:
+        traces.extend(
+            propagation_overlays(session, channel, record, progress, overlays)
+        )
+    if session.goal is not None and session.goal[0] == channel:
+        traces.append(
+            marker_trace(
+                graph.pos,
+                [session.goal[1]],
+                "goal target",
+                "diamond-open",
+                GOAL_COLOR,
+                14,
+                {"width": 4, "color": GOAL_COLOR},
+            )
+        )
+    return traces
+
+
+def ghost_traces(session: Session, channel: str) -> list:
+    """Faint traces of the nodes of every channel but the displayed one.
+
+    Returns:
+        The traces.
+    """
+    return [
+        go.Scatter3d(
+            x=other_graph.pos[:, 0],
+            y=other_graph.pos[:, 1],
+            z=other_graph.pos[:, 2],
+            mode="markers",
+            marker={"size": 2, "color": "#999999", "opacity": 0.3},
+            hoverinfo="skip",
+            name=f"{other} (other channel)",
+            showlegend=True,
+        )
+        for other, other_graph in session.graphs.items()
+        if other != channel
+    ]
+
+
+def without_duplicate_legends(traces: list) -> list:
+    """Show each legend entry once, when several channels draw the same overlay.
+
+    Returns:
+        The traces, with all but the first of each legend name hidden from the
+        legend.
+    """
+    seen = set()
+    for trace in traces:
+        if trace.showlegend:
+            if trace.name in seen:
+                trace.showlegend = False
+            seen.add(trace.name)
+    return traces
+
+
 def build_figure(
     session: Session,
     channel: str,
@@ -329,12 +522,16 @@ def build_figure(
     camera: dict | None = None,
     emphasize_low: bool = False,
 ) -> go.Figure:
-    """Build the 3D figure of a channel's graph.
+    """Build the 3D figure of a channel's graph, or of all of them superimposed.
+
+    The first traces are the nodes of the displayed channels, one trace per
+    channel in the order of `displayed_channels` (see `event_node`).
 
     Args:
         session: The session.
-        channel: The channel whose graph to show.
-        progress: How many nodes of the last propagation to show as reached.
+        channel: The channel whose graph to show, or ALL_CHANNELS.
+        progress: How many nodes of the last propagation to show as reached (on
+            each channel, when they are superimposed).
         color_mode: One of COLOR_MODES.
         overlays: The keys of OVERLAYS to draw.
         camera: The view the user orbited to (as plotly reports it in
@@ -345,102 +542,54 @@ def build_figure(
     Returns:
         The figure.
     """
-    graph = session.graphs[channel]
-    pos = graph.pos
-    num_nodes = len(pos)
-    is_id = session.is_id_channel(channel)
-    labels = session.condition.labels[channel]
-    record = None
-    if session.sensing is not None:
-        record = session.sensing.records.get(channel)
-    progress = 0 if record is None else min(progress, len(record.node_order))
-    reached_nodes = (
-        record.node_order[:progress] if record is not None else np.empty(0, int)
-    )
-    reached = np.zeros(num_nodes, dtype=bool)
-    reached[reached_nodes] = True
-
-    marker: dict = {"size": marker_size(num_nodes), "line": {"width": 0}}
-    traces = []
-    if color_mode == "Propagation":
-        colors = np.full(num_nodes, UNREACHED_COLOR, dtype=object)
-        if record is not None and progress:
-            colors[reached_nodes] = stage_colors(record, progress)
-        marker["color"] = colors.tolist()
-        traces.append(legend_marker("reached: hops from seeds (dark→light)", "#3b528b"))
-        traces.append(legend_marker("pushed through: hops from frontier", "#fd8d3c"))
-    elif color_mode == "Hue" and "hsv" in graph.feature_mapping:
-        hsv = np.clip(graph.feature("hsv"), 0, 1)
-        marker["color"] = [mcolors.to_hex(c) for c in mcolors.hsv_to_rgb(hsv)]
-    elif color_mode == "Normals":
-        rgb = (graph.normals + 1) / 2
-        marker["color"] = [mcolors.to_hex(c) for c in rgb]
-    elif color_mode == "Salience":
-        salience = session.salience(channel, progress if record else None)
-        marker.update(salience_marker(salience, emphasize_low))
-    elif color_mode == "Object ID" and is_id:
-        names = [session.id_name(i) for i in graph.feature("object_id")[:, 0]]
-        colors = color_table(names, ID_COLORS)
-        marker["color"] = [colors[name] for name in names]
-        traces.extend(legend_marker(name, color) for name, color in colors.items())
-    else:  # Region, or a mode the channel has no features for.
-        colors = color_table(labels, REGION_COLORS)
-        marker["color"] = [colors[label] for label in labels]
-        traces.extend(legend_marker(label, color) for label, color in colors.items())
-
-    traces.insert(
-        0,
-        go.Scatter3d(
-            x=pos[:, 0],
-            y=pos[:, 1],
-            z=pos[:, 2],
-            mode="markers",
-            marker=marker,
-            hovertext=hover_texts(session, channel, progress),
-            hoverinfo="text",
-            name="nodes",
-            showlegend=False,
+    channels = displayed_channels(session, channel)
+    superimposed = channel == ALL_CHANNELS
+    id_names = [
+        session.id_name(object_id)
+        for shown in channels
+        if session.is_id_channel(shown)
+        for object_id in session.graphs[shown].feature("object_id")[:, 0]
+    ]
+    tables = {
+        "Object ID": color_table(id_names, ID_COLORS),
+        "Region": color_table(
+            [label for shown in channels for label in session.condition.labels[shown]],
+            REGION_COLORS,
         ),
-    )
-
-    if "ghost" in overlays:
-        for other, other_graph in session.graphs.items():
-            if other != channel:
-                traces.append(
-                    go.Scatter3d(
-                        x=other_graph.pos[:, 0],
-                        y=other_graph.pos[:, 1],
-                        z=other_graph.pos[:, 2],
-                        mode="markers",
-                        marker={"size": 2, "color": "#999999", "opacity": 0.3},
-                        hoverinfo="skip",
-                        name=f"{other} (other channel)",
-                        showlegend=True,
-                    )
-                )
-    if "glyphs" in overlays:
-        length = 0.004
-        traces.append(
-            line_trace(pos, pos + length * graph.normals, GLYPH_COLOR, 1.5, "normals")
+    }
+    node_traces, traces = [], []
+    for index, shown in enumerate(channels):
+        pos = session.graphs[shown].pos
+        record = last_record(session, shown)
+        shown_progress = 0 if record is None else min(progress, len(record.node_order))
+        marker, legend = node_marker(
+            session, shown, shown_progress, color_mode, emphasize_low, tables
         )
-    if record is not None and progress:
-        traces.extend(
-            propagation_overlays(session, channel, record, progress, overlays)
-        )
-    if session.goal is not None and session.goal[0] == channel:
-        traces.append(
-            marker_trace(
-                pos,
-                [session.goal[1]],
-                "goal target",
-                "diamond-open",
-                GOAL_COLOR,
-                14,
-                {"width": 4, "color": GOAL_COLOR},
+        if superimposed:
+            marker["symbol"] = CHANNEL_SYMBOLS[index % len(CHANNEL_SYMBOLS)]
+            if index:
+                marker.pop("colorbar", None)
+        node_traces.append(
+            go.Scatter3d(
+                x=pos[:, 0],
+                y=pos[:, 1],
+                z=pos[:, 2],
+                mode="markers",
+                marker=marker,
+                hovertext=hover_texts(session, shown, shown_progress, superimposed),
+                hoverinfo="text",
+                name=f"{shown} nodes" if superimposed else "nodes",
+                showlegend=superimposed,
             )
         )
+        traces.extend(legend)
+        traces.extend(
+            channel_overlays(session, shown, record, shown_progress, overlays)
+        )
+        if "ghost" in overlays and not superimposed:
+            traces.extend(ghost_traces(session, shown))
 
-    figure = go.Figure(traces)
+    figure = go.Figure(node_traces + without_duplicate_legends(traces))
     axis = {"visible": False, "showbackground": False}
     figure.update_layout(
         scene={
@@ -553,6 +702,8 @@ def status_text(session: Session, channel: str, progress: int):
             "goal.",
             "#f0f0f0",
         )
+    if channel == ALL_CHANNELS:
+        return superimposed_status(session, progress)
     record = session.sensing.records.get(channel)
     if record is None:
         reason = session.sensing.no_propagation.get(channel, "unknown")
@@ -598,6 +749,28 @@ def status_text(session: Session, channel: str, progress: int):
         )
     )
     return parts, "#ffe9cc"
+
+
+def superimposed_status(session: Session, progress: int):
+    """The status bar with every channel superimposed: each one's progress.
+
+    Returns:
+        Dash children and a background color.
+    """
+    sensing = session.sensing
+    entries = []
+    for channel in session.channels:
+        record = sensing.records.get(channel)
+        if record is None:
+            entries.append(f"{channel}: no propagation")
+        else:
+            total = len(record.node_order)
+            entries.append(f"{channel}: {min(progress, total)} / {total}")
+    kind = "Goal" if sensing.goal_target is not None else "Sensing"
+    return (
+        [html.B(f"{kind}, all channels"), " · " + " · ".join(entries)],
+        "#e3f6e8" if sensing.goal_target is not None else "#e8f1fb",
+    )
 
 
 def summary_children(session: Session):
@@ -893,9 +1066,19 @@ def build_layout():
                                 "Displayed channel",
                                 dcc.Dropdown(
                                     id="channel",
-                                    options=condition.channels,
+                                    options=channel_options(SESSION),
                                     value=condition.channels[0],
                                     clearable=False,
+                                ),
+                            ),
+                            section(
+                                "Clicking a node",
+                                dcc.RadioItems(
+                                    id="click-mode",
+                                    options=CLICK_MODES,
+                                    value="sense",
+                                    inline=True,
+                                    labelStyle={"marginRight": "8px"},
                                 ),
                             ),
                             section(
@@ -1040,13 +1223,36 @@ def build_layout():
                                     ]
                                 ),
                                 html.Div(
+                                    id="goal-notice",
+                                    style={
+                                        "fontSize": "11px",
+                                        "color": "#b30000",
+                                        "marginTop": "4px",
+                                    },
+                                ),
+                                html.Div(
+                                    id="goal-choice",
+                                    style={"display": "none"},
+                                    children=dcc.Dropdown(
+                                        id="goal-channel",
+                                        options=[],
+                                        placeholder="take the goal from…",
+                                        style={"fontSize": "11px"},
+                                    ),
+                                ),
+                                html.Div(
                                     "Sample goal: a target sampled in proportion to "
                                     "salience (across all channels, the displayed "
                                     "one switching to the target's), whose "
                                     "hypothetical propagation raises the salience "
                                     "of its part of the target's channel to 1; not "
-                                    "an LM step. Go to goal: sense the target (one "
-                                    "LM step), reducing that salience.",
+                                    'an LM step. Or click a node with "Select it '
+                                    'as a goal" to take it as the target (not a '
+                                    "node with no salience). With all channels "
+                                    "displayed, choose which channel's model to "
+                                    "take it from when several have a node there. "
+                                    "Go to goal: sense the target (one LM step), "
+                                    "reducing that salience.",
                                     style={"fontSize": "11px", "color": "#666"},
                                 ),
                             ),
@@ -1146,26 +1352,100 @@ def build_layout():
 # ------------------------------------------------------------------- callbacks
 
 
-def event_node(event_data) -> int | None:
-    """Return the node index of a click/hover event on the nodes trace, if any.
+def event_node(event_data, channels: list[str]) -> tuple[str, int] | None:
+    """Return the channel and node of a click/hover event on a nodes trace, if any.
 
-    The nodes trace is always trace 0 and lists every node in order, so the
-    point number is the node index. (The trace's ``customdata`` cannot be used:
-    Dash looks it up client-side in the figure's data, where plotly.py >= 6 has
-    serialized the numpy array as a base64 blob rather than a list.)
+    The nodes traces are the first traces, one per displayed channel (see
+    `build_figure`), each listing every node of its channel in order, so the
+    curve number is the channel's index and the point number the node index.
+    (The trace's ``customdata`` cannot be used: Dash looks it up client-side in
+    the figure's data, where plotly.py >= 6 has serialized the numpy array as a
+    base64 blob rather than a list.)
 
     Args:
         event_data: The graph's ``clickData`` or ``hoverData``.
+        channels: The displayed channels (see `displayed_channels`).
 
     Returns:
-        The node index, or None if the event was not on a node.
+        The (channel, node), or None if the event was not on a node.
     """
     if not event_data or not event_data.get("points"):
         return None
     point = event_data["points"][0]
-    if point.get("curveNumber") != 0 or point.get("pointNumber") is None:
+    curve = point.get("curveNumber")
+    if curve is None or curve >= len(channels) or point.get("pointNumber") is None:
         return None
-    return int(point["pointNumber"])
+    return channels[curve], int(point["pointNumber"])
+
+
+def goal_choice_value(channel: str, node: int) -> str:
+    return json.dumps([channel, int(node)])
+
+
+def select_goal_at(
+    session: Session, displayed: str, channel: str, node: int
+) -> list[dict] | None:
+    """Select a clicked node as a goal's target, or offer the channels to take it from.
+
+    With every channel superimposed, a location several channels' graphs have a
+    node at could be the target of a goal from any of them, so the user chooses
+    which; otherwise the clicked node of the displayed channel is the target.
+
+    Args:
+        session: The session.
+        displayed: The displayed channel (or ALL_CHANNELS).
+        channel: The channel of the clicked node.
+        node: The clicked node.
+
+    Returns:
+        The options of the channels to choose from, or None if the goal was
+        selected (or refused) straight away.
+    """
+    candidates = session.goal_candidates(channel, node)
+    if displayed != ALL_CHANNELS or len(candidates) == 1:
+        session.select_goal(channel, node)
+        return None
+    if not session.goals_allowed():
+        return None
+    options = []
+    for candidate, candidate_node in candidates:
+        salience = float(session.salience(candidate)[candidate_node])
+        label = session.condition.labels[candidate][candidate_node]
+        options.append(
+            {
+                "label": f"{candidate}: node {candidate_node} ({label}), salience "
+                f"{salience:.2f}"
+                + (" - no salience, cannot be a goal" if salience <= 0 else ""),
+                "value": goal_choice_value(candidate, candidate_node),
+                "disabled": salience <= 0,
+            }
+        )
+    if all(option["disabled"] for option in options):
+        session.select_goal(channel, node)
+        return None
+    session.notice = (
+        "This location is in several channels' models: choose which to take the "
+        "goal from."
+    )
+    return options
+
+
+def progress_state(session: Session, channel: str) -> tuple[int, dict]:
+    """The slider's range over the displayed channels' last propagations.
+
+    Returns:
+        The number of nodes the slider steps through (the most of any displayed
+        channel), and its marks.
+    """
+    records = [
+        record
+        for shown in displayed_channels(session, channel)
+        if (record := last_record(session, shown)) is not None
+    ]
+    total = max((len(record.node_order) for record in records), default=0)
+    if channel != ALL_CHANNELS and records:
+        return total, slider_marks(records[0])
+    return total, {0: "0", total: str(total)} if total else {0: "0"}
 
 
 # The buttons whose action needs nothing but the session.
@@ -1188,6 +1468,8 @@ def handle_action(
     overrides: dict,
     progress,
     mlh_age=None,
+    click_mode="sense",
+    goal_choice=None,
 ) -> dict:
     """Apply a user action to the session, and work out what the UI must update.
 
@@ -1195,24 +1477,31 @@ def handle_action(
         session: The session.
         trigger: The ID of the component that triggered the action (None on load).
         condition_key: The selected condition.
-        channel: The displayed channel.
+        channel: The displayed channel (or ALL_CHANNELS).
         click_data: The graph's click data, if a node was clicked.
         landmark: The selected landmark, if one was.
         parameters: The goal generator's parameters, as entered.
         overrides: The sensed-feature overrides, as entered.
         progress: The slider's current value.
         mlh_age: The MLH age, as entered.
+        click_mode: What clicking a node does: "sense" its location, or select
+            it as a "goal".
+        goal_choice: The channel's node chosen to take a goal from (see
+            `goal_choice_value`), if one was.
 
     Returns:
         The new values of the UI's state: "channel", "condition" (the condition
         actually loaded, which differs from the selected one if loading it
         failed), "channel_options", "landmark_options", "id_options",
-        "description" (the latter four None if unchanged), "record" (the
-        displayed channel's propagation, if any), "total" (its number of nodes),
-        "progress" (the slider's new value, or None to keep it) and "mlh_age"
-        (the MLH's age after the action).
+        "description" (the latter four None if unchanged), "marks" (the slider's),
+        "total" (the number of nodes the slider steps through), "progress" (the
+        slider's new value, or None to keep it), "mlh_age" (the MLH's age after
+        the action), "goal_options" (the channels to choose a goal's target from,
+        or None) and "notice" (why no goal was generated, if one was not).
     """
-    channel_options = landmark_options = id_options_ = description = None
+    session.notice = None
+    goal_options = None
+    channel_options_ = landmark_options = id_options_ = description = None
     if trigger == "condition" and condition_key != session.condition.key:
         try:
             session.set_condition(condition_key)
@@ -1220,18 +1509,25 @@ def handle_action(
             session.log.append(f"Could not load {condition_key}: {error}")
         else:
             channel = session.channels[0]
-            channel_options = session.channels
+            channel_options_ = channel_options(session)
             landmark_options = list(session.condition.landmarks)
             id_options_ = id_options(session)
             description = session.condition.description
     elif trigger == "landmark" and landmark is not None:
         session.sense(session.condition.landmarks[landmark])
-    elif trigger == "graph" and (node := event_node(click_data)) is not None:
-        session.sense(session.graphs[channel].pos[node])
+    elif trigger == "graph" and (
+        hit := event_node(click_data, displayed_channels(session, channel))
+    ):
+        if click_mode == "goal":
+            goal_options = select_goal_at(session, channel, *hit)
+        else:
+            session.sense(session.graphs[hit[0]].pos[hit[1]])
+    elif trigger == "goal-channel" and goal_choice:
+        session.select_goal(*json.loads(goal_choice))
     elif trigger in BUTTON_ACTIONS:
         BUTTON_ACTIONS[trigger](session)
     elif trigger == "sample-goal-btn":
-        if session.sample_goal() is not None:
+        if session.sample_goal() is not None and channel != ALL_CHANNELS:
             channel = session.goal[0]
     elif isinstance(trigger, dict) and trigger.get("type") == "param":
         session.set_parameters(**parameters)
@@ -1239,12 +1535,9 @@ def handle_action(
         session.set_overrides(**overrides)
     elif trigger == "mlh-age" and mlh_age is not None:
         session.set_mlh_age(mlh_age)
-    if channel not in session.channels:
+    if channel not in session.channels and channel != ALL_CHANNELS:
         channel = session.channels[0]
-    record = None
-    if session.sensing is not None:
-        record = session.sensing.records.get(channel)
-    total = len(record.node_order) if record is not None else 0
+    total, marks = progress_state(session, channel)
     new_progress = None
     if trigger in (
         "graph",
@@ -1253,6 +1546,7 @@ def handle_action(
         "reset-btn",
         "sample-goal-btn",
         "go-to-goal-btn",
+        "goal-channel",
     ):
         new_progress = total
     elif trigger == "channel":
@@ -1260,14 +1554,16 @@ def handle_action(
     return {
         "channel": channel,
         "condition": session.condition.key,
-        "channel_options": channel_options,
+        "channel_options": channel_options_,
         "landmark_options": landmark_options,
         "id_options": id_options_,
         "description": description,
-        "record": record,
+        "marks": marks,
         "total": total,
         "progress": new_progress,
         "mlh_age": session.mlh_age,
+        "goal_options": goal_options,
+        "notice": session.notice,
     }
 
 
@@ -1292,6 +1588,10 @@ def register_callbacks(app: Dash) -> None:
         Output("play-btn", "children"),
         Output("camera", "data"),
         Output("mlh-age", "value"),
+        Output("goal-channel", "options"),
+        Output("goal-channel", "value"),
+        Output("goal-choice", "style"),
+        Output("goal-notice", "children"),
         Input("condition", "value"),
         Input("channel", "value"),
         Input("graph", "clickData"),
@@ -1306,8 +1606,10 @@ def register_callbacks(app: Dash) -> None:
         Input("override-tilt", "value"),
         Input("override-id", "value"),
         Input("mlh-age", "value"),
+        Input("goal-channel", "value"),
         State("version", "data"),
         State("progress", "value"),
+        State("click-mode", "value"),
     )
     def on_action(
         condition_key,
@@ -1324,8 +1626,10 @@ def register_callbacks(app: Dash) -> None:
         override_tilt,
         override_id,
         mlh_age,
+        goal_choice,
         version,
         progress,
+        click_mode,
     ):
         # The parameter inputs are the one pattern-matching input, i.e. a list.
         parameter_inputs = next(
@@ -1352,6 +1656,8 @@ def register_callbacks(app: Dash) -> None:
             overrides,
             progress,
             mlh_age,
+            click_mode,
+            goal_choice,
         )
 
         def updated(value):
@@ -1364,7 +1670,7 @@ def register_callbacks(app: Dash) -> None:
             version + 1,
             max(result["total"], 1),
             updated(result["progress"]),
-            slider_marks(result["record"]),
+            result["marks"],
             updated(result["channel_options"]),
             result["channel"],
             updated(result["landmark_options"]),
@@ -1380,6 +1686,12 @@ def register_callbacks(app: Dash) -> None:
             "▶ Play",
             None if reset_view else no_update,
             result["mlh_age"] if result["mlh_age"] != mlh_age else no_update,
+            result["goal_options"] or [],
+            None,
+            {"display": "block", "marginTop": "4px"}
+            if result["goal_options"]
+            else {"display": "none"},
+            result["notice"] or "",
         )
 
     @app.callback(
@@ -1442,7 +1754,7 @@ def register_callbacks(app: Dash) -> None:
     )
     def render(_version, progress, channel, color_mode, emphasis, overlays, camera):
         session = SESSION
-        if channel not in session.channels:
+        if channel not in session.channels and channel != ALL_CHANNELS:
             channel = session.channels[0]
         progress = int(progress or 0)
         figure = build_figure(
@@ -1478,12 +1790,14 @@ def register_callbacks(app: Dash) -> None:
     )
     def on_hover(hover_data, _version, channel):
         session = SESSION
-        if not hover_data or channel not in session.channels:
+        if not hover_data or (
+            channel not in session.channels and channel != ALL_CHANNELS
+        ):
             return "Hover over a node."
-        node = event_node(hover_data)
-        if node is None:
+        hit = event_node(hover_data, displayed_channels(session, channel))
+        if hit is None:
             return no_update
-        return details_children(session.node_details(channel, node))
+        return details_children(session.node_details(*hit))
 
 
 def create_app() -> Dash:
