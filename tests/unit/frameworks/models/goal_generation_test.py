@@ -864,7 +864,77 @@ class EvidenceGoalGeneratorTest(unittest.TestCase):
             channel, SENSOR_CHANNEL, "The sensed features explain the sensor graph."
         )
 
-    def test_first_goal_as_soon_as_the_mlh_is_a_known_object(self) -> None:
+    def test_first_goal_as_soon_as_the_mlh_has_survived_a_chance_of_deletion(
+        self,
+    ) -> None:
+        self.set_steps_since_goal(1)
+
+        self.trackers[TOP_ID] = slope_tracker(MIN_AGE)
+        self.assertFalse(
+            self.gsg._check_need_new_output_goal(
+                make_ctx(), output_goal_achieved=False
+            ),
+            "Eligible for deletion, but not yet considered.",
+        )
+
+        self.trackers[TOP_ID] = slope_tracker(MIN_AGE + 1)
+        self.assertTrue(
+            self.gsg._check_need_new_output_goal(make_ctx(), output_goal_achieved=False)
+        )
+
+    def test_no_goal_for_a_young_mlh_even_when_otherwise_triggered(self) -> None:
+        self.gsg._generate_goal(make_ctx(), [self.sensor_percept])
+        self.trackers[TOP_ID] = slope_tracker(0)
+
+        self.set_steps_since_goal(self.gsg.elapsed_steps_trigger)
+        self.assertFalse(
+            self.gsg._check_need_new_output_goal(
+                make_ctx(), output_goal_achieved=False
+            ),
+            "The step interval is met, but the MLH is too young.",
+        )
+
+        self.set_steps_since_goal(1)
+        self.mlh = self.mlh_at_node(
+            4, rotation=Rotation.from_euler("xyz", [0, 0, 90], degrees=True)
+        )
+        self.assertFalse(
+            self.gsg._check_need_new_output_goal(
+                make_ctx(), output_goal_achieved=False
+            ),
+            "The MLH changed, but to a hypothesis too young to test.",
+        )
+
+    def test_step_outputs_no_goal_while_the_mlh_is_young(self) -> None:
+        self.trackers[TOP_ID] = slope_tracker(MIN_AGE)
+
+        self.gsg.step(make_ctx(), [self.sensor_percept])
+
+        self.assertEqual(self.gsg.output_goals(), [])
+
+    def test_no_goal_if_mlh_age_is_not_tracked(self) -> None:
+        self.set_steps_since_goal(1)
+
+        self.mlh = {**self.mlh, "mlh_id": None}
+        self.assertFalse(
+            self.gsg._check_need_new_output_goal(
+                make_ctx(), output_goal_achieved=False
+            ),
+            "No MLH hypothesis yet.",
+        )
+
+        self.mlh = self.mlh_at_node(4)
+        del self.trackers[TOP_ID]
+        self.assertFalse(
+            self.gsg._check_need_new_output_goal(
+                make_ctx(), output_goal_achieved=False
+            ),
+            "No tracker for the MLH object.",
+        )
+
+    def test_first_goal_at_once_if_hypotheses_are_never_deleted(self) -> None:
+        # E.g. the DefaultHypothesesUpdater, which does not track ages.
+        self.gsg.parent_lm.hypotheses_updater = SimpleNamespace()
         self.set_steps_since_goal(1)
 
         self.assertTrue(

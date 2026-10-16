@@ -552,8 +552,9 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
     age reaches `min_age`), the MLH must have survived its first chance of being
     deleted, i.e. its age must exceed `min_age`. Until then, a newly sampled
     hypothesis that happens to have the most evidence does not reduce the salience
-    of its object (salience still recovers). With an updater that never deletes
-    hypotheses, input always propagates.
+    of its object (salience still recovers), nor is a Goal generated to test it.
+    With an updater that never deletes hypotheses, input always propagates, and
+    Goals are generated as soon as the MLH is a known object.
 
     The salience of the nodes is kept in a `ModelSalience` (`model_salience`),
     which documents how it recovers (over `salience_recovery_steps` steps, except
@@ -1385,9 +1386,12 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         """Determine whether the GSG should generate a new output Goal.
 
         Success in achieving the Goal is not an indication to need a new one, as
-        the sensor should explore the tested location for a while. A new Goal is
-        generated if the MLH (object or rotation) has changed since the last Goal,
-        or every elapsed_steps_trigger steps.
+        the sensor should explore the tested location for a while. No Goal is
+        generated until the MLH has survived its first chance of being deleted
+        (see `_mlh_survived_deletion`), as a newly sampled hypothesis is not yet
+        credible enough to be tested. After that, a new Goal is generated if the MLH
+        (object or rotation) has changed since the last Goal, or every
+        elapsed_steps_trigger steps.
 
         Returns:
             Whether the GSG should generate a new output Goal.
@@ -1395,7 +1399,15 @@ class EvidenceGoalGenerator(GraphGoalGenerator):
         if output_goal_achieved:
             return False
 
-        if self._get_mlh_graph_id() is None:
+        graph_id = self._get_mlh_graph_id()
+        if graph_id is None:
+            return False
+
+        if not self._mlh_survived_deletion(graph_id):
+            logger.debug(
+                f"MLH of {graph_id} has not yet survived its first chance of "
+                "deletion; no goal"
+            )
             return False
 
         if self._mlh_changed_since_last_goal():
